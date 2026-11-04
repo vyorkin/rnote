@@ -18,7 +18,7 @@ const MIN_EXTENT: f64 = 1.0;
 /// between the pen and the corner of its bounds opposite to it.
 ///
 /// The shape follows the movement of the pen since the recognition, so that it does not jump when the pen
-/// does not rest exactly on the part of the shape that follows it.
+/// does not rest exactly on the part of the shape that follows it. Only the end of a line is on the pen.
 #[derive(Debug, Clone)]
 pub(crate) struct ShapeAdjust {
     /// The shape as it was recognized.
@@ -100,9 +100,10 @@ impl ShapeAdjust {
         let offset = pen_pos - self.start_pos;
 
         match (&self.recognized, &self.kind) {
+            // The end of a line is always on the pen
             (Shape::Line(line), AdjustKind::LineEnd) => Shape::Line(Line {
                 start: line.start,
-                end: line.end + offset,
+                end: pen_pos,
             }),
             (Shape::Rectangle(rectangle), AdjustKind::RectangleCorner { corner_signs }) => {
                 let local_offset = rectangle.affine.inverse().transform_vector2(offset);
@@ -215,6 +216,25 @@ mod tests {
                 assert_eq!(adjusted.end, Vector2::new(160.0, 120.0));
             }
             other => panic!("expected line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn line_end_is_on_the_pen_even_if_it_rests_elsewhere() {
+        let line = Line {
+            start: Vector2::new(0.0, 0.0),
+            end: Vector2::new(100.0, 0.0),
+        };
+        let adjust = ShapeAdjust::new(Shape::Line(line), Vector2::new(100.0, 6.0));
+
+        for pen in [Vector2::new(100.0, 6.0), Vector2::new(103.0, 6.0)] {
+            match adjust.adjusted(pen) {
+                Shape::Line(adjusted) => {
+                    assert_eq!(adjusted.start, line.start);
+                    assert_eq!(adjusted.end, pen);
+                }
+                other => panic!("expected line, got {other:?}"),
+            }
         }
     }
 
