@@ -230,6 +230,12 @@ impl PenHolder {
             widget_flags |= wf;
         }
 
+        // A gesture can ask for a different pen, e.g. the circle lasso hands the selection to
+        // the selector. Do it after the pen handling the event has finished.
+        if let Some(new_style) = widget_flags.new_pen_style.take() {
+            widget_flags |= self.change_style(new_style, engine_view);
+        }
+
         // Report the current text input state.
         widget_flags.enable_text_input = Some(self.is_handling_text_input());
 

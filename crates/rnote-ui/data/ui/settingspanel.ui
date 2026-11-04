@@ -468,6 +468,149 @@ gets disabled.</property>
                     </child>
                   </object>
                 </child>
+                <!-- Gestures Group -->
+                <child>
+                  <object class="AdwPreferencesGroup">
+                    <property name="title" translatable="yes">Gestures</property>
+                    <child>
+                      <object class="AdwExpanderRow" id="gestures_scribbleerase_row">
+                        <property name="title" translatable="yes">Scribble to Erase</property>
+                        <property name="subtitle" translatable="yes">Scribble over pen ink to erase it. Typed text and highlighter ink are not erased</property>
+                        <property name="show-enable-switch">true</property>
+                        <child>
+                          <object class="AdwSpinRow" id="gestures_scribbleerase_min_turns_row">
+                            <property name="title" translatable="yes">Minimum Turns</property>
+                            <property name="tooltip-text" translatable="yes">How often the stroke has to turn back on itself. Raise it if handwriting gets erased</property>
+                            <property name="numeric">true</property>
+                            <property name="adjustment">
+                              <object class="GtkAdjustment">
+                                <property name="lower">1</property>
+                                <property name="upper">20</property>
+                                <property name="step-increment">1</property>
+                                <property name="page-increment">2</property>
+                                <property name="value">3</property>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwSpinRow" id="gestures_scribbleerase_min_turn_rate_row">
+                            <property name="title" translatable="yes">Minimum Speed (turns/s)</property>
+                            <property name="tooltip-text" translatable="yes">How many times per second the stroke has to turn back. Raise it if slowly going back and forth to mark or shade gets erased. 0 to ignore the speed</property>
+                            <property name="numeric">true</property>
+                            <property name="digits">1</property>
+                            <property name="adjustment">
+                              <object class="GtkAdjustment">
+                                <property name="lower">0</property>
+                                <property name="upper">20</property>
+                                <property name="step-increment">0.5</property>
+                                <property name="page-increment">2</property>
+                                <property name="value">3</property>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwSpinRow" id="gestures_scribbleerase_pass_height_row">
+                            <property name="title" translatable="yes">Turn Height (%)</property>
+                            <property name="tooltip-text" translatable="yes">How far the stroke has to run back for a turn to count, relative to the scribble's size. Raise it if handwriting gets erased</property>
+                            <property name="numeric">true</property>
+                            <property name="adjustment">
+                              <object class="GtkAdjustment">
+                                <property name="lower">5</property>
+                                <property name="upper">100</property>
+                                <property name="step-increment">5</property>
+                                <property name="page-increment">10</property>
+                                <property name="value">20</property>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwSpinRow" id="gestures_scribbleerase_pass_length_row">
+                            <property name="title" translatable="yes">Turn Length (px)</property>
+                            <property name="tooltip-text" translatable="yes">The shortest run back on screen that counts as a turn, so a shaky hand does not</property>
+                            <property name="numeric">true</property>
+                            <property name="adjustment">
+                              <object class="GtkAdjustment">
+                                <property name="lower">1</property>
+                                <property name="upper">100</property>
+                                <property name="step-increment">1</property>
+                                <property name="page-increment">5</property>
+                                <property name="value">8</property>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwSpinRow" id="gestures_scribbleerase_min_size_row">
+                            <property name="title" translatable="yes">Minimum Size (px)</property>
+                            <property name="tooltip-text" translatable="yes">How large on screen the scribble has to be. Smaller ones stay strokes</property>
+                            <property name="numeric">true</property>
+                            <property name="adjustment">
+                              <object class="GtkAdjustment">
+                                <property name="lower">5</property>
+                                <property name="upper">500</property>
+                                <property name="step-increment">5</property>
+                                <property name="page-increment">25</property>
+                                <property name="value">30</property>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwSpinRow" id="gestures_scribbleerase_min_length_row">
+                            <property name="title" translatable="yes">Length Ratio</property>
+                            <property name="tooltip-text" translatable="yes">How many times longer than its diagonal the stroke has to be</property>
+                            <property name="numeric">true</property>
+                            <property name="digits">1</property>
+                            <property name="adjustment">
+                              <object class="GtkAdjustment">
+                                <property name="lower">1</property>
+                                <property name="upper">20</property>
+                                <property name="step-increment">0.1</property>
+                                <property name="page-increment">1</property>
+                                <property name="value">2</property>
+                              </object>
+                            </property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="AdwButtonRow" id="gestures_scribbleerase_reset_row">
+                            <property name="title" translatable="yes">Reset to Defaults</property>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_shaperecognition_row">
+                        <property name="title" translatable="yes">Recognize Shapes</property>
+                        <property name="subtitle" translatable="yes">Hold the pen still at the end of a drawn stroke to replace it with the recognized geometric shape</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSpinRow" id="gestures_shaperecognition_delay_row">
+                        <property name="title" translatable="yes">Hold Duration</property>
+                        <property name="subtitle" translatable="yes">The duration in seconds the pen has to be held still to recognize the shape</property>
+                        <property name="numeric">true</property>
+                        <property name="digits">2</property>
+                        <property name="climb-rate">0.01</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_circle_lasso_row">
+                        <property name="title" translatable="yes">Circle to Lasso</property>
+                        <property name="subtitle" translatable="yes">Draw a closed loop around ink to select it and switch to the selector</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_multi_touch_undo_redo_row">
+                        <property name="title" translatable="yes">Two- and Three-Finger Double Tap</property>
+                        <property name="subtitle" translatable="yes">Double tap with two fingers to undo, with three fingers to redo</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
                 <!-- Button Shortcuts Group -->
                 <child>
                   <object class="AdwPreferencesGroup">

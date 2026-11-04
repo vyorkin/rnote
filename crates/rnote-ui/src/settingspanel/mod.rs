@@ -18,7 +18,9 @@ use gtk4::{
 };
 use num_traits::ToPrimitive;
 use rnote_compose::penevent::ShortcutKey;
+use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
 use rnote_engine::WidgetFlags;
+use rnote_engine::gestures::GestureConfig;
 use rnote_engine::document::Layout;
 use rnote_engine::document::background::PatternStyle;
 use rnote_engine::document::format::{self, Format, PredefinedFormat};
@@ -117,6 +119,30 @@ mod imp {
         pub(crate) doc_show_origin_indicator_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) background_pattern_invert_color_button: TemplateChild<Button>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_row: TemplateChild<adw::ExpanderRow>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_min_turns_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_min_turn_rate_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_pass_height_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_pass_length_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_min_size_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_min_length_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_scribbleerase_reset_row: TemplateChild<adw::ButtonRow>,
+        #[template_child]
+        pub(crate) gestures_shaperecognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) gestures_shaperecognition_delay_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_circle_lasso_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) gestures_multi_touch_undo_redo_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) penshortcut_stylus_button_primary_row: TemplateChild<RnPenShortcutRow>,
         #[template_child]
@@ -431,6 +457,7 @@ impl RnSettingsPanel {
         self.refresh_general_ui(appwindow);
         self.refresh_format_ui(appwindow);
         self.refresh_doc_ui(appwindow);
+        self.refresh_gestures_ui(appwindow);
         self.refresh_shortcuts_ui(appwindow);
         self.refresh_lock_ui(appwindow);
     }
@@ -571,6 +598,7 @@ impl RnSettingsPanel {
         self.setup_general(appwindow);
         self.setup_format(appwindow);
         self.setup_doc(appwindow);
+        self.setup_gestures(appwindow);
         self.setup_shortcuts(appwindow);
     }
 
@@ -1232,6 +1260,242 @@ impl RnSettingsPanel {
                     appwindow.handle_widget_flags(widget_flags, &canvas);
                 }
             ));
+    }
+
+    fn setup_gestures(&self, appwindow: &RnAppWindow) {
+        let imp = self.imp();
+
+        imp.gestures_scribbleerase_row
+            .connect_enable_expansion_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_erase_enabled = row.enables_expansion();
+                }
+            ));
+
+        imp.gestures_scribbleerase_min_turns_row.get().set_range(
+            ScribbleRecognitionOptions::MIN_REVERSALS_MIN as f64,
+            ScribbleRecognitionOptions::MIN_REVERSALS_MAX as f64,
+        );
+        imp.gestures_scribbleerase_min_turns_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_recognition_options
+                        .min_reversals = row.value().round() as u32;
+                }
+            ));
+
+        imp.gestures_scribbleerase_min_turn_rate_row.get().set_range(
+            ScribbleRecognitionOptions::MIN_TURN_RATE_MIN,
+            ScribbleRecognitionOptions::MIN_TURN_RATE_MAX,
+        );
+        imp.gestures_scribbleerase_min_turn_rate_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_recognition_options
+                        .min_turn_rate = row.value();
+                }
+            ));
+
+        imp.gestures_scribbleerase_pass_height_row.get().set_range(
+            ScribbleRecognitionOptions::REVERSAL_PROMINENCE_RATIO_MIN * 100.0,
+            ScribbleRecognitionOptions::REVERSAL_PROMINENCE_RATIO_MAX * 100.0,
+        );
+        imp.gestures_scribbleerase_pass_height_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_recognition_options
+                        .reversal_prominence_ratio = row.value() / 100.0;
+                }
+            ));
+
+        imp.gestures_scribbleerase_pass_length_row.get().set_range(
+            ScribbleRecognitionOptions::REVERSAL_MIN_PROMINENCE_SURFACE_MIN,
+            ScribbleRecognitionOptions::REVERSAL_MIN_PROMINENCE_SURFACE_MAX,
+        );
+        imp.gestures_scribbleerase_pass_length_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_recognition_options
+                        .reversal_min_prominence_surface = row.value();
+                }
+            ));
+
+        imp.gestures_scribbleerase_min_size_row.get().set_range(
+            ScribbleRecognitionOptions::MIN_EXTENT_SURFACE_MIN,
+            ScribbleRecognitionOptions::MIN_EXTENT_SURFACE_MAX,
+        );
+        imp.gestures_scribbleerase_min_size_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_recognition_options
+                        .min_extent_surface = row.value();
+                }
+            ));
+
+        imp.gestures_scribbleerase_min_length_row.get().set_range(
+            ScribbleRecognitionOptions::MIN_LENGTH_DIAG_RATIO_MIN,
+            ScribbleRecognitionOptions::MIN_LENGTH_DIAG_RATIO_MAX,
+        );
+        imp.gestures_scribbleerase_min_length_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_recognition_options
+                        .min_length_diag_ratio = row.value();
+                }
+            ));
+
+        imp.gestures_scribbleerase_reset_row
+            .connect_activated(clone!(
+                #[weak(rename_to=settingspanel)]
+                self,
+                #[weak]
+                appwindow,
+                move |_| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .scribble_recognition_options =
+                        ScribbleRecognitionOptions::default();
+                    settingspanel.refresh_gestures_ui(&appwindow);
+                }
+            ));
+
+        imp.gestures_shaperecognition_row
+            .connect_active_notify(clone!(
+                #[weak(rename_to=settingspanel)]
+                self,
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .shape_recognition_enabled = row.is_active();
+                    settingspanel
+                        .imp()
+                        .gestures_shaperecognition_delay_row
+                        .set_sensitive(row.is_active());
+                }
+            ));
+
+        imp.gestures_shaperecognition_delay_row.get().set_range(
+            GestureConfig::SHAPE_RECOGNITION_DELAY_MIN.as_secs_f64(),
+            GestureConfig::SHAPE_RECOGNITION_DELAY_MAX.as_secs_f64(),
+        );
+        imp.gestures_shaperecognition_delay_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .shape_recognition_delay =
+                        std::time::Duration::from_secs_f64(row.value());
+                }
+            ));
+
+        imp.gestures_circle_lasso_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .circle_lasso_enabled = row.is_active();
+                }
+            ));
+
+        imp.gestures_multi_touch_undo_redo_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .multi_touch_undo_redo_enabled = row.is_active();
+                }
+            ));
+    }
+
+    fn refresh_gestures_ui(&self, appwindow: &RnAppWindow) {
+        let imp = self.imp();
+        let gestures = appwindow.engine_config().read().gestures.clone();
+
+        imp.gestures_scribbleerase_row
+            .set_enable_expansion(gestures.scribble_erase_enabled);
+        imp.gestures_scribbleerase_min_turns_row.set_value(
+            gestures.scribble_recognition_options.min_reversals as f64,
+        );
+        imp.gestures_scribbleerase_min_turn_rate_row
+            .set_value(gestures.scribble_recognition_options.min_turn_rate);
+        imp.gestures_scribbleerase_pass_height_row
+            .set_value(gestures.scribble_recognition_options.reversal_prominence_ratio * 100.0);
+        imp.gestures_scribbleerase_pass_length_row
+            .set_value(gestures.scribble_recognition_options.reversal_min_prominence_surface);
+        imp.gestures_scribbleerase_min_size_row
+            .set_value(gestures.scribble_recognition_options.min_extent_surface);
+        imp.gestures_scribbleerase_min_length_row
+            .set_value(gestures.scribble_recognition_options.min_length_diag_ratio);
+        imp.gestures_shaperecognition_row
+            .set_active(gestures.shape_recognition_enabled);
+        imp.gestures_shaperecognition_delay_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_shaperecognition_delay_row
+            .set_value(gestures.shape_recognition_delay.as_secs_f64());
+        imp.gestures_circle_lasso_row
+            .set_active(gestures.circle_lasso_enabled);
+        imp.gestures_multi_touch_undo_redo_row
+            .set_active(gestures.multi_touch_undo_redo_enabled);
     }
 
     fn setup_shortcuts(&self, appwindow: &RnAppWindow) {

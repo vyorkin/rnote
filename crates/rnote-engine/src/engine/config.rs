@@ -1,5 +1,6 @@
 // Imports
 use super::{ExportPrefs, ImportPrefs};
+use crate::gestures::GestureConfig;
 use crate::pens::PensConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -10,6 +11,8 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub struct EngineConfig {
     #[serde(rename = "pens_config")]
     pub pens_config: PensConfig,
+    #[serde(rename = "gestures")]
+    pub gestures: GestureConfig,
     #[serde(rename = "import_prefs")]
     pub import_prefs: ImportPrefs,
     #[serde(rename = "export_prefs")]
@@ -51,6 +54,7 @@ impl EngineConfigShared {
     pub fn load_values(&self, config: EngineConfig) {
         let mut write = self.write();
         write.pens_config = config.pens_config;
+        write.gestures = config.gestures;
         write.import_prefs = config.import_prefs;
         write.export_prefs = config.export_prefs;
         write.pen_sounds = config.pen_sounds;

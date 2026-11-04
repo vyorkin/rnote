@@ -4,12 +4,10 @@ use crate::store::chrono_comp::StrokeLayer;
 use rand::{RngExt, SeedableRng};
 use rnote_compose::Style;
 use rnote_compose::builders::PenPathBuilderType;
-use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
 use rnote_compose::style::PressureCurve;
 use rnote_compose::style::smooth::{LineCap, SmoothOptions};
 use rnote_compose::style::textured::TexturedOptions;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(
     Debug,
@@ -113,20 +111,6 @@ pub struct BrushConfig {
     pub solid_options: SolidOptions,
     #[serde(rename = "textured_options")]
     pub textured_options: TexturedOptions,
-    /// Whether drawn strokes that resemble geometric shapes
-    /// are automatically replaced with the recognized shape.
-    #[serde(rename = "shape_recognition_enabled")]
-    pub shape_recognition_enabled: bool,
-    /// The duration the pen has to be held still at the end of a stroke
-    /// to trigger recognizing it as a shape.
-    #[serde(rename = "shape_recognition_delay")]
-    pub shape_recognition_delay: Duration,
-    /// Whether scribbling over strokes erases them.
-    #[serde(rename = "scribble_erase_enabled")]
-    pub scribble_erase_enabled: bool,
-    /// The thresholds a stroke has to pass to be recognized as a scribble.
-    #[serde(rename = "scribble_recognition_options")]
-    pub scribble_recognition_options: ScribbleRecognitionOptions,
     #[serde(rename = "ruler_config")]
     pub ruler_config: RulerConfig,
 }
@@ -139,10 +123,6 @@ impl Default for BrushConfig {
             marker_options: MarkerOptions::default(),
             solid_options: SolidOptions::default(),
             textured_options: TexturedOptions::default(),
-            shape_recognition_enabled: true,
-            shape_recognition_delay: Self::SHAPE_RECOGNITION_DELAY_DEFAULT,
-            scribble_erase_enabled: false,
-            scribble_recognition_options: ScribbleRecognitionOptions::default(),
             ruler_config: RulerConfig::default(),
         }
     }
@@ -151,9 +131,6 @@ impl Default for BrushConfig {
 impl BrushConfig {
     pub const STROKE_WIDTH_MIN: f64 = 0.1;
     pub const STROKE_WIDTH_MAX: f64 = 500.0;
-    pub const SHAPE_RECOGNITION_DELAY_MIN: Duration = Duration::from_millis(100);
-    pub const SHAPE_RECOGNITION_DELAY_MAX: Duration = Duration::from_millis(2000);
-    pub const SHAPE_RECOGNITION_DELAY_DEFAULT: Duration = Duration::from_millis(200);
 
     pub(crate) fn layer_for_current_options(&self) -> StrokeLayer {
         match &self.style {

@@ -64,6 +64,39 @@ fn touch_midpoint_of(gesture: &GestureZoom) -> Option<Vector2> {
     })
 }
 
+/// A two- or three-finger tap tracked for double-tap undo/redo.
+#[derive(Debug)]
+struct MultiTouchTapState {
+    begin: Instant,
+    last_points: Vec<Vector2>,
+    max_touches: usize,
+    moved: bool,
+}
+
+impl MultiTouchTapState {
+    fn new(points: Vec<Vector2>) -> Self {
+        Self {
+            begin: Instant::now(),
+            max_touches: points.len(),
+            last_points: points,
+            moved: false,
+        }
+    }
+}
+
+/// A completed multi-finger tap, waiting for its partner.
+#[derive(Debug, Clone, Copy)]
+struct MultiTouchTap {
+    at: Instant,
+    touches: usize,
+}
+
+const MULTI_TOUCH_TAP_MAX_DURATION: std::time::Duration =
+    std::time::Duration::from_millis(300);
+const MULTI_TOUCH_TAP_MAX_MOVEMENT: f64 = 12.0;
+const MULTI_TOUCH_DOUBLE_TAP_MAX_GAP: std::time::Duration =
+    std::time::Duration::from_millis(450);
+
 /// How long after the last scroll event a session stays "active" (= the pivot
 /// is held). Beyond this, the next scroll begins a fresh session.
 const RULER_SCROLL_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
@@ -918,6 +951,10 @@ mod imp {
                 // the two-finger gesture is manipulating the ruler (pan + rotate around
                 // the centroid) instead of zooming the canvas.
                 let ruler_drag: Rc<Cell<Option<RulerDragBegin>>> = Rc::new(Cell::new(None));
+                let multi_touch_tap: Rc<RefCell<Option<MultiTouchTapState>>> =
+                    Rc::new(RefCell::new(None));
+                let last_multi_touch_tap: Rc<Cell<Option<MultiTouchTap>>> =
+                    Rc::new(Cell::new(None));
 
                 self.canvas_zoom_gesture.connect_begin(clone!(
                     #[strong]
@@ -932,6 +969,8 @@ mod imp {
                     offset_begin,
                     #[strong]
                     ruler_drag,
+                    #[strong]
+                    multi_touch_tap,
                     #[weak(rename_to=canvaswrapper)]
                     obj,
                     move |gesture, _| {
@@ -1030,6 +1069,9 @@ mod imp {
                                 }));
                             }
                         }
+
+                        *multi_touch_tap.borrow_mut() = from_touchscreen
+                            .then(|| MultiTouchTapState::new(touch_points_of(gesture)));
                     }
                 ));
 
@@ -1046,10 +1088,18 @@ mod imp {
                     offset_begin,
                     #[strong]
                     ruler_drag,
+                    #[strong]
+                    multi_touch_tap,
                     #[weak(rename_to=canvaswrapper)]
                     obj,
                     move |gesture, scale| {
                         let canvas = canvaswrapper.canvas();
+
+                        if (scale - 1.0).abs() > 0.01
+                            && let Some(tap) = multi_touch_tap.borrow_mut().as_mut()
+                        {
+                            tap.moved = true;
+                        }
 
                         // A two-finger gesture that began on the ruler moves the ruler, not the
                         // canvas: that is done on every update, below.
@@ -1095,9 +1145,27 @@ mod imp {
                 self.canvas_zoom_gesture.connect_update(clone!(
                     #[strong]
                     ruler_drag,
+                    #[strong]
+                    multi_touch_tap,
                     #[weak(rename_to=canvaswrapper)]
                     obj,
-                    move |_gesture, _event_sequence| {
+                    move |gesture, _event_sequence| {
+                        let points = touch_points_of(gesture);
+                        if let Some(tap) = multi_touch_tap.borrow_mut().as_mut() {
+                            tap.max_touches = tap.max_touches.max(points.len());
+                            if points.len() == tap.last_points.len()
+                                && points.iter().zip(tap.last_points.iter()).any(
+                                    |(current, previous)| {
+                                        (*current - *previous).length()
+                                            > MULTI_TOUCH_TAP_MAX_MOVEMENT
+                                    },
+                                )
+                            {
+                                tap.moved = true;
+                            }
+                            tap.last_points = points;
+                        }
+
                         if ruler_drag.get().is_none() {
                             return;
                         }
@@ -1108,6 +1176,10 @@ mod imp {
                 self.canvas_zoom_gesture.connect_end(clone!(
                     #[strong]
                     ruler_drag,
+                    #[strong]
+                    multi_touch_tap,
+                    #[strong]
+                    last_multi_touch_tap,
                     #[weak(rename_to=canvaswrapper)]
                     obj,
                     move |gesture, _event_sequence| {
@@ -1118,12 +1190,65 @@ mod imp {
                         );
                         // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/187
                         canvaswrapper.imp().workaround_restore_kinetic_scrolling();
+
+                        let tap = multi_touch_tap.borrow_mut().take();
+                        let is_tap = tap
+                            .as_ref()
+                            .map(|tap| {
+                                !tap.moved
+                                    && ruler_drag.get().is_none()
+                                    && tap.begin.elapsed() <= MULTI_TOUCH_TAP_MAX_DURATION
+                                    && (2..=3).contains(&tap.max_touches)
+                            })
+                            .unwrap_or(false);
+                        let mut double_tap_touches = None;
+                        if is_tap {
+                            let tap = tap.as_ref().unwrap();
+                            let now = Instant::now();
+                            let previous = last_multi_touch_tap.get();
+                            if let Some(previous) = previous
+                                && previous.touches == tap.max_touches
+                                && now.duration_since(previous.at)
+                                    <= MULTI_TOUCH_DOUBLE_TAP_MAX_GAP
+                            {
+                                double_tap_touches = Some(tap.max_touches);
+                                last_multi_touch_tap.set(None);
+                            } else {
+                                last_multi_touch_tap.set(Some(MultiTouchTap {
+                                    at: now,
+                                    touches: tap.max_touches,
+                                }));
+                            }
+                        } else {
+                            last_multi_touch_tap.set(None);
+                        }
                         ruler_drag.set(None);
 
-                        let widget_flags = canvaswrapper
-                            .canvas()
-                            .engine_mut()
-                            .update_rendering_current_viewport();
+                        let widget_flags = if let Some(touches) = double_tap_touches
+                            && canvaswrapper
+                                .canvas()
+                                .engine_ref()
+                                .engine_config()
+                                .read()
+                                .gestures
+                                .multi_touch_undo_redo_enabled
+                        {
+                            let canvas = canvaswrapper.canvas();
+                            let mut engine = canvas.engine_mut();
+                            let now = Instant::now();
+                            let mut widget_flags = if touches == 2 {
+                                engine.undo(now)
+                            } else {
+                                engine.redo(now)
+                            };
+                            widget_flags |= engine.update_rendering_current_viewport();
+                            widget_flags
+                        } else {
+                            canvaswrapper
+                                .canvas()
+                                .engine_mut()
+                                .update_rendering_current_viewport()
+                        };
                         canvaswrapper
                             .canvas()
                             .emit_handle_widget_flags(widget_flags);
@@ -1133,6 +1258,10 @@ mod imp {
                 self.canvas_zoom_gesture.connect_cancel(clone!(
                     #[strong]
                     ruler_drag,
+                    #[strong]
+                    multi_touch_tap,
+                    #[strong]
+                    last_multi_touch_tap,
                     #[weak(rename_to=canvaswrapper)]
                     obj,
                     move |gesture, _event_sequence| {
@@ -1144,6 +1273,8 @@ mod imp {
                         // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/187
                         canvaswrapper.imp().workaround_restore_kinetic_scrolling();
                         ruler_drag.set(None);
+                        multi_touch_tap.borrow_mut().take();
+                        last_multi_touch_tap.set(None);
 
                         let widget_flags = canvaswrapper
                             .canvas()

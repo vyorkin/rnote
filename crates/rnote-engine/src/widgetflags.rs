@@ -27,6 +27,8 @@ pub struct WidgetFlags {
     /// Is Some(true) when the popup to set the number of unit markings of a coordinate system
     /// should be shown, Some(false) when it should be hidden.
     pub axis_ticks_popup: Option<bool>,
+    /// A pen style a gesture asks to switch to, handled by the pen holder.
+    pub new_pen_style: Option<crate::pens::PenStyle>,
 }
 
 impl Default for WidgetFlags {
@@ -44,6 +46,7 @@ impl Default for WidgetFlags {
             hide_redo: None,
             enable_text_input: None,
             axis_ticks_popup: None,
+            new_pen_style: None,
         }
     }
 }
@@ -78,6 +81,9 @@ impl std::ops::BitOrAssign for WidgetFlags {
         }
         if rhs.axis_ticks_popup.is_some() {
             self.axis_ticks_popup = rhs.axis_ticks_popup;
+        }
+        if rhs.new_pen_style.is_some() {
+            self.new_pen_style = rhs.new_pen_style;
         }
     }
 }

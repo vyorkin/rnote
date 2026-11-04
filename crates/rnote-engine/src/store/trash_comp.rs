@@ -234,6 +234,15 @@ impl StrokeStore {
                 let Some(stroke) = self.stroke_components.get(*k) else {
                     return false;
                 };
+                // Scribble-to-erase is a pen-tool gesture; it does not erase highlighter ink.
+                if self
+                    .chrono_components
+                    .get(*k)
+                    .map(|chrono_component| chrono_component.layer)
+                    == Some(StrokeLayer::Highlighter)
+                {
+                    return false;
+                }
                 match stroke.as_ref() {
                     Stroke::BrushStroke(_) | Stroke::ShapeStroke(_) => {}
                     // Ignore the same strokes the eraser ignores.
@@ -464,5 +473,20 @@ mod tests {
         assert_eq!(store.trashed(untouched), Some(false));
         // The scribble itself is left to the caller, which removes it.
         assert_eq!(store.trashed(scribble), Some(false));
+    }
+
+    #[test]
+    fn keeps_highlighter_strokes() {
+        let mut store = StrokeStore::default();
+        let highlighted = insert_line(&mut store, 100.0, 100.0, 200.0);
+        let scribble = insert_line(&mut store, 100.0, 120.0, 180.0);
+        let components = Arc::make_mut(&mut store.chrono_components);
+        Arc::make_mut(components.get_mut(highlighted).unwrap()).layer = StrokeLayer::Highlighter;
+        let viewport = Aabb::new(Vector2::new(-500.0, -500.0), Vector2::new(1000.0, 1000.0));
+
+        let (trashed, _, _) = store.trash_strokes_hit_by(scribble, viewport);
+
+        assert_eq!(trashed, 0);
+        assert_eq!(store.trashed(highlighted), Some(false));
     }
 }

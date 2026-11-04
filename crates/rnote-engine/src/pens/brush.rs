@@ -5,6 +5,7 @@ use super::pensconfig::brushconfig::BrushStyle;
 use super::pensconfig::rulerconfig::{RulerConfig, RulerTurn, RulerView};
 use super::shapeadjust::ShapeAdjust;
 use crate::engine::{EngineTask, EngineTaskSender, EngineView, EngineViewMut};
+use crate::gestures::circle_lasso;
 use crate::store::StrokeKey;
 use crate::strokes::BrushStroke;
 use crate::strokes::ShapeStroke;
@@ -25,7 +26,7 @@ use rnote_compose::penevent::{PenEvent, PenProgress};
 use rnote_compose::penpath::{Element, Segment};
 use rnote_compose::scribblerecognition;
 use rnote_compose::shaperecognition;
-use rnote_compose::shapes::Shape;
+use rnote_compose::shapes::{Shape, Shapeable};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
@@ -233,20 +234,11 @@ impl PenBehaviour for Brush {
 
                     self.hold_anchor = element.pos;
                     self.hold_begin = now;
-                    if engine_view
-                        .config
-                        .pens_config
-                        .brush_config
-                        .shape_recognition_enabled
-                    {
+                    if engine_view.config.gestures.shape_recognition_enabled {
                         reset_hold_task(
                             &mut self.hold_task_handle,
                             engine_view.tasks_tx.clone(),
-                            engine_view
-                                .config
-                                .pens_config
-                                .brush_config
-                                .shape_recognition_delay,
+                            engine_view.config.gestures.shape_recognition_delay,
                         );
                     } else {
                         self.hold_task_handle = None;
@@ -410,11 +402,7 @@ impl PenBehaviour for Brush {
             ) => {
                 // Track whether the pen is being held still,
                 // which after a timeout triggers recognizing the drawn stroke as a shape.
-                if engine_view
-                    .config
-                    .pens_config
-                    .brush_config
-                    .shape_recognition_enabled
+                if engine_view.config.gestures.shape_recognition_enabled
                     && let PenEvent::Down { element, .. } = &pen_event
                 {
                     let hold_radius =
@@ -425,11 +413,7 @@ impl PenBehaviour for Brush {
                         reset_hold_task(
                             &mut self.hold_task_handle,
                             engine_view.tasks_tx.clone(),
-                            engine_view
-                                .config
-                                .pens_config
-                                .brush_config
-                                .shape_recognition_delay,
+                            engine_view.config.gestures.shape_recognition_delay,
                         );
                     }
                 }
@@ -534,13 +518,27 @@ impl PenBehaviour for Brush {
                         engine_view
                             .store
                             .update_geometry_for_stroke(*current_stroke_key);
-                        let (erased, wf) = erase_with_scribble(
-                            *current_stroke_key,
-                            now.saturating_duration_since(*begin),
-                            engine_view,
-                        );
+                        let (gesture_handled, wf) =
+                            if engine_view.config.gestures.circle_lasso_enabled
+                                && engine_view.config.pens_config.brush_config.style
+                                    != BrushStyle::Marker
+                            {
+                                try_circle_lasso(*current_stroke_key, engine_view)
+                            } else {
+                                (false, WidgetFlags::default())
+                            };
+                        let (gesture_handled, wf) = if gesture_handled {
+                            (true, wf)
+                        } else {
+                            let (erased, wf) = erase_with_scribble(
+                                *current_stroke_key,
+                                now.saturating_duration_since(*begin),
+                                engine_view,
+                            );
+                            (erased, wf)
+                        };
                         widget_flags |= wf;
-                        if !erased {
+                        if !gesture_handled {
                             engine_view.store.regenerate_rendering_for_stroke_threaded(
                                 engine_view.tasks_tx.clone(),
                                 *current_stroke_key,
@@ -694,12 +692,7 @@ impl Brush {
     ) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
 
-        if !engine_view
-            .config
-            .pens_config
-            .brush_config
-            .shape_recognition_enabled
-        {
+        if !engine_view.config.gestures.shape_recognition_enabled {
             return widget_flags;
         }
         let BrushState::Drawing {
@@ -717,11 +710,7 @@ impl Brush {
         }
         // Guard against the timeout task and the pen resuming movement racing each other:
         // only recognize when the pen actually rested at the hold anchor for the entire hold duration.
-        let hold_duration = engine_view
-            .config
-            .pens_config
-            .brush_config
-            .shape_recognition_delay;
+        let hold_duration = engine_view.config.gestures.shape_recognition_delay;
         if self.hold_begin.elapsed() < hold_duration.mul_f64(0.9) {
             return widget_flags;
         }
@@ -877,6 +866,65 @@ fn reset_hold_task(
     *handle = Some(OneOffTaskHandle::new(hold_task, hold_duration));
 }
 
+/// Select the strokes a finished closed loop was drawn around and hand them to the selector.
+///
+/// The loop itself is removed, so the selection is all that is left of the gesture. A loop around
+/// nothing stays the stroke it is, for drawing circles on the page.
+fn try_circle_lasso(
+    stroke_key: StrokeKey,
+    engine_view: &mut EngineViewMut,
+) -> (bool, WidgetFlags) {
+    let mut widget_flags = WidgetFlags::default();
+
+    let Some(Stroke::BrushStroke(brushstroke)) = engine_view.store.get_stroke_ref(stroke_key)
+    else {
+        return (false, widget_flags);
+    };
+    let Some(ellipse) =
+        circle_lasso::recognize(&brushstroke.path, engine_view.camera.total_zoom())
+    else {
+        return (false, widget_flags);
+    };
+
+    let mut selected = engine_view
+        .store
+        .stroke_keys_as_rendered_intersecting_bounds(ellipse.bounds());
+    selected.retain(|key| {
+        *key != stroke_key
+            && engine_view
+                .store
+                .get_stroke_ref(*key)
+                .map(|stroke| {
+                    let bounds = stroke.bounds();
+                    [
+                        bounds.mins,
+                        Vector2::new(bounds.maxs.x, bounds.mins.y),
+                        bounds.maxs,
+                        Vector2::new(bounds.mins.x, bounds.maxs.y),
+                    ]
+                    .into_iter()
+                    .all(|point| circle_lasso::contains_point(&ellipse, point))
+                })
+                .unwrap_or(false)
+    });
+    if selected.is_empty() {
+        return (false, widget_flags);
+    }
+
+    let previously_selected = engine_view.store.selection_keys_as_rendered();
+    engine_view.store.set_selected_keys(&previously_selected, false);
+    engine_view.store.set_selected_keys(&selected, true);
+    engine_view.store.remove_stroke(stroke_key);
+    widget_flags |= engine_view.store.record(Instant::now());
+
+    widget_flags.store_modified = true;
+    widget_flags.redraw = true;
+    widget_flags.refresh_ui = true;
+    widget_flags.new_pen_style = Some(super::PenStyle::Selector);
+
+    (true, widget_flags)
+}
+
 /// Erase the strokes a finished stroke was scribbled over.
 ///
 /// When the stroke is the gesture of scratching something out and it actually went over strokes,
@@ -891,11 +939,8 @@ fn erase_with_scribble(
 ) -> (bool, WidgetFlags) {
     let mut widget_flags = WidgetFlags::default();
 
-    if !engine_view
-        .config
-        .pens_config
-        .brush_config
-        .scribble_erase_enabled
+    if !engine_view.config.gestures.scribble_erase_enabled
+        || engine_view.config.pens_config.brush_config.style == BrushStyle::Marker
     {
         return (false, widget_flags);
     }
@@ -904,11 +949,7 @@ fn erase_with_scribble(
             &brushstroke.path,
             engine_view.camera.total_zoom(),
             duration,
-            &engine_view
-                .config
-                .pens_config
-                .brush_config
-                .scribble_recognition_options,
+            &engine_view.config.gestures.scribble_recognition_options,
         ),
         _ => false,
     };
