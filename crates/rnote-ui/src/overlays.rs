@@ -56,7 +56,6 @@ impl ToolbarDock {
             Self::Right => "right",
         }
     }
-
 }
 
 /// How close to an edge a dragged panel must be let go to dock there, in pixels.
@@ -386,7 +385,10 @@ impl RnOverlays {
     }
 
     fn position_in_overlay(&self, widget: &Widget) -> (f64, f64) {
-        let Some(root) = widget.root().and_then(|root| root.downcast::<gtk4::Window>().ok()) else {
+        let Some(root) = widget
+            .root()
+            .and_then(|root| root.downcast::<gtk4::Window>().ok())
+        else {
             return (0.0, 0.0);
         };
         let overlay = self.imp().toolbar_overlay.get();
@@ -930,9 +932,7 @@ mod tests {
         let overlays = RnOverlays::new();
         let imp = overlays.imp();
         let overlay: Widget = imp.toolbar_overlay.clone().upcast();
-        let dock = |dock: ToolbarDock| -> Widget {
-            overlays.dock_slot(dock).unwrap().upcast()
-        };
+        let dock = |dock: ToolbarDock| -> Widget { overlays.dock_slot(dock).unwrap().upcast() };
 
         // Every panel starts floating in the overlay, and its handle is shown.
         for panel in PANELS {
@@ -941,7 +941,10 @@ mod tests {
         }
 
         overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Left);
-        assert_eq!(panel_parent(&overlays, ToolbarPanel::PenPicker), dock(ToolbarDock::Left));
+        assert_eq!(
+            panel_parent(&overlays, ToolbarPanel::PenPicker),
+            dock(ToolbarDock::Left)
+        );
         assert!(overlays.dock_slot(ToolbarDock::Left).unwrap().is_visible());
 
         overlays.set_panel_dock(ToolbarPanel::ColorPicker, ToolbarDock::Bottom);

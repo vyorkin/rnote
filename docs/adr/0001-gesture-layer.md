@@ -2,12 +2,13 @@
 
 ## Status
 
-accepted (first implementation, 2026-11-04)
+accepted (2026-11-04), partially implemented
 
-The first implementation keeps the recognizers in `Brush` and `PenHolder`
-instead of introducing the `GestureManager`/`GesturePen` indirection. The
-decisions below still describe the target shape; the manager and the transaction
-wrapper are a follow-up refactor once a second pen gesture needs shared state.
+The first implementation keeps the recognizers in `rnote-engine/gestures` and
+calls them from `Brush` and `PenHolder`, instead of introducing the
+`GestureManager`/`GesturePen` indirection. The decisions below still describe
+the target shape; the manager and the transaction wrapper are a follow-up
+refactor once a second pen gesture needs shared state.
 
 ## Context
 

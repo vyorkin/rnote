@@ -162,56 +162,15 @@ impl RnBrushPage {
             .style = brush_style;
         self.stroke_width_picker().deselect_setters();
 
-        match brush_style {
-            BrushStyle::Marker => {
-                let stroke_width = appwindow
-                    .engine_config()
-                    .read()
-                    .pens_config
-                    .brush_config
-                    .marker_options
-                    .stroke_width;
-                self.imp()
-                    .stroke_width_picker
-                    .set_stroke_width(stroke_width);
-            }
-            BrushStyle::Solid => {
-                let stroke_width = appwindow
-                    .engine_config()
-                    .read()
-                    .pens_config
-                    .brush_config
-                    .solid_options
-                    .stroke_width;
-                self.imp()
-                    .stroke_width_picker
-                    .set_stroke_width(stroke_width);
-            }
-            BrushStyle::Textured => {
-                let stroke_width = appwindow
-                    .engine_config()
-                    .read()
-                    .pens_config
-                    .brush_config
-                    .textured_options
-                    .stroke_width;
-                self.imp()
-                    .stroke_width_picker
-                    .set_stroke_width(stroke_width);
-            }
-            BrushStyle::Fountain => {
-                let stroke_width = appwindow
-                    .engine_config()
-                    .read()
-                    .pens_config
-                    .brush_config
-                    .fountain_options
-                    .stroke_width;
-                self.imp()
-                    .stroke_width_picker
-                    .set_stroke_width(stroke_width);
-            }
-        }
+        let stroke_width = appwindow
+            .engine_config()
+            .read()
+            .pens_config
+            .brush_config
+            .stroke_width();
+        self.imp()
+            .stroke_width_picker
+            .set_stroke_width(stroke_width);
     }
 
     pub(crate) fn buildertype(&self) -> Option<PenPathBuilderType> {
@@ -745,24 +704,8 @@ impl RnBrushPage {
         self.set_brush_style(brush_config.style);
         self.set_buildertype(brush_config.builder_type);
 
-        match brush_config.style {
-            BrushStyle::Marker => {
-                imp.stroke_width_picker
-                    .set_stroke_width(brush_config.marker_options.stroke_width);
-            }
-            BrushStyle::Solid => {
-                imp.stroke_width_picker
-                    .set_stroke_width(brush_config.solid_options.stroke_width);
-            }
-            BrushStyle::Textured => {
-                imp.stroke_width_picker
-                    .set_stroke_width(brush_config.textured_options.stroke_width);
-            }
-            BrushStyle::Fountain => {
-                imp.stroke_width_picker
-                    .set_stroke_width(brush_config.fountain_options.stroke_width);
-            }
-        }
+        imp.stroke_width_picker
+            .set_stroke_width(brush_config.stroke_width());
 
         imp.ruler_toggle
             .set_active(brush_config.ruler_config.visible);

@@ -136,13 +136,11 @@ impl ShapeAdjust {
                     ..*quadratic
                 })
             }
-            (Shape::CubicBezier(cubic), AdjustKind::CubicBend) => {
-                Shape::CubicBezier(CubicBezier {
-                    cp1: cubic.cp1 + offset,
-                    cp2: cubic.cp2 + offset,
-                    ..*cubic
-                })
-            }
+            (Shape::CubicBezier(cubic), AdjustKind::CubicBend) => Shape::CubicBezier(CubicBezier {
+                cp1: cubic.cp1 + offset,
+                cp2: cubic.cp2 + offset,
+                ..*cubic
+            }),
             (
                 shape,
                 AdjustKind::ScaleFromPivot {
@@ -303,8 +301,10 @@ mod tests {
             cp: Vector2::new(150.0, 120.0),
             end: Vector2::new(200.0, 200.0),
         };
-        let adjust =
-            ShapeAdjust::new(Shape::QuadraticBezier(quadratic), Vector2::new(150.0, 120.0));
+        let adjust = ShapeAdjust::new(
+            Shape::QuadraticBezier(quadratic),
+            Vector2::new(150.0, 120.0),
+        );
 
         match adjust.adjusted(Vector2::new(140.0, 90.0)) {
             Shape::QuadraticBezier(adjusted) => {

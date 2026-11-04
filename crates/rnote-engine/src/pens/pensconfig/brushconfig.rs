@@ -154,8 +154,6 @@ impl std::ops::DerefMut for FountainOptions {
 impl FountainOptions {
     /// The pen speed (in surface units per second) at which the speed halves the stroke width.
     const SPEED_HALF_WIDTH: f64 = 700.0;
-    /// The relative width the tips of a tapered stroke narrow to.
-    pub(crate) const TIP_WIDTH_RATIO: f64 = 0.15;
     /// The narrowest width factor a point of a fountain stroke gets.
     const MIN_WIDTH_FACTOR: f64 = 0.05;
 
@@ -253,9 +251,16 @@ impl BrushConfig {
         }
     }
 
-    /// The style that recognized shapes are drawn with.
-    ///
-    /// Always a smooth style, because shapes can't be composed with a textured style.
+    /// The full width a stroke of the current brush style is drawn with.
+    pub fn stroke_width(&self) -> f64 {
+        match &self.style {
+            BrushStyle::Marker => self.marker_options.stroke_width,
+            BrushStyle::Solid => self.solid_options.stroke_width,
+            BrushStyle::Textured => self.textured_options.stroke_width,
+            BrushStyle::Fountain => self.fountain_options.smooth_options.stroke_width,
+        }
+    }
+
     /// The width a stroke of the current brush style is drawn with at the given pen pressure.
     ///
     /// This is what the stroke is made of: it is as wide as this at every point, for the pressure
@@ -285,6 +290,7 @@ impl BrushConfig {
 
     /// The style for a shape that replaces a stroke, with the given stroke width.
     ///
+    /// Always a smooth style, because shapes can't be composed with a textured style.
     /// A shape has one width all the way round. It is given the width the stroke it replaces had
     /// on average, which is what `stroke_width_for_pressure` gives for each point of it, so that
     /// the shape looks like the stroke did: as thick as the pen pressed it, and not as thick as
@@ -440,7 +446,10 @@ mod tests {
 
         let lightly = options.width_factor(0.2, 500.0);
         let hard = options.width_factor(1.0, 500.0);
-        assert!(hard > lightly, "hard {hard} is not thicker than light {lightly}");
+        assert!(
+            hard > lightly,
+            "hard {hard} is not thicker than light {lightly}"
+        );
 
         // A rested pen at full pressure draws the full width of the style.
         assert!((options.width_factor(1.0, 0.0) - 1.0).abs() < 1e-9);

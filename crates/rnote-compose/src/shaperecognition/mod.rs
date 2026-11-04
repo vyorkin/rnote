@@ -1,8 +1,6 @@
 // Imports
 use crate::penpath::PenPath;
-use crate::shapes::{
-    CubicBezier, Ellipse, Line, Polygon, QuadraticBezier, Rectangle, Shape,
-};
+use crate::shapes::{CubicBezier, Ellipse, Line, Polygon, QuadraticBezier, Rectangle, Shape};
 use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
@@ -376,6 +374,13 @@ struct Residuals {
     max: f64,
 }
 
+impl Residuals {
+    /// Whether the fit stays within the allowed mean and maximum deviation.
+    fn accepts(&self, max_mean: f64, max_max: f64) -> bool {
+        self.mean <= max_mean && self.max <= max_max
+    }
+}
+
 /// Recognize an open stroke as a quadratic or cubic curve.
 ///
 /// The endpoints of the fit are the endpoints of the stroke, so the curve keeps where the stroke
@@ -389,11 +394,7 @@ fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
         return None;
     }
 
-    let mut resampled = resample(points, N_RESAMPLE, false);
-    resampled.dedup_by(|a, b| (*a - *b).length() < f64::EPSILON);
-    if resampled.len() < MIN_INPUT_POINTS {
-        return None;
-    }
+    let resampled = resample(points, N_RESAMPLE, false);
     // A corner is a handwriting stroke and not a bend of a curve.
     if max_open_turn(&resampled) > CURVE_MAX_TURN {
         return None;
@@ -404,13 +405,11 @@ fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
     let max_max = (CURVE_MAX_RESIDUAL_CHORD_RATIO * chord).max(tolerance * 2.0);
 
     if let Some((quadratic, residuals)) = fit_quadratic(&resampled, start, end)
-        && residuals.mean <= max_mean
-        && residuals.max <= max_max
+        && residuals.accepts(max_mean, max_max)
     {
         if let Some((cubic, cubic_residuals)) = fit_cubic(&resampled, start, end)
             && cubic_residuals.mean < residuals.mean * CURVE_CUBIC_IMPROVEMENT
-            && cubic_residuals.mean <= max_mean
-            && cubic_residuals.max <= max_max
+            && cubic_residuals.accepts(max_mean, max_max)
         {
             return Some(Shape::CubicBezier(cubic));
         }
@@ -419,7 +418,9 @@ fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
     }
 
     let (cubic, residuals) = fit_cubic(&resampled, start, end)?;
-    (residuals.mean <= max_mean && residuals.max <= max_max).then_some(Shape::CubicBezier(cubic))
+    residuals
+        .accepts(max_mean, max_max)
+        .then_some(Shape::CubicBezier(cubic))
 }
 
 /// The largest turn angle along an open polyline, measured over [`TURN_WINDOW`] points.
@@ -485,11 +486,7 @@ fn fit_quadratic(
 }
 
 /// Fit a cubic bezier curve with fixed endpoints to the points.
-fn fit_cubic(
-    points: &[Vector2],
-    start: Vector2,
-    end: Vector2,
-) -> Option<(CubicBezier, Residuals)> {
+fn fit_cubic(points: &[Vector2], start: Vector2, end: Vector2) -> Option<(CubicBezier, Residuals)> {
     if points.len() < 3 {
         return None;
     }
@@ -549,9 +546,7 @@ fn fit_cubic(
 
 /// The parameters of the points, evenly spaced from 0 to 1.
 fn uniform_parameters(n: usize) -> Vec<f64> {
-    (0..n)
-        .map(|i| i as f64 / (n.max(2) - 1) as f64)
-        .collect()
+    (0..n).map(|i| i as f64 / (n.max(2) - 1) as f64).collect()
 }
 
 /// The point on a quadratic bezier curve at the given parameter.

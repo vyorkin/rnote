@@ -91,11 +91,9 @@ struct MultiTouchTap {
     touches: usize,
 }
 
-const MULTI_TOUCH_TAP_MAX_DURATION: std::time::Duration =
-    std::time::Duration::from_millis(300);
+const MULTI_TOUCH_TAP_MAX_DURATION: std::time::Duration = std::time::Duration::from_millis(300);
 const MULTI_TOUCH_TAP_MAX_MOVEMENT: f64 = 12.0;
-const MULTI_TOUCH_DOUBLE_TAP_MAX_GAP: std::time::Duration =
-    std::time::Duration::from_millis(450);
+const MULTI_TOUCH_DOUBLE_TAP_MAX_GAP: std::time::Duration = std::time::Duration::from_millis(450);
 
 /// How long after the last scroll event a session stays "active" (= the pivot
 /// is held). Beyond this, the next scroll begins a fresh session.
@@ -1208,8 +1206,7 @@ mod imp {
                             let previous = last_multi_touch_tap.get();
                             if let Some(previous) = previous
                                 && previous.touches == tap.max_touches
-                                && now.duration_since(previous.at)
-                                    <= MULTI_TOUCH_DOUBLE_TAP_MAX_GAP
+                                && now.duration_since(previous.at) <= MULTI_TOUCH_DOUBLE_TAP_MAX_GAP
                             {
                                 double_tap_touches = Some(tap.max_touches);
                                 last_multi_touch_tap.set(None);

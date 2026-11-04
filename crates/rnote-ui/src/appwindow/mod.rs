@@ -828,93 +828,65 @@ impl RnAppWindow {
                         .sidebar_stack()
                         .set_visible_child_name("brush_page");
 
-                    let style = self.engine_config().read().pens_config.brush_config.style;
-                    match style {
-                        BrushStyle::Marker => {
-                            let stroke_color = self
-                                .engine_config()
-                                .read()
-                                .pens_config
-                                .brush_config
-                                .marker_options
-                                .stroke_color
-                                .unwrap_or(Color::TRANSPARENT);
-                            let fill_color = self
-                                .engine_config()
-                                .read()
-                                .pens_config
-                                .brush_config
-                                .marker_options
-                                .fill_color
-                                .unwrap_or(Color::TRANSPARENT);
-                            self.overlays()
-                                .colorpicker()
-                                .set_stroke_color(gdk::RGBA::from_compose_color(stroke_color));
-                            self.overlays()
-                                .colorpicker()
-                                .set_fill_color(gdk::RGBA::from_compose_color(fill_color));
+                    // The colorpicker's notify handlers take the engine config
+                    // write lock, so the read guard must be dropped first.
+                    let (stroke_color, fill_color) = {
+                        let engine_config = self.engine_config();
+                        let engine_config = engine_config.read();
+                        let brush_config = &engine_config.pens_config.brush_config;
+                        match brush_config.style {
+                            BrushStyle::Marker => (
+                                brush_config
+                                    .marker_options
+                                    .stroke_color
+                                    .unwrap_or(Color::TRANSPARENT),
+                                Some(
+                                    brush_config
+                                        .marker_options
+                                        .fill_color
+                                        .unwrap_or(Color::TRANSPARENT),
+                                ),
+                            ),
+                            BrushStyle::Solid => (
+                                brush_config
+                                    .solid_options
+                                    .stroke_color
+                                    .unwrap_or(Color::TRANSPARENT),
+                                Some(
+                                    brush_config
+                                        .solid_options
+                                        .fill_color
+                                        .unwrap_or(Color::TRANSPARENT),
+                                ),
+                            ),
+                            BrushStyle::Textured => (
+                                brush_config
+                                    .textured_options
+                                    .stroke_color
+                                    .unwrap_or(Color::TRANSPARENT),
+                                None,
+                            ),
+                            BrushStyle::Fountain => (
+                                brush_config
+                                    .fountain_options
+                                    .stroke_color
+                                    .unwrap_or(Color::TRANSPARENT),
+                                Some(
+                                    brush_config
+                                        .fountain_options
+                                        .fill_color
+                                        .unwrap_or(Color::TRANSPARENT),
+                                ),
+                            ),
                         }
-                        BrushStyle::Solid => {
-                            let stroke_color = self
-                                .engine_config()
-                                .read()
-                                .pens_config
-                                .brush_config
-                                .solid_options
-                                .stroke_color
-                                .unwrap_or(Color::TRANSPARENT);
-                            let fill_color = self
-                                .engine_config()
-                                .read()
-                                .pens_config
-                                .brush_config
-                                .solid_options
-                                .fill_color
-                                .unwrap_or(Color::TRANSPARENT);
-                            self.overlays()
-                                .colorpicker()
-                                .set_stroke_color(gdk::RGBA::from_compose_color(stroke_color));
-                            self.overlays()
-                                .colorpicker()
-                                .set_fill_color(gdk::RGBA::from_compose_color(fill_color));
-                        }
-                        BrushStyle::Textured => {
-                            let stroke_color = self
-                                .engine_config()
-                                .read()
-                                .pens_config
-                                .brush_config
-                                .textured_options
-                                .stroke_color
-                                .unwrap_or(Color::TRANSPARENT);
-                            self.overlays()
-                                .colorpicker()
-                                .set_stroke_color(gdk::RGBA::from_compose_color(stroke_color));
-                        }
-                        BrushStyle::Fountain => {
-                            let stroke_color = self
-                                .engine_config()
-                                .read()
-                                .pens_config
-                                .brush_config
-                                .fountain_options
-                                .stroke_color
-                                .unwrap_or(Color::TRANSPARENT);
-                            let fill_color = self
-                                .engine_config()
-                                .read()
-                                .pens_config
-                                .brush_config
-                                .fountain_options
-                                .fill_color
-                                .unwrap_or(Color::TRANSPARENT);
-                            self.overlays()
-                                .colorpicker()
-                                .set_stroke_color(gdk::RGBA::from_compose_color(stroke_color));
-                            self.overlays()
-                                .colorpicker()
-                                .set_fill_color(gdk::RGBA::from_compose_color(fill_color));
-                        }
+                    };
+                    self.overlays()
+                        .colorpicker()
+                        .set_stroke_color(gdk::RGBA::from_compose_color(stroke_color));
+                    if let Some(fill_color) = fill_color {
+                        self.overlays()
+                            .colorpicker()
+                            .set_fill_color(gdk::RGBA::from_compose_color(fill_color));
                     }
                 }
                 PenStyle::Shaper => {

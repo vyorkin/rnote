@@ -233,7 +233,13 @@ impl PenHolder {
         // A gesture can ask for a different pen, e.g. the circle lasso hands the selection to
         // the selector. Do it after the pen handling the event has finished.
         if let Some(new_style) = widget_flags.new_pen_style.take() {
+            // Changing the style deselects, but a gesture asks for the selector because it has
+            // just made a selection: that selection has to survive, so it can be moved as a whole.
+            let selection = engine_view.store.selection_keys_as_rendered();
             widget_flags |= self.change_style(new_style, engine_view);
+            if !selection.is_empty() {
+                engine_view.store.set_selected_keys(&selection, true);
+            }
         }
 
         // Report the current text input state.
@@ -553,6 +559,71 @@ impl DrawableOnDoc for PenHolder {
 
         cx.restore().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Engine;
+    use rnote_compose::penpath::Element;
+    use std::collections::HashSet;
+
+    /// Draw a stroke through the points with the current pen.
+    fn draw(engine: &mut Engine, points: &[(f64, f64)], now: Instant) {
+        let element =
+            |(x, y): (f64, f64)| Element::new(Vector2::new(x, y), Element::PRESSURE_DEFAULT);
+        let (first, rest) = points.split_first().expect("two points");
+        let (last, middle) = rest.split_last().expect("two points");
+
+        let mut events = vec![PenEvent::Down {
+            element: element(*first),
+            modifier_keys: HashSet::new(),
+        }];
+        events.extend(middle.iter().map(|point| PenEvent::Down {
+            element: element(*point),
+            modifier_keys: HashSet::new(),
+        }));
+        events.push(PenEvent::Up {
+            element: element(*last),
+            modifier_keys: HashSet::new(),
+        });
+
+        // The path builder measures the time between points, so the events must not share a time.
+        for (i, event) in events.into_iter().enumerate() {
+            let _ =
+                engine.handle_pen_event(event, None, now + Duration::from_millis(16 * i as u64));
+        }
+    }
+
+    #[test]
+    fn a_circle_lasso_keeps_the_selection_it_made() {
+        let mut engine = Engine::default();
+        let _ = engine.change_pen_style(PenStyle::Brush);
+        let now = Instant::now();
+
+        // A stroke the loop goes around.
+        draw(&mut engine, &[(100.0, 100.0), (140.0, 100.0)], now);
+
+        let circle: Vec<(f64, f64)> = (0..=32)
+            .map(|i| {
+                let angle = i as f64 / 32.0 * std::f64::consts::TAU;
+                (120.0 + 60.0 * angle.cos(), 100.0 + 60.0 * angle.sin())
+            })
+            .collect();
+        draw(&mut engine, &circle, now);
+
+        // Handing over to the selector deselects, unless the selection the lasso just made survives.
+        assert_eq!(
+            engine.current_pen_style_w_override(),
+            PenStyle::Selector,
+            "the lasso hands the pen to the selector"
+        );
+        assert_eq!(
+            engine.store.selection_keys_as_rendered().len(),
+            1,
+            "the loop selects the stroke it went around"
+        );
     }
 }
 

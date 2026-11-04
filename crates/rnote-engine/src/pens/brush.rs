@@ -1,7 +1,7 @@
 // Imports
 use super::PenBehaviour;
 use super::PenStyle;
-use super::pensconfig::brushconfig::{BrushStyle, FountainOptions};
+use super::pensconfig::brushconfig::BrushStyle;
 use super::pensconfig::rulerconfig::{RulerConfig, RulerTurn, RulerView};
 use super::shapeadjust::ShapeAdjust;
 use crate::engine::{EngineTask, EngineTaskSender, EngineView, EngineViewMut};
@@ -361,15 +361,7 @@ impl PenBehaviour for Brush {
                 },
                 PenEvent::Cancel,
             ) => {
-                if let Some(Stroke::BrushStroke(brushstroke)) =
-                    engine_view.store.get_stroke_mut(*current_stroke_key)
-                {
-                    brushstroke.style = engine_view
-                        .config
-                        .pens_config
-                        .brush_config
-                        .style_for_current_options();
-                }
+                apply_stroke_style(engine_view, *current_stroke_key);
 
                 // Finish up the last stroke
                 engine_view
@@ -546,51 +538,28 @@ impl PenBehaviour for Brush {
                             );
                         }
 
-                        let taper_length = engine_view
-                            .config
-                            .pens_config
-                            .brush_config
-                            .fountain_options
-                            .taper_length;
-                        if engine_view.config.pens_config.brush_config.style == BrushStyle::Fountain
-                            && let Some(Stroke::BrushStroke(brushstroke)) =
-                                engine_view.store.get_stroke_mut(*current_stroke_key)
-                        {
-                            taper_fountain_stroke(&mut brushstroke.path, taper_length);
-                        }
-
-                        if let Some(Stroke::BrushStroke(brushstroke)) =
-                            engine_view.store.get_stroke_mut(*current_stroke_key)
-                        {
-                            brushstroke.style = engine_view
-                                .config
-                                .pens_config
-                                .brush_config
-                                .style_for_current_options();
-                        }
+                        apply_stroke_style(engine_view, *current_stroke_key);
 
                         // Finish up the last stroke
                         engine_view
                             .store
                             .update_geometry_for_stroke(*current_stroke_key);
-                        let (gesture_handled, wf) =
-                            if engine_view.config.gestures.circle_lasso_enabled
-                                && engine_view.config.pens_config.brush_config.style
-                                    != BrushStyle::Marker
-                            {
-                                try_circle_lasso(*current_stroke_key, engine_view)
-                            } else {
-                                (false, WidgetFlags::default())
-                            };
-                        let (gesture_handled, wf) = if gesture_handled {
-                            (true, wf)
+                        let lasso = if engine_view.config.gestures.circle_lasso_enabled
+                            && engine_view.config.pens_config.brush_config.style
+                                != BrushStyle::Marker
+                        {
+                            try_circle_lasso(*current_stroke_key, engine_view)
                         } else {
-                            let (erased, wf) = erase_with_scribble(
+                            (false, WidgetFlags::default())
+                        };
+                        let (gesture_handled, wf) = if lasso.0 {
+                            lasso
+                        } else {
+                            erase_with_scribble(
                                 *current_stroke_key,
                                 now.saturating_duration_since(*begin),
                                 engine_view,
-                            );
-                            (erased, wf)
+                            )
                         };
                         widget_flags |= wf;
                         if !gesture_handled {
@@ -945,18 +914,14 @@ fn reset_hold_task(
 ///
 /// The loop itself is removed, so the selection is all that is left of the gesture. A loop around
 /// nothing stays the stroke it is, for drawing circles on the page.
-fn try_circle_lasso(
-    stroke_key: StrokeKey,
-    engine_view: &mut EngineViewMut,
-) -> (bool, WidgetFlags) {
+fn try_circle_lasso(stroke_key: StrokeKey, engine_view: &mut EngineViewMut) -> (bool, WidgetFlags) {
     let mut widget_flags = WidgetFlags::default();
 
     let Some(Stroke::BrushStroke(brushstroke)) = engine_view.store.get_stroke_ref(stroke_key)
     else {
         return (false, widget_flags);
     };
-    let Some(ellipse) =
-        circle_lasso::recognize(&brushstroke.path, engine_view.camera.total_zoom())
+    let Some(ellipse) = circle_lasso::recognize(&brushstroke.path, engine_view.camera.total_zoom())
     else {
         return (false, widget_flags);
     };
@@ -987,7 +952,9 @@ fn try_circle_lasso(
     }
 
     let previously_selected = engine_view.store.selection_keys_as_rendered();
-    engine_view.store.set_selected_keys(&previously_selected, false);
+    engine_view
+        .store
+        .set_selected_keys(&previously_selected, false);
     engine_view.store.set_selected_keys(&selected, true);
     engine_view.store.remove_stroke(stroke_key);
     widget_flags |= engine_view.store.record(Instant::now());
@@ -1052,6 +1019,34 @@ fn erase_with_scribble(
     (true, widget_flags)
 }
 
+/// The relative width the tips of a tapered stroke narrow to.
+const TIP_WIDTH_RATIO: f64 = 0.15;
+
+/// Give a stroke the style the brush is set to, and taper the ends of a fountain stroke.
+///
+/// Every path that finishes a stroke uses this, so a stroke the pen abandons when it vanishes
+/// looks like one that was finished with a pen up.
+fn apply_stroke_style(engine_view: &mut EngineViewMut, stroke_key: StrokeKey) {
+    let (style, taper_length) = {
+        let brush_config = &engine_view.config.pens_config.brush_config;
+        (
+            brush_config.style,
+            brush_config.fountain_options.taper_length,
+        )
+    };
+
+    if let Some(Stroke::BrushStroke(brushstroke)) = engine_view.store.get_stroke_mut(stroke_key) {
+        if style == BrushStyle::Fountain {
+            taper_fountain_stroke(&mut brushstroke.path, taper_length);
+        }
+        brushstroke.style = engine_view
+            .config
+            .pens_config
+            .brush_config
+            .style_for_current_options();
+    }
+}
+
 /// Narrow both ends of a fountain stroke, so that it starts and ends with a tapered tip.
 ///
 /// The taper is measured along the stroke in document units, and shortens the width stored in the
@@ -1075,27 +1070,25 @@ fn taper_fountain_stroke(path: &mut PenPath, taper_length: f64) {
         return;
     }
 
-    let tip = FountainOptions::TIP_WIDTH_RATIO;
-
-    path.start.pressure *= taper_factor(0.0, total, taper, tip);
+    path.start.pressure *= taper_factor(0.0, total, taper);
     let mut distance = 0.0;
     let mut prev = path.start.pos;
     for segment in &mut path.segments {
         let end = segment.end_mut();
         distance += (end.pos - prev).length();
-        end.pressure *= taper_factor(distance, total, taper, tip);
+        end.pressure *= taper_factor(distance, total, taper);
         prev = end.pos;
     }
 }
 
 /// The factor of a tapered end at the given distance along the stroke.
-fn taper_factor(distance: f64, total: f64, taper: f64, tip: f64) -> f64 {
+fn taper_factor(distance: f64, total: f64, taper: f64) -> f64 {
     let from_start = (distance / taper).clamp(0.0, 1.0);
     let from_end = ((total - distance) / taper).clamp(0.0, 1.0);
     let ramp = from_start.min(from_end);
     let smooth = ramp * ramp * (3.0 - 2.0 * ramp);
 
-    tip + (1.0 - tip) * smooth
+    TIP_WIDTH_RATIO + (1.0 - TIP_WIDTH_RATIO) * smooth
 }
 
 fn new_builder(
@@ -1126,9 +1119,8 @@ mod tests {
         let mut path = straight_path(101);
         taper_fountain_stroke(&mut path, 10.0);
 
-        let tip = FountainOptions::TIP_WIDTH_RATIO;
-        assert!((path.start.pressure - tip).abs() < 1e-9);
-        assert!((path.segments.last().unwrap().end().pressure - tip).abs() < 1e-9);
+        assert!((path.start.pressure - TIP_WIDTH_RATIO).abs() < 1e-9);
+        assert!((path.segments.last().unwrap().end().pressure - TIP_WIDTH_RATIO).abs() < 1e-9);
         assert!((path.segments[50].end().pressure - 1.0).abs() < 1e-9);
     }
 
@@ -1137,20 +1129,76 @@ mod tests {
         let mut path = straight_path(11);
         taper_fountain_stroke(&mut path, 100.0);
 
-        let tip = FountainOptions::TIP_WIDTH_RATIO;
-        assert!((path.start.pressure - tip).abs() < 1e-9);
-        assert!((path.segments.last().unwrap().end().pressure - tip).abs() < 1e-9);
+        assert!((path.start.pressure - TIP_WIDTH_RATIO).abs() < 1e-9);
+        assert!((path.segments.last().unwrap().end().pressure - TIP_WIDTH_RATIO).abs() < 1e-9);
         // The stroke is 10 units long, so with the taper capped at 5 it is fully wide halfway.
         assert!((path.segments[4].end().pressure - 1.0).abs() < 1e-9);
     }
 
+    /// Draw a fountain stroke through the points and end it with the given event.
+    fn fountain_stroke_pressures(end: PenEvent) -> Vec<f64> {
+        let mut engine = crate::Engine::default();
+        engine
+            .engine_config()
+            .write()
+            .pens_config
+            .brush_config
+            .style = BrushStyle::Fountain;
+        let _ = engine.change_pen_style(PenStyle::Brush);
+        let now = Instant::now();
+
+        let points: Vec<Element> = (0..40)
+            .map(|i| Element::new(Vector2::new(i as f64 * 5.0, 0.0), Element::PRESSURE_DEFAULT))
+            .collect();
+        let modifier_keys = std::collections::HashSet::new();
+        // The path builder measures the time between points, so the events must not share a time.
+        for (i, element) in points.into_iter().enumerate() {
+            let event = PenEvent::Down {
+                element,
+                modifier_keys: modifier_keys.clone(),
+            };
+            let _ =
+                engine.handle_pen_event(event, None, now + Duration::from_millis(16 * i as u64));
+        }
+        let _ = engine.handle_pen_event(end, None, now + Duration::from_millis(16 * 40));
+
+        let key = engine.store.stroke_keys_unordered()[0];
+        let Some(Stroke::BrushStroke(brushstroke)) = engine.store.get_stroke_ref(key) else {
+            panic!("the pen draws a brush stroke");
+        };
+        let mut pressures = vec![brushstroke.path.start.pressure];
+        pressures.extend(brushstroke.path.segments.iter().map(|s| s.end().pressure));
+        pressures
+    }
+
+    #[test]
+    fn a_cancelled_fountain_stroke_is_tapered_like_a_finished_one() {
+        let modifier_keys = std::collections::HashSet::new();
+        let released = fountain_stroke_pressures(PenEvent::Up {
+            element: Element::new(Vector2::new(195.0, 0.0), Element::PRESSURE_DEFAULT),
+            modifier_keys: modifier_keys.clone(),
+        });
+        let cancelled = fountain_stroke_pressures(PenEvent::Cancel);
+
+        let tip = |pressures: &Vec<f64>| *pressures.last().unwrap();
+        assert!(
+            (tip(&released) - TIP_WIDTH_RATIO).abs() < 0.1,
+            "the released stroke ends in a tapered tip, got {}",
+            tip(&released)
+        );
+        assert!(
+            (tip(&cancelled) - tip(&released)).abs() < 1e-9,
+            "a stroke the pen abandons ends like one that was released: {} vs {}",
+            tip(&cancelled),
+            tip(&released)
+        );
+    }
+
     #[test]
     fn a_dot_is_not_tapered() {
-        let mut path = PenPath::try_from_elements(std::iter::once(Element::new(
-            Vector2::new(5.0, 5.0),
-            1.0,
-        )))
-        .unwrap();
+        let mut path =
+            PenPath::try_from_elements(std::iter::once(Element::new(Vector2::new(5.0, 5.0), 1.0)))
+                .unwrap();
         taper_fountain_stroke(&mut path, 10.0);
 
         assert!((path.start.pressure - 1.0).abs() < 1e-9);

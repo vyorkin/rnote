@@ -19,16 +19,18 @@ while keeping the endpoints fixed.
 
 ## Decision
 
-`recognize_curve` fits both a quadratic and a cubic Bézier to the stroke points
-with fixed endpoints, and accepts the fit only when it is dense enough (the
-longest gap between points is small relative to the stroke) and straight enough
-not to be a line. A quadratic is chosen unless the cubic residual is more than
-6% lower; both are added to `Shape` as `QuadraticBezier` and `CubicBezier`.
+`recognize_curve` resamples the stroke points, then fits both a quadratic and a
+cubic Bézier to them with fixed endpoints. A fit is accepted when its mean
+distance to the stroke stays under 4% of the chord and no single point is
+farther than 10% of it. A quadratic is chosen unless the cubic mean residual is
+at least 40% lower (`CURVE_CUBIC_IMPROVEMENT` = 0.6); both are added to `Shape`
+as `QuadraticBezier` and `CubicBezier`.
 
-The fit is rejected for strokes whose largest turn angle exceeds `max_turn_angle`
-(30° by default), so a sharp corner stays a corner, and for strokes thinner
-than `CURVE_MIN_TOLERANCE_SURFACE` so that it does not fight the pen. The
-tolerances are in surface coordinates divided by the camera zoom.
+The fit is rejected for strokes whose largest turn angle, measured three
+samples to each side along the resampled points, exceeds 30° (`CURVE_MAX_TURN`),
+so a sharp corner stays a corner. Both distances have a floor of
+`CURVE_MIN_TOLERANCE_SURFACE` (in surface coordinates, divided by the camera
+zoom), so the jitter of a short stroke is tolerated.
 
 ## Consequences
 

@@ -20,11 +20,11 @@ use num_traits::ToPrimitive;
 use rnote_compose::penevent::ShortcutKey;
 use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
 use rnote_engine::WidgetFlags;
-use rnote_engine::gestures::GestureConfig;
 use rnote_engine::document::Layout;
 use rnote_engine::document::background::PatternStyle;
 use rnote_engine::document::format::{self, Format, PredefinedFormat};
 use rnote_engine::ext::GdkRGBAExt;
+use rnote_engine::gestures::GestureConfig;
 use rnote_engine::pens::PenMode;
 use std::cell::RefCell;
 
@@ -637,18 +637,14 @@ impl RnSettingsPanel {
             let (m1, m2) = if row_active { (18, 72) } else { (9, 63) };
             let overlays = appwindow.overlays();
             // Margins only apply to floating panels; docked panels sit flush against their edge.
-            if overlays.panel_dock(crate::ToolbarPanel::ColorPicker)
-                == crate::ToolbarDock::Floating
+            if overlays.panel_dock(crate::ToolbarPanel::ColorPicker) == crate::ToolbarDock::Floating
             {
                 overlays.colorpicker_box().set_margin_top(m1);
             }
-            if overlays.panel_dock(crate::ToolbarPanel::PenPicker)
-                == crate::ToolbarDock::Floating
-            {
+            if overlays.panel_dock(crate::ToolbarPanel::PenPicker) == crate::ToolbarDock::Floating {
                 overlays.penpicker_box().set_margin_bottom(m1);
             }
-            if overlays.panel_dock(crate::ToolbarPanel::PensSideBar)
-                == crate::ToolbarDock::Floating
+            if overlays.panel_dock(crate::ToolbarPanel::PensSideBar) == crate::ToolbarDock::Floating
             {
                 overlays.sidebar_box().set_margin_start(m1);
                 overlays.sidebar_box().set_margin_end(m1);
@@ -1324,10 +1320,12 @@ impl RnSettingsPanel {
                 }
             ));
 
-        imp.gestures_scribbleerase_min_turn_rate_row.get().set_range(
-            ScribbleRecognitionOptions::MIN_TURN_RATE_MIN,
-            ScribbleRecognitionOptions::MIN_TURN_RATE_MAX,
-        );
+        imp.gestures_scribbleerase_min_turn_rate_row
+            .get()
+            .set_range(
+                ScribbleRecognitionOptions::MIN_TURN_RATE_MIN,
+                ScribbleRecognitionOptions::MIN_TURN_RATE_MAX,
+            );
         imp.gestures_scribbleerase_min_turn_rate_row
             .connect_changed(clone!(
                 #[weak]
@@ -1425,8 +1423,7 @@ impl RnSettingsPanel {
                         .engine_config()
                         .write()
                         .gestures
-                        .scribble_recognition_options =
-                        ScribbleRecognitionOptions::default();
+                        .scribble_recognition_options = ScribbleRecognitionOptions::default();
                     settingspanel.refresh_gestures_ui(&appwindow);
                 }
             ));
@@ -1463,23 +1460,21 @@ impl RnSettingsPanel {
                         .engine_config()
                         .write()
                         .gestures
-                        .shape_recognition_delay =
-                        std::time::Duration::from_secs_f64(row.value());
+                        .shape_recognition_delay = std::time::Duration::from_secs_f64(row.value());
                 }
             ));
 
-        imp.gestures_circle_lasso_row
-            .connect_active_notify(clone!(
-                #[weak]
-                appwindow,
-                move |row| {
-                    appwindow
-                        .engine_config()
-                        .write()
-                        .gestures
-                        .circle_lasso_enabled = row.is_active();
-                }
-            ));
+        imp.gestures_circle_lasso_row.connect_active_notify(clone!(
+            #[weak]
+            appwindow,
+            move |row| {
+                appwindow
+                    .engine_config()
+                    .write()
+                    .gestures
+                    .circle_lasso_enabled = row.is_active();
+            }
+        ));
 
         imp.gestures_multi_touch_undo_redo_row
             .connect_active_notify(clone!(
@@ -1501,15 +1496,21 @@ impl RnSettingsPanel {
 
         imp.gestures_scribbleerase_row
             .set_enable_expansion(gestures.scribble_erase_enabled);
-        imp.gestures_scribbleerase_min_turns_row.set_value(
-            gestures.scribble_recognition_options.min_reversals as f64,
-        );
+        imp.gestures_scribbleerase_min_turns_row
+            .set_value(gestures.scribble_recognition_options.min_reversals as f64);
         imp.gestures_scribbleerase_min_turn_rate_row
             .set_value(gestures.scribble_recognition_options.min_turn_rate);
-        imp.gestures_scribbleerase_pass_height_row
-            .set_value(gestures.scribble_recognition_options.reversal_prominence_ratio * 100.0);
-        imp.gestures_scribbleerase_pass_length_row
-            .set_value(gestures.scribble_recognition_options.reversal_min_prominence_surface);
+        imp.gestures_scribbleerase_pass_height_row.set_value(
+            gestures
+                .scribble_recognition_options
+                .reversal_prominence_ratio
+                * 100.0,
+        );
+        imp.gestures_scribbleerase_pass_length_row.set_value(
+            gestures
+                .scribble_recognition_options
+                .reversal_min_prominence_surface,
+        );
         imp.gestures_scribbleerase_min_size_row
             .set_value(gestures.scribble_recognition_options.min_extent_surface);
         imp.gestures_scribbleerase_min_length_row

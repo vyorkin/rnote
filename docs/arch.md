@@ -20,6 +20,9 @@ The codebase is separated into multiple crates that have specific purposes and s
     - `rnote-engine/pens` : The user always generates/interacts with strokes through what Rnote internally
         calls `pens`. For example the "Brush" pen produces pen paths, the "Shaper" pen produces geometric shapes,
         the `eraser` pen removes strokes, .. .
+    - `rnote-engine/gestures` : recognizers for gestures that act on a whole stroke, such as
+        Circle-to-Lasso and Scribble-to-Erase. The pens call them when a stroke finishes; they do
+        not hold state of their own.
     - `rnote-engine/strokes` contain the definition of different types that can be generated or imported
         into the engine. There are "brush strokes", "shape strokes" but also vector and rasterized images
         are represented as a "stroke type".
