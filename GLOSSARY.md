@@ -1,6 +1,6 @@
-# rnote gestures
+# rnote fork
 
-Vocabulary for the gesture layer in this fork. It covers input patterns that act on the canvas; it is not a glossary for rnote as a whole.
+Vocabulary for the features this fork adds: gestures, pens and toolbars.
 
 ## Gestures
 
@@ -73,3 +73,23 @@ _Avoid_: pause, dwell
 **Precision-first**:
 A recognition policy that prefers missing a gesture over firing one during ordinary writing.
 _Avoid_: conservative detection
+
+## Pens
+
+**Fountain Pen**:
+A brush style whose stroke is thinner the faster the pen moves and thicker the harder it presses, with tapered ends.
+_Avoid_: calligraphy pen, ink pen
+
+## Toolbars
+
+**Floating toolbar**:
+A toolbar that lies over the canvas and takes no layout space.
+_Avoid_: overlay toolbar, popover
+
+**Docked toolbar**:
+A toolbar that sits at a window edge and takes layout space, shrinking the canvas.
+_Avoid_: pinned toolbar, fixed toolbar
+
+**Toolbar dock**:
+The window edge a docked toolbar is attached to: top, bottom, left or right.
+_Avoid_: toolbar position, toolbar side

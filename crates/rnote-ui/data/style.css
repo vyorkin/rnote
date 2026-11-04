@@ -234,6 +234,17 @@ from https://gitlab.com/posidon_software/paper/-/blob/main/src/css/style.css
     box-shadow: 0px 3px 6px @shade_color;
 }
 
+.toolbar_handle {
+    padding: 4px;
+    border-radius: 6px;
+    opacity: 0.6;
+}
+
+.toolbar_handle:hover {
+    opacity: 1;
+    background: alpha(currentColor, 0.08);
+}
+
 .overlay_toolbar_scrollable {
     padding: 0px;
     border-radius: 12px;

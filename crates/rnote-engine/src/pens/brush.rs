@@ -1,7 +1,7 @@
 // Imports
 use super::PenBehaviour;
 use super::PenStyle;
-use super::pensconfig::brushconfig::BrushStyle;
+use super::pensconfig::brushconfig::{BrushStyle, FountainOptions};
 use super::pensconfig::rulerconfig::{RulerConfig, RulerTurn, RulerView};
 use super::shapeadjust::ShapeAdjust;
 use crate::engine::{EngineTask, EngineTaskSender, EngineView, EngineViewMut};
@@ -23,7 +23,7 @@ use rnote_compose::builders::{
 };
 use rnote_compose::eventresult::{EventPropagation, EventResult};
 use rnote_compose::penevent::{PenEvent, PenProgress};
-use rnote_compose::penpath::{Element, Segment};
+use rnote_compose::penpath::{Element, PenPath, Segment};
 use rnote_compose::scribblerecognition;
 use rnote_compose::shaperecognition;
 use rnote_compose::shapes::{Shape, Shapeable};
@@ -43,6 +43,12 @@ enum BrushState {
         ruler_snap_side: Option<f64>,
         /// When the pen went down, to tell how quickly the stroke was drawn.
         begin: Instant,
+        /// The position of the last input, to measure how fast the pen moves.
+        last_pos: Vector2,
+        /// The time of the last input, to measure how fast the pen moves.
+        last_time: Instant,
+        /// The smoothed pen speed in surface units per second.
+        speed: f64,
     },
     DraggingRuler {
         anchor_begin: Vector2,
@@ -178,6 +184,12 @@ impl PenBehaviour for Brush {
                         .ruler_config
                         .project_to_edge(element.pos, side, ruler_view);
                 }
+                // The fountain pen narrows its stroke with speed. The stroke has no speed yet.
+                if engine_view.config.pens_config.brush_config.style == BrushStyle::Fountain {
+                    let options = &engine_view.config.pens_config.brush_config.fountain_options;
+                    element.pressure = options.width_factor(element.pressure, 0.0);
+                }
+                let stroke_start_pos = element.pos;
                 if !element.filter_by_bounds(
                     engine_view
                         .document
@@ -230,6 +242,9 @@ impl PenBehaviour for Brush {
                         preview_style,
                         ruler_snap_side,
                         begin: now,
+                        last_pos: stroke_start_pos,
+                        last_time: now,
+                        speed: 0.0,
                     };
 
                     self.hold_anchor = element.pos;
@@ -396,6 +411,9 @@ impl PenBehaviour for Brush {
                     current_stroke_key,
                     ruler_snap_side,
                     begin,
+                    last_pos,
+                    last_time,
+                    speed,
                     ..
                 },
                 mut pen_event,
@@ -433,6 +451,30 @@ impl PenBehaviour for Brush {
                                 .project_to_edge(element.pos, side, ruler_view);
                         }
                         _ => {}
+                    }
+                }
+                // Measure how fast the pen moves, and narrow the point with it. The width every
+                // point ends up with is stored in its pressure, so the stroke keeps it when saved.
+                if engine_view.config.pens_config.brush_config.style == BrushStyle::Fountain
+                    && let PenEvent::Down { element, .. } = &mut pen_event
+                {
+                    let elapsed = now.saturating_duration_since(*last_time).as_secs_f64();
+                    if elapsed > 0.0005 {
+                        let distance = (element.pos - *last_pos).length() * total_zoom;
+                        let instantaneous = distance / elapsed;
+                        *speed = if *speed <= f64::EPSILON {
+                            instantaneous
+                        } else {
+                            *speed * 0.7 + instantaneous * 0.3
+                        };
+                        *last_pos = element.pos;
+                        *last_time = now;
+                        element.pressure = engine_view
+                            .config
+                            .pens_config
+                            .brush_config
+                            .fountain_options
+                            .width_factor(element.pressure, *speed);
                     }
                 }
                 let builder_result =
@@ -502,6 +544,19 @@ impl PenBehaviour for Brush {
                                 engine_view.camera.viewport(),
                                 engine_view.camera.image_scale(),
                             );
+                        }
+
+                        let taper_length = engine_view
+                            .config
+                            .pens_config
+                            .brush_config
+                            .fountain_options
+                            .taper_length;
+                        if engine_view.config.pens_config.brush_config.style == BrushStyle::Fountain
+                            && let Some(Stroke::BrushStroke(brushstroke)) =
+                                engine_view.store.get_stroke_mut(*current_stroke_key)
+                        {
+                            taper_fountain_stroke(&mut brushstroke.path, taper_length);
                         }
 
                         if let Some(Stroke::BrushStroke(brushstroke)) =
@@ -665,7 +720,7 @@ impl DrawableOnDoc for Brush {
                     BrushStyle::Marker => {
                         // Don't draw the marker, as the pen would render on top of other strokes, while the stroke itself would render underneath them.
                     }
-                    BrushStyle::Solid | BrushStyle::Textured => {
+                    BrushStyle::Solid | BrushStyle::Textured | BrushStyle::Fountain => {
                         path_builder.draw_styled(
                             cx,
                             preview_style,
@@ -977,6 +1032,52 @@ fn erase_with_scribble(
     (true, widget_flags)
 }
 
+/// Narrow both ends of a fountain stroke, so that it starts and ends with a tapered tip.
+///
+/// The taper is measured along the stroke in document units, and shortens the width stored in the
+/// pressure of every point. It is capped at half the stroke length, so a short stroke tapers more
+/// gently instead of collapsing into a line.
+fn taper_fountain_stroke(path: &mut PenPath, taper_length: f64) {
+    if taper_length <= f64::EPSILON {
+        return;
+    }
+
+    let mut total = 0.0;
+    let mut prev = path.start.pos;
+    for segment in &path.segments {
+        let end = segment.end();
+        total += (end.pos - prev).length();
+        prev = end.pos;
+    }
+
+    let taper = taper_length.min(total * 0.5);
+    if taper <= f64::EPSILON {
+        return;
+    }
+
+    let tip = FountainOptions::TIP_WIDTH_RATIO;
+
+    path.start.pressure *= taper_factor(0.0, total, taper, tip);
+    let mut distance = 0.0;
+    let mut prev = path.start.pos;
+    for segment in &mut path.segments {
+        let end = segment.end_mut();
+        distance += (end.pos - prev).length();
+        end.pressure *= taper_factor(distance, total, taper, tip);
+        prev = end.pos;
+    }
+}
+
+/// The factor of a tapered end at the given distance along the stroke.
+fn taper_factor(distance: f64, total: f64, taper: f64, tip: f64) -> f64 {
+    let from_start = (distance / taper).clamp(0.0, 1.0);
+    let from_end = ((total - distance) / taper).clamp(0.0, 1.0);
+    let ramp = from_start.min(from_end);
+    let smooth = ramp * ramp * (3.0 - 2.0 * ramp);
+
+    tip + (1.0 - tip) * smooth
+}
+
 fn new_builder(
     builder_type: PenPathBuilderType,
     element: Element,
@@ -986,5 +1087,52 @@ fn new_builder(
         PenPathBuilderType::Simple => Box::new(PenPathSimpleBuilder::start(element, now)),
         PenPathBuilderType::Curved => Box::new(PenPathCurvedBuilder::start(element, now)),
         PenPathBuilderType::Modeled => Box::new(PenPathModeledBuilder::start(element, now)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn straight_path(n_points: usize) -> PenPath {
+        PenPath::try_from_elements(
+            (0..n_points).map(|i| Element::new(Vector2::new(i as f64, 0.0), 1.0)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn taper_narrows_both_ends_and_leaves_the_middle_alone() {
+        let mut path = straight_path(101);
+        taper_fountain_stroke(&mut path, 10.0);
+
+        let tip = FountainOptions::TIP_WIDTH_RATIO;
+        assert!((path.start.pressure - tip).abs() < 1e-9);
+        assert!((path.segments.last().unwrap().end().pressure - tip).abs() < 1e-9);
+        assert!((path.segments[50].end().pressure - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn taper_is_capped_to_half_the_stroke_length() {
+        let mut path = straight_path(11);
+        taper_fountain_stroke(&mut path, 100.0);
+
+        let tip = FountainOptions::TIP_WIDTH_RATIO;
+        assert!((path.start.pressure - tip).abs() < 1e-9);
+        assert!((path.segments.last().unwrap().end().pressure - tip).abs() < 1e-9);
+        // The stroke is 10 units long, so with the taper capped at 5 it is fully wide halfway.
+        assert!((path.segments[4].end().pressure - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_dot_is_not_tapered() {
+        let mut path = PenPath::try_from_elements(std::iter::once(Element::new(
+            Vector2::new(5.0, 5.0),
+            1.0,
+        )))
+        .unwrap();
+        taper_fountain_stroke(&mut path, 10.0);
+
+        assert!((path.start.pressure - 1.0).abs() < 1e-9);
     }
 }

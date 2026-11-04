@@ -107,4 +107,15 @@ impl Segment {
             Segment::CubBezTo { end, .. } => *end,
         }
     }
+
+    /// The end element of a segment, for changing it in place.
+    ///
+    /// All segment variants have an end element.
+    pub fn end_mut(&mut self) -> &mut Element {
+        match self {
+            Segment::LineTo { end, .. } => end,
+            Segment::QuadBezTo { end, .. } => end,
+            Segment::CubBezTo { end, .. } => end,
+        }
+    }
 }

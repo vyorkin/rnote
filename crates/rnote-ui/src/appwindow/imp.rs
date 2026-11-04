@@ -320,9 +320,7 @@ impl ObjectImpl for RnAppWindow {
                 let focus_mode: bool = value.get().expect("The value needs to be of type `bool`");
                 self.focus_mode.replace(focus_mode);
 
-                self.overlays.penpicker().set_visible(!focus_mode);
-                self.overlays.colorpicker().set_visible(!focus_mode);
-                self.overlays.sidebar_box().set_visible(!focus_mode);
+                self.overlays.set_toolbars_visible(!focus_mode);
             }
             "devel-mode" => {
                 let devel_mode = value
@@ -718,7 +716,11 @@ impl RnAppWindow {
                 .settings_scroller()
                 .set_placement(CornerType::TopRight);
 
-            obj.overlays().sidebar_box().set_halign(Align::Start);
+            if obj.overlays().panel_dock(crate::ToolbarPanel::PensSideBar)
+                == crate::ToolbarDock::Floating
+            {
+                obj.overlays().sidebar_box().set_halign(Align::Start);
+            }
             obj.overlays()
                 .sidebar_scroller()
                 .set_placement(CornerType::TopRight);
@@ -830,7 +832,11 @@ impl RnAppWindow {
                 .settings_scroller()
                 .set_placement(CornerType::TopLeft);
 
-            obj.overlays().sidebar_box().set_halign(Align::End);
+            if obj.overlays().panel_dock(crate::ToolbarPanel::PensSideBar)
+                == crate::ToolbarDock::Floating
+            {
+                obj.overlays().sidebar_box().set_halign(Align::End);
+            }
             obj.overlays()
                 .sidebar_scroller()
                 .set_placement(CornerType::TopLeft);

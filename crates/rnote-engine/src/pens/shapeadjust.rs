@@ -3,7 +3,9 @@ use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
 use rnote_compose::Transformable;
-use rnote_compose::shapes::{Ellipse, Line, Rectangle, Shape, Shapeable};
+use rnote_compose::shapes::{
+    CubicBezier, Ellipse, Line, QuadraticBezier, Rectangle, Shape, Shapeable,
+};
 
 /// The extent a shape keeps at least while it is adjusted, so that it can't collapse into nothing.
 const MIN_EXTENT: f64 = 1.0;
@@ -11,8 +13,9 @@ const MIN_EXTENT: f64 = 1.0;
 /// Adjusting a recognized shape with the pen that drew it, while that pen is still down.
 ///
 /// The pen keeps changing the shape that replaced its stroke, like when drawing one with the shaper pen:
-/// a line follows the pen with its end, a rectangle with the corner closest to the pen and an ellipse with
-/// its radii. Any other shape is scaled between the pen and the corner of its bounds opposite to it.
+/// a line follows the pen with its end, a rectangle with the corner closest to the pen, an ellipse with
+/// its radii and an open curve with its bend, its endpoints staying fixed. Any other shape is scaled
+/// between the pen and the corner of its bounds opposite to it.
 ///
 /// The shape follows the movement of the pen since the recognition, so that it does not jump when the pen
 /// does not rest exactly on the part of the shape that follows it.
@@ -37,6 +40,10 @@ enum AdjustKind {
     ///
     /// Holds the signs of the pen position in the local frame of the ellipse.
     EllipseRadii { radii_signs: Vector2 },
+    /// The control point of the quadratic curve follows the pen, its endpoints stay fixed.
+    QuadraticBend,
+    /// Both control points of the cubic curve follow the pen, its endpoints stay fixed.
+    CubicBend,
     /// The shape is scaled between the pen and the corner of its bounds opposite to it.
     ScaleFromPivot {
         pivot: Vector2,
@@ -55,6 +62,8 @@ impl ShapeAdjust {
             Shape::Ellipse(ellipse) => AdjustKind::EllipseRadii {
                 radii_signs: signs(ellipse.affine.inverse().transform_point2(start_pos)),
             },
+            Shape::QuadraticBezier(_) => AdjustKind::QuadraticBend,
+            Shape::CubicBezier(_) => AdjustKind::CubicBend,
             shape => {
                 let bounds = shape.bounds();
                 let center = bounds.center();
@@ -118,6 +127,19 @@ impl ShapeAdjust {
                 Shape::Ellipse(Ellipse {
                     radii,
                     affine: ellipse.affine,
+                })
+            }
+            (Shape::QuadraticBezier(quadratic), AdjustKind::QuadraticBend) => {
+                Shape::QuadraticBezier(QuadraticBezier {
+                    cp: quadratic.cp + offset,
+                    ..*quadratic
+                })
+            }
+            (Shape::CubicBezier(cubic), AdjustKind::CubicBend) => {
+                Shape::CubicBezier(CubicBezier {
+                    cp1: cubic.cp1 + offset,
+                    cp2: cubic.cp2 + offset,
+                    ..*cubic
                 })
             }
             (
@@ -251,6 +273,47 @@ mod tests {
                 assert!((adjusted.affine.translation - Vector2::new(100.0, 100.0)).length() < 1e-6);
             }
             other => panic!("expected ellipse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quadratic_bend_follows_pen() {
+        let quadratic = QuadraticBezier {
+            start: Vector2::new(100.0, 200.0),
+            cp: Vector2::new(150.0, 120.0),
+            end: Vector2::new(200.0, 200.0),
+        };
+        let adjust =
+            ShapeAdjust::new(Shape::QuadraticBezier(quadratic), Vector2::new(150.0, 120.0));
+
+        match adjust.adjusted(Vector2::new(140.0, 90.0)) {
+            Shape::QuadraticBezier(adjusted) => {
+                assert_eq!(adjusted.start, quadratic.start);
+                assert_eq!(adjusted.end, quadratic.end);
+                assert_eq!(adjusted.cp, Vector2::new(140.0, 90.0));
+            }
+            other => panic!("expected quadratic curve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cubic_bends_follow_pen() {
+        let cubic = CubicBezier {
+            start: Vector2::new(100.0, 200.0),
+            cp1: Vector2::new(130.0, 110.0),
+            cp2: Vector2::new(170.0, 290.0),
+            end: Vector2::new(200.0, 200.0),
+        };
+        let adjust = ShapeAdjust::new(Shape::CubicBezier(cubic), Vector2::new(150.0, 200.0));
+
+        match adjust.adjusted(Vector2::new(150.0, 220.0)) {
+            Shape::CubicBezier(adjusted) => {
+                assert_eq!(adjusted.start, cubic.start);
+                assert_eq!(adjusted.end, cubic.end);
+                assert_eq!(adjusted.cp1, cubic.cp1 + Vector2::new(0.0, 20.0));
+                assert_eq!(adjusted.cp2, cubic.cp2 + Vector2::new(0.0, 20.0));
+            }
+            other => panic!("expected cubic curve, got {other:?}"),
         }
     }
 

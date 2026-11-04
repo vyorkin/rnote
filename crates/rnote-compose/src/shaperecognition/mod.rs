@@ -1,6 +1,8 @@
 // Imports
 use crate::penpath::PenPath;
-use crate::shapes::{Ellipse, Line, Polygon, Rectangle, Shape};
+use crate::shapes::{
+    CubicBezier, Ellipse, Line, Polygon, QuadraticBezier, Rectangle, Shape,
+};
 use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
@@ -57,13 +59,32 @@ const RECT_MAX_ANGLE_DEV: f64 = 30.0 * std::f64::consts::PI / 180.0;
 const RECT_AXIS_SNAP_ANGLE: f64 = 5.0 * std::f64::consts::PI / 180.0;
 /// The maximum number of polygon corners that are recognized.
 const POLYGON_MAX_CORNERS: usize = 6;
+/// The maximum mean distance of the stroke points to an open curve, relative to its chord length,
+/// for the curve to be accepted.
+const CURVE_MAX_MEAN_RESIDUAL_CHORD_RATIO: f64 = 0.04;
+/// The maximum distance of a single stroke point to an open curve, relative to its chord length.
+const CURVE_MAX_RESIDUAL_CHORD_RATIO: f64 = 0.10;
+/// The distance from an open curve (in surface coordinates) that is tolerated regardless of its length,
+/// because the jitter of the hand is large compared to a short stroke.
+const CURVE_MIN_TOLERANCE_SURFACE: f64 = 2.0;
+/// The maximum turn angle (radians) at a point of the stroke for it to be treated as a smooth curve.
+///
+/// A sharper turn is a corner of a handwriting stroke, not a bend of a curve.
+const CURVE_MAX_TURN: f64 = 30.0 * std::f64::consts::PI / 180.0;
+/// How much smaller the residual of a cubic fit has to be than the quadratic fit's for the stroke
+/// to be treated as having two bends. Below that, the simpler quadratic curve is kept.
+const CURVE_CUBIC_IMPROVEMENT: f64 = 0.6;
+/// The number of samples used to find the nearest point on a fitted curve when re-parameterizing.
+const CURVE_PROJECTION_SAMPLES: usize = 200;
+/// The number of fit-and-reparameterize passes.
+const CURVE_FIT_PASSES: usize = 3;
 
 /// Attempt to recognize a geometric shape from a drawn pen path.
 ///
 /// Returns the recognized shape when the path resembles one closely enough, `None` otherwise.
 ///
-/// Recognized are: lines, ellipses and circles, rectangles (possibly rotated)
-/// and closed polygons with up to 6 corners (triangles, quadrilaterals, ..).
+/// Recognized are: lines, open quadratic and cubic curves, ellipses and circles, rectangles
+/// (possibly rotated) and closed polygons with up to 6 corners (triangles, quadrilaterals, ..).
 ///
 /// `zoom` is the zoom of the view the path was drawn in. It converts the tolerances for the jitter of the hand,
 /// which are defined in surface coordinates, to document coordinates.
@@ -93,6 +114,7 @@ pub fn recognize_shape(path: &PenPath, zoom: f64) -> Option<Shape> {
         recognize_closed(&input_points, bounds_diag)
     } else {
         recognize_line(&input_points, perimeter, zoom)
+            .or_else(|| recognize_curve(&input_points, zoom))
     }
 }
 
@@ -274,6 +296,239 @@ fn recognize_line(points: &[Vector2], perimeter: f64, zoom: f64) -> Option<Shape
     }
 
     Some(Shape::Line(Line { start, end }))
+}
+
+/// The distances of the stroke points from a fitted curve.
+struct Residuals {
+    mean: f64,
+    max: f64,
+}
+
+/// Recognize an open stroke as a quadratic or cubic curve.
+///
+/// The endpoints of the fit are the endpoints of the stroke, so the curve keeps where the stroke
+/// started and ended. A quadratic curve is preferred, because it has a single bend; a cubic one is
+/// only used when it fits markedly better, which means the stroke has two bends.
+fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
+    let start = *points.first()?;
+    let end = *points.last()?;
+    let chord = (end - start).length();
+    if chord < f64::EPSILON {
+        return None;
+    }
+
+    let mut resampled = resample(points, N_RESAMPLE, false);
+    resampled.dedup_by(|a, b| (*a - *b).length() < f64::EPSILON);
+    if resampled.len() < MIN_INPUT_POINTS {
+        return None;
+    }
+    // A corner is a handwriting stroke and not a bend of a curve.
+    if max_open_turn(&resampled) > CURVE_MAX_TURN {
+        return None;
+    }
+
+    let tolerance = CURVE_MIN_TOLERANCE_SURFACE / zoom;
+    let max_mean = (CURVE_MAX_MEAN_RESIDUAL_CHORD_RATIO * chord).max(tolerance);
+    let max_max = (CURVE_MAX_RESIDUAL_CHORD_RATIO * chord).max(tolerance * 2.0);
+
+    if let Some((quadratic, residuals)) = fit_quadratic(&resampled, start, end)
+        && residuals.mean <= max_mean
+        && residuals.max <= max_max
+    {
+        if let Some((cubic, cubic_residuals)) = fit_cubic(&resampled, start, end)
+            && cubic_residuals.mean < residuals.mean * CURVE_CUBIC_IMPROVEMENT
+            && cubic_residuals.mean <= max_mean
+            && cubic_residuals.max <= max_max
+        {
+            return Some(Shape::CubicBezier(cubic));
+        }
+
+        return Some(Shape::QuadraticBezier(quadratic));
+    }
+
+    let (cubic, residuals) = fit_cubic(&resampled, start, end)?;
+    (residuals.mean <= max_mean && residuals.max <= max_max).then_some(Shape::CubicBezier(cubic))
+}
+
+/// The largest turn angle along an open polyline, measured over [`TURN_WINDOW`] points.
+fn max_open_turn(points: &[Vector2]) -> f64 {
+    if points.len() <= 2 * TURN_WINDOW {
+        return 0.0;
+    }
+
+    (TURN_WINDOW..points.len() - TURN_WINDOW)
+        .map(|i| {
+            let v_in = points[i] - points[i - TURN_WINDOW];
+            let v_out = points[i + TURN_WINDOW] - points[i];
+
+            if v_in.length() < f64::EPSILON || v_out.length() < f64::EPSILON {
+                0.0
+            } else {
+                v_in.angle_to(v_out).abs()
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Fit a quadratic bezier curve with fixed endpoints to the points.
+fn fit_quadratic(
+    points: &[Vector2],
+    start: Vector2,
+    end: Vector2,
+) -> Option<(QuadraticBezier, Residuals)> {
+    if points.len() < 3 {
+        return None;
+    }
+
+    let mut ts = uniform_parameters(points.len());
+    let mut cp = (start + end) * 0.5;
+
+    for _ in 0..CURVE_FIT_PASSES {
+        let mut numerator = Vector2::ZERO;
+        let mut denominator = 0.0;
+
+        for (point, t) in points.iter().zip(&ts) {
+            let (mt, t) = (1.0 - t, *t);
+            let weight = 2.0 * mt * t;
+            if weight <= f64::EPSILON {
+                continue;
+            }
+            let base = start * (mt * mt) + end * (t * t);
+            numerator += (*point - base) * weight;
+            denominator += weight * weight;
+        }
+
+        if denominator <= f64::EPSILON {
+            return None;
+        }
+        cp = numerator / denominator;
+
+        for i in 1..points.len() - 1 {
+            ts[i] = nearest_parameter(|t| quad_point(start, cp, end, t), points[i]);
+        }
+    }
+
+    let residuals = residuals(points, &ts, |t| quad_point(start, cp, end, t));
+    Some((QuadraticBezier { start, cp, end }, residuals))
+}
+
+/// Fit a cubic bezier curve with fixed endpoints to the points.
+fn fit_cubic(
+    points: &[Vector2],
+    start: Vector2,
+    end: Vector2,
+) -> Option<(CubicBezier, Residuals)> {
+    if points.len() < 3 {
+        return None;
+    }
+
+    let chord = (end - start).length();
+    let mut ts = uniform_parameters(points.len());
+    let mut cp1 = start + (end - start) / 3.0;
+    let mut cp2 = start + (end - start) * (2.0 / 3.0);
+
+    for _ in 0..CURVE_FIT_PASSES {
+        let (mut aa, mut ab, mut bb) = (0.0, 0.0, 0.0);
+        let (mut ra, mut rb) = (Vector2::ZERO, Vector2::ZERO);
+
+        for (point, t) in points.iter().zip(&ts) {
+            let (mt, t) = (1.0 - t, *t);
+            let a = 3.0 * mt * mt * t;
+            let b = 3.0 * mt * t * t;
+            let base = start * (mt * mt * mt) + end * (t * t * t);
+            let delta = *point - base;
+
+            aa += a * a;
+            ab += a * b;
+            bb += b * b;
+            ra += delta * a;
+            rb += delta * b;
+        }
+
+        let determinant = aa * bb - ab * ab;
+        if determinant.abs() <= f64::EPSILON {
+            return None;
+        }
+        cp1 = (ra * bb - rb * ab) / determinant;
+        cp2 = (aa * rb - ab * ra) / determinant;
+
+        for i in 1..points.len() - 1 {
+            ts[i] = nearest_parameter(|t| cubic_point(start, cp1, cp2, end, t), points[i]);
+        }
+    }
+
+    // Control points far outside the stroke describe an overfit, not a curve the hand drew.
+    let midpoint = (start + end) * 0.5;
+    if (cp1 - midpoint).length() > 3.0 * chord || (cp2 - midpoint).length() > 3.0 * chord {
+        return None;
+    }
+
+    let residuals = residuals(points, &ts, |t| cubic_point(start, cp1, cp2, end, t));
+    Some((
+        CubicBezier {
+            start,
+            cp1,
+            cp2,
+            end,
+        },
+        residuals,
+    ))
+}
+
+/// The parameters of the points, evenly spaced from 0 to 1.
+fn uniform_parameters(n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| i as f64 / (n.max(2) - 1) as f64)
+        .collect()
+}
+
+/// The point on a quadratic bezier curve at the given parameter.
+fn quad_point(start: Vector2, cp: Vector2, end: Vector2, t: f64) -> Vector2 {
+    let mt = 1.0 - t;
+    start * (mt * mt) + cp * (2.0 * mt * t) + end * (t * t)
+}
+
+/// The point on a cubic bezier curve at the given parameter.
+fn cubic_point(start: Vector2, cp1: Vector2, cp2: Vector2, end: Vector2, t: f64) -> Vector2 {
+    let mt = 1.0 - t;
+    start * (mt * mt * mt)
+        + cp1 * (3.0 * mt * mt * t)
+        + cp2 * (3.0 * mt * t * t)
+        + end * (t * t * t)
+}
+
+/// The parameter of the point on the curve closest to the given point.
+fn nearest_parameter(curve: impl Fn(f64) -> Vector2, point: Vector2) -> f64 {
+    let mut best_t = 0.0;
+    let mut best_distance = f64::MAX;
+
+    for i in 0..=CURVE_PROJECTION_SAMPLES {
+        let t = i as f64 / CURVE_PROJECTION_SAMPLES as f64;
+        let distance = (curve(t) - point).length_squared();
+        if distance < best_distance {
+            best_distance = distance;
+            best_t = t;
+        }
+    }
+
+    best_t
+}
+
+/// The distances of the points from the curve, at their parameters.
+fn residuals(points: &[Vector2], ts: &[f64], curve: impl Fn(f64) -> Vector2) -> Residuals {
+    let mut sum = 0.0;
+    let mut max: f64 = 0.0;
+
+    for (point, t) in points.iter().zip(ts) {
+        let distance = (curve(*t) - *point).length();
+        sum += distance;
+        max = max.max(distance);
+    }
+
+    Residuals {
+        mean: sum / points.len() as f64,
+        max,
+    }
 }
 
 /// Smooth a closed resampled loop with a cyclic three-point moving average.
@@ -713,8 +968,8 @@ mod tests {
     }
 
     #[test]
-    fn reject_short_arc() {
-        // A parenthesis is short and nearly straight, but must not become a line.
+    fn recognize_short_arc() {
+        // A parenthesis is short and nearly straight, but must become a curve and not a line.
         let points = with_resting_tail((0..=20).map(|i| {
             let t = i as f64 / 20.0;
             Vector2::new(
@@ -722,6 +977,68 @@ mod tests {
                 200.0 + 30.0 * t,
             )
         }));
+
+        let shape = recognize_shape(&pen_path_from_points(points), 1.0);
+        assert!(
+            matches!(shape, Some(Shape::QuadraticBezier(_))),
+            "expected quadratic curve, got {shape:?}"
+        );
+    }
+
+    #[test]
+    fn recognize_single_bend_curve() {
+        let start = Vector2::new(100.0, 200.0);
+        let cp = Vector2::new(150.0, 120.0);
+        let end = Vector2::new(200.0, 200.0);
+        let points = (0..=60).map(|i| {
+            let t = i as f64 / 60.0;
+            quad_point(start, cp, end, t) + jitter(i, 0.25)
+        });
+
+        match recognize_shape(&pen_path_from_points(points), 1.0) {
+            Some(Shape::QuadraticBezier(quadratic)) => {
+                assert!((quadratic.start - start).length() < 0.5);
+                assert!((quadratic.end - end).length() < 0.5);
+                assert!(
+                    (quadratic.cp - cp).length() < 12.0,
+                    "control point {:?} is too far from {cp:?}",
+                    quadratic.cp
+                );
+            }
+            other => panic!("expected quadratic curve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recognize_two_bend_curve() {
+        let start = Vector2::new(100.0, 200.0);
+        let cp1 = Vector2::new(130.0, 110.0);
+        let cp2 = Vector2::new(170.0, 290.0);
+        let end = Vector2::new(200.0, 200.0);
+        let points = (0..=80).map(|i| {
+            let t = i as f64 / 80.0;
+            cubic_point(start, cp1, cp2, end, t) + jitter(i, 0.25)
+        });
+
+        match recognize_shape(&pen_path_from_points(points), 1.0) {
+            Some(Shape::CubicBezier(cubic)) => {
+                assert!((cubic.start - start).length() < 0.5);
+                assert!((cubic.end - end).length() < 0.5);
+            }
+            other => panic!("expected cubic curve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_sharp_corner() {
+        // Two straight segments meeting at a right angle are a corner, not a bend of a curve.
+        let points = (0..=40).map(|i| {
+            if i < 20 {
+                Vector2::new(100.0 + 5.0 * i as f64, 200.0)
+            } else {
+                Vector2::new(200.0, 200.0 + 5.0 * (i - 20) as f64)
+            }
+        });
 
         let shape = recognize_shape(&pen_path_from_points(points), 1.0);
         assert!(shape.is_none(), "expected no shape, got {shape:?}");
@@ -909,13 +1226,11 @@ mod tests {
 
     #[test]
     fn reject_scribble() {
-        // An open s-shaped curve is neither a line nor a closed shape.
-        let points = (0..=100).map(|i| {
-            let t = i as f64 / 100.0;
-            Vector2::new(
-                50.0 + 200.0 * t,
-                100.0 + 80.0 * (t * std::f64::consts::TAU).sin(),
-            )
+        // A scribble: a fine zigzag with sharp reversals, neither a line nor a curve.
+        let points = (0..=60).map(|i| {
+            let x = 50.0 + 4.0 * i as f64;
+            let y = if i % 4 < 2 { 100.0 } else { 130.0 };
+            Vector2::new(x, y)
         });
 
         assert!(recognize_shape(&pen_path_from_points(points), 1.0).is_none());

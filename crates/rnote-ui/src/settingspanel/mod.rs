@@ -46,6 +46,8 @@ mod imp {
         #[template_child]
         pub(crate) general_show_scrollbars_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
+        pub(crate) general_lock_toolbars_to_top_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
         pub(crate) general_optimize_epd_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) general_inertial_scrolling_row: TemplateChild<adw::SwitchRow>,
@@ -633,15 +635,41 @@ impl RnSettingsPanel {
 
         let set_overlays_margins = |appwindow: &RnAppWindow, row_active: bool| {
             let (m1, m2) = if row_active { (18, 72) } else { (9, 63) };
-            appwindow.overlays().colorpicker().set_margin_top(m1);
-            appwindow.overlays().penpicker().set_margin_bottom(m1);
-            appwindow.overlays().sidebar_box().set_margin_start(m1);
-            appwindow.overlays().sidebar_box().set_margin_end(m1);
-            appwindow.overlays().sidebar_box().set_margin_top(m2);
-            appwindow.overlays().sidebar_box().set_margin_bottom(m2);
+            let overlays = appwindow.overlays();
+            // Margins only apply to floating panels; docked panels sit flush against their edge.
+            if overlays.panel_dock(crate::ToolbarPanel::ColorPicker)
+                == crate::ToolbarDock::Floating
+            {
+                overlays.colorpicker_box().set_margin_top(m1);
+            }
+            if overlays.panel_dock(crate::ToolbarPanel::PenPicker)
+                == crate::ToolbarDock::Floating
+            {
+                overlays.penpicker_box().set_margin_bottom(m1);
+            }
+            if overlays.panel_dock(crate::ToolbarPanel::PensSideBar)
+                == crate::ToolbarDock::Floating
+            {
+                overlays.sidebar_box().set_margin_start(m1);
+                overlays.sidebar_box().set_margin_end(m1);
+                overlays.sidebar_box().set_margin_top(m2);
+                overlays.sidebar_box().set_margin_bottom(m2);
+            }
         };
         // set on init
         set_overlays_margins(appwindow, imp.general_show_scrollbars_row.is_active());
+
+        // Lock the toolbars to the top edge
+        imp.general_lock_toolbars_to_top_row
+            .set_active(appwindow.overlays().toolbars_locked());
+        imp.general_lock_toolbars_to_top_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow.overlays().set_toolbars_locked(row.is_active());
+                }
+            ));
         // and on change
         imp.general_show_scrollbars_row
             .connect_active_notify(clone!(

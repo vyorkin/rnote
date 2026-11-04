@@ -4,13 +4,63 @@ use crate::canvaswrapper::RnCanvasWrapper;
 use crate::{RnAppWindow, RnColorPicker, RnPenPicker, dialogs};
 use core::time::Duration;
 use gtk4::{
-    CompositeTemplate, Overlay, ProgressBar, ScrolledWindow, Widget, gio, glib, glib::clone,
-    prelude::*, subclass::prelude::*,
+    Align, Box, CompositeTemplate, Image, Overlay, ProgressBar, ScrolledWindow, Widget, gio, glib,
+    glib::clone, prelude::*, subclass::prelude::*,
 };
 use rnote_engine::ext::GdkRGBAExt;
 use rnote_engine::pens::PenStyle;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 use tracing::error;
+
+/// The toolbar panels that can be floating or docked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ToolbarPanel {
+    PenPicker,
+    ColorPicker,
+    PensSideBar,
+}
+
+/// The window edge a toolbar panel is attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ToolbarDock {
+    /// The panel floats over the canvas and takes no layout space.
+    #[default]
+    Floating,
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl ToolbarDock {
+    /// The dock named by a stored settings string.
+    pub(crate) fn from_name(name: &str) -> Self {
+        match name {
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
+            "left" => Self::Left,
+            "right" => Self::Right,
+            _ => Self::Floating,
+        }
+    }
+
+    /// The name the dock is stored under in the app settings.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Floating => "floating",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+}
+
+/// How close to an edge a dragged panel must be let go to dock there, in pixels.
+const DOCK_SNAP_DISTANCE: f64 = 64.0;
 
 mod imp {
     use super::*;
@@ -20,9 +70,35 @@ mod imp {
     pub(crate) struct RnOverlays {
         pub(crate) progresspulses_active: Cell<usize>,
         pub(crate) progresspulse_id: RefCell<Option<glib::SourceId>>,
+        /// Where each toolbar panel is docked.
+        pub(crate) docks: RefCell<HashMap<ToolbarPanel, ToolbarDock>>,
+        /// Whether the toolbars are locked to the top edge. Locked toolbars can't be dragged.
+        pub(crate) toolbars_locked: Cell<bool>,
 
         #[template_child]
         pub(crate) toolbar_overlay: TemplateChild<Overlay>,
+        #[template_child]
+        pub(crate) dock_top_scroller: TemplateChild<ScrolledWindow>,
+        #[template_child]
+        pub(crate) dock_top: TemplateChild<Box>,
+        #[template_child]
+        pub(crate) dock_bottom_scroller: TemplateChild<ScrolledWindow>,
+        #[template_child]
+        pub(crate) dock_bottom: TemplateChild<Box>,
+        #[template_child]
+        pub(crate) dock_left: TemplateChild<Box>,
+        #[template_child]
+        pub(crate) dock_right: TemplateChild<Box>,
+        #[template_child]
+        pub(crate) penpicker_box: TemplateChild<Box>,
+        #[template_child]
+        pub(crate) colorpicker_box: TemplateChild<Box>,
+        #[template_child]
+        pub(crate) penpicker_handle: TemplateChild<Image>,
+        #[template_child]
+        pub(crate) colorpicker_handle: TemplateChild<Image>,
+        #[template_child]
+        pub(crate) sidebar_handle: TemplateChild<Image>,
         #[template_child]
         pub(crate) toast_overlay: TemplateChild<adw::ToastOverlay>,
         #[template_child]
@@ -59,8 +135,6 @@ mod imp {
     impl ObjectImpl for RnOverlays {
         fn constructed(&self) {
             self.parent_constructed();
-
-            self.setup_toolbar_overlay();
         }
 
         fn dispose(&self) {
@@ -73,11 +147,11 @@ mod imp {
 
     impl WidgetImpl for RnOverlays {}
     impl RnOverlays {
-        fn setup_toolbar_overlay(&self) {
+        pub(crate) fn setup_toolbar_overlay(&self) {
             self.toolbar_overlay
-                .set_measure_overlay(&*self.colorpicker, true);
+                .set_measure_overlay(&*self.colorpicker_box, true);
             self.toolbar_overlay
-                .set_measure_overlay(&*self.penpicker, true);
+                .set_measure_overlay(&*self.penpicker_box, true);
             self.toolbar_overlay
                 .set_measure_overlay(&*self.sidebar_box, true);
         }
@@ -128,12 +202,325 @@ impl RnOverlays {
         self.imp().sidebar_box.get()
     }
 
+    pub(crate) fn penpicker_box(&self) -> gtk4::Box {
+        self.imp().penpicker_box.get()
+    }
+
+    pub(crate) fn colorpicker_box(&self) -> gtk4::Box {
+        self.imp().colorpicker_box.get()
+    }
+
+    /// Show or hide the toolbar panels.
+    pub(crate) fn set_toolbars_visible(&self, visible: bool) {
+        let imp = self.imp();
+        imp.penpicker_box.set_visible(visible);
+        imp.colorpicker_box.set_visible(visible);
+        imp.sidebar_box.set_visible(visible);
+    }
+
     pub(crate) fn sidebar_scroller(&self) -> ScrolledWindow {
         self.imp().sidebar_scroller.get()
     }
 
     pub(crate) fn penssidebar(&self) -> RnPensSideBar {
         self.imp().penssidebar.get()
+    }
+
+    /// Where the given toolbar panel is currently docked.
+    pub(crate) fn panel_dock(&self, panel: ToolbarPanel) -> ToolbarDock {
+        self.imp()
+            .docks
+            .borrow()
+            .get(&panel)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Dock the given toolbar panel to a window edge, or float it over the canvas.
+    pub(crate) fn set_panel_dock(&self, panel: ToolbarPanel, dock: ToolbarDock) {
+        self.imp().docks.borrow_mut().insert(panel, dock);
+        self.apply_panel_dock(panel, dock);
+    }
+
+    /// Whether the toolbars are locked to the top edge.
+    pub(crate) fn toolbars_locked(&self) -> bool {
+        self.imp().toolbars_locked.get()
+    }
+
+    /// Lock the toolbars to the top edge, or free them to be dragged to any edge.
+    ///
+    /// Locking moves every panel to the top dock and hides the drag handles. Unlocking leaves the
+    /// panels where they are, so they can be dragged out again.
+    pub(crate) fn set_toolbars_locked(&self, locked: bool) {
+        if self.imp().toolbars_locked.replace(locked) == locked {
+            return;
+        }
+
+        for panel in [
+            ToolbarPanel::PenPicker,
+            ToolbarPanel::ColorPicker,
+            ToolbarPanel::PensSideBar,
+        ] {
+            self.panel_handle(panel).set_visible(!locked);
+        }
+
+        if locked {
+            for panel in [
+                ToolbarPanel::PenPicker,
+                ToolbarPanel::ColorPicker,
+                ToolbarPanel::PensSideBar,
+            ] {
+                self.set_panel_dock(panel, ToolbarDock::Top);
+            }
+        }
+    }
+
+    fn panel_widget(&self, panel: ToolbarPanel) -> Widget {
+        let imp = self.imp();
+        match panel {
+            ToolbarPanel::PenPicker => imp.penpicker_box.clone().upcast(),
+            ToolbarPanel::ColorPicker => imp.colorpicker_box.clone().upcast(),
+            ToolbarPanel::PensSideBar => imp.sidebar_box.clone().upcast(),
+        }
+    }
+
+    fn panel_handle(&self, panel: ToolbarPanel) -> Image {
+        let imp = self.imp();
+        match panel {
+            ToolbarPanel::PenPicker => imp.penpicker_handle.get(),
+            ToolbarPanel::ColorPicker => imp.colorpicker_handle.get(),
+            ToolbarPanel::PensSideBar => imp.sidebar_handle.get(),
+        }
+    }
+
+    fn dock_slot(&self, dock: ToolbarDock) -> Option<Box> {
+        let imp = self.imp();
+        match dock {
+            ToolbarDock::Top => Some(imp.dock_top.get()),
+            ToolbarDock::Bottom => Some(imp.dock_bottom.get()),
+            ToolbarDock::Left => Some(imp.dock_left.get()),
+            ToolbarDock::Right => Some(imp.dock_right.get()),
+            ToolbarDock::Floating => None,
+        }
+    }
+
+    fn update_dock_slots_visibility(&self) {
+        let imp = self.imp();
+        for dock in [
+            ToolbarDock::Top,
+            ToolbarDock::Bottom,
+            ToolbarDock::Left,
+            ToolbarDock::Right,
+        ] {
+            if let Some(slot) = self.dock_slot(dock) {
+                let used = slot.first_child().is_some();
+                // The horizontal slots live in a scroller, which is the widget that hides.
+                match dock {
+                    ToolbarDock::Top => imp.dock_top_scroller.set_visible(used),
+                    ToolbarDock::Bottom => imp.dock_bottom_scroller.set_visible(used),
+                    _ => slot.set_visible(used),
+                }
+            }
+        }
+    }
+
+    fn apply_panel_dock(&self, panel: ToolbarPanel, dock: ToolbarDock) {
+        let widget = self.panel_widget(panel);
+        let overlay = self.imp().toolbar_overlay.get();
+
+        // `GtkBox::append` refuses a widget that still has a parent, and the overlay's measure
+        // flag can only be set while the widget is an overlay child, so detach first.
+        if widget.parent().is_some() {
+            widget.unparent();
+        }
+
+        match dock {
+            ToolbarDock::Floating => {
+                // `add_overlay` reparents the panel out of its dock slot, so measure has to be
+                // set after it is an overlay child.
+                overlay.add_overlay(&widget);
+                overlay.set_measure_overlay(&widget, true);
+
+                let (margin_top, margin_bottom, margin_start, margin_end) = match panel {
+                    ToolbarPanel::PenPicker => (6, 18, 6, 6),
+                    ToolbarPanel::ColorPicker => (18, 6, 18, 18),
+                    ToolbarPanel::PensSideBar => (72, 72, 18, 18),
+                };
+                let (halign, valign) = match panel {
+                    ToolbarPanel::PenPicker => (Align::Center, Align::End),
+                    ToolbarPanel::ColorPicker => (Align::Center, Align::Start),
+                    ToolbarPanel::PensSideBar => (Align::End, Align::Center),
+                };
+
+                widget.set_margin_top(margin_top);
+                widget.set_margin_bottom(margin_bottom);
+                widget.set_margin_start(margin_start);
+                widget.set_margin_end(margin_end);
+                widget.set_halign(halign);
+                widget.set_valign(valign);
+                widget.set_hexpand(false);
+                widget.set_vexpand(false);
+            }
+            docked => {
+                widget.set_margin_top(0);
+                widget.set_margin_bottom(0);
+                widget.set_margin_start(0);
+                widget.set_margin_end(0);
+                widget.set_halign(Align::Start);
+                widget.set_valign(Align::Start);
+                widget.set_hexpand(false);
+                // Only the pen sidebar fills the height of a side dock; the other panels keep
+                // their natural size.
+                widget.set_vexpand(
+                    matches!(docked, ToolbarDock::Left | ToolbarDock::Right)
+                        && panel == ToolbarPanel::PensSideBar,
+                );
+
+                if let Some(slot) = self.dock_slot(docked) {
+                    slot.append(&widget);
+                }
+            }
+        }
+
+        self.update_dock_slots_visibility();
+    }
+
+    fn position_in_overlay(&self, widget: &Widget) -> (f64, f64) {
+        let Some(root) = widget.root().and_then(|root| root.downcast::<gtk4::Window>().ok()) else {
+            return (0.0, 0.0);
+        };
+        let overlay = self.imp().toolbar_overlay.get();
+        let Some(widget_bounds) = widget.compute_bounds(&root) else {
+            return (0.0, 0.0);
+        };
+        let Some(overlay_bounds) = overlay.compute_bounds(&root) else {
+            return (0.0, 0.0);
+        };
+
+        (
+            widget_bounds.x() as f64 - overlay_bounds.x() as f64,
+            widget_bounds.y() as f64 - overlay_bounds.y() as f64,
+        )
+    }
+
+    /// Float a panel at the given position of the overlay, in overlay coordinates.
+    fn float_panel_at(&self, panel: ToolbarPanel, x: f64, y: f64) {
+        self.set_panel_dock(panel, ToolbarDock::Floating);
+
+        let widget = self.panel_widget(panel);
+        widget.set_halign(Align::Start);
+        widget.set_valign(Align::Start);
+        widget.set_margin_start(x.max(0.0) as i32);
+        widget.set_margin_top(y.max(0.0) as i32);
+        widget.set_margin_end(0);
+        widget.set_margin_bottom(0);
+    }
+
+    fn setup_toolbars(&self) {
+        for panel in [
+            ToolbarPanel::PenPicker,
+            ToolbarPanel::ColorPicker,
+            ToolbarPanel::PensSideBar,
+        ] {
+            self.install_panel_drag(panel);
+        }
+    }
+
+    /// Give a panel's handle the drag that floats it and docks it to the nearest edge.
+    fn install_panel_drag(&self, panel: ToolbarPanel) {
+        let handle = self.panel_handle(panel);
+        handle.set_cursor_from_name(Some("grab"));
+
+        let start_margin = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        let drag = gtk4::GestureDrag::new();
+
+        drag.connect_drag_begin(clone!(
+            #[weak(rename_to = overlays)]
+            self,
+            #[strong]
+            start_margin,
+            #[weak]
+            handle,
+            move |_gesture, _start_x, _start_y| {
+                if overlays.imp().toolbars_locked.get() {
+                    return;
+                }
+
+                // Float the panel where it is, so a docked panel can be dragged out too.
+                let widget = overlays.panel_widget(panel);
+                let (x, y) = overlays.position_in_overlay(&widget);
+                overlays.float_panel_at(panel, x, y);
+                start_margin.set((widget.margin_start() as f64, widget.margin_top() as f64));
+                handle.set_cursor_from_name(Some("grabbing"));
+            }
+        ));
+
+        drag.connect_drag_update(clone!(
+            #[weak(rename_to = overlays)]
+            self,
+            #[strong]
+            start_margin,
+            move |_gesture, offset_x, offset_y| {
+                if overlays.imp().toolbars_locked.get() {
+                    return;
+                }
+
+                let widget = overlays.panel_widget(panel);
+                let (start_x, start_y) = start_margin.get();
+                widget.set_margin_start((start_x + offset_x).max(0.0) as i32);
+                widget.set_margin_top((start_y + offset_y).max(0.0) as i32);
+            }
+        ));
+
+        drag.connect_drag_end(clone!(
+            #[weak(rename_to = overlays)]
+            self,
+            #[strong]
+            start_margin,
+            #[weak]
+            handle,
+            move |gesture, _offset_x, _offset_y| {
+                handle.set_cursor_from_name(Some("grab"));
+                if overlays.imp().toolbars_locked.get() {
+                    return;
+                }
+
+                let widget = overlays.panel_widget(panel);
+                let overlay = overlays.imp().toolbar_overlay.get();
+                let (offset_x, offset_y) = gesture.offset().unwrap_or_default();
+                let (start_x, start_y) = start_margin.get();
+                let overlay_width = overlay.width() as f64;
+                let overlay_height = overlay.height() as f64;
+
+                let center_x = start_x + offset_x + widget.width() as f64 / 2.0;
+                let center_y = start_y + offset_y + widget.height() as f64 / 2.0;
+                let edges = [
+                    (center_y, ToolbarDock::Top),
+                    (overlay_height - center_y, ToolbarDock::Bottom),
+                    (center_x, ToolbarDock::Left),
+                    (overlay_width - center_x, ToolbarDock::Right),
+                ];
+                let (distance, dock) =
+                    edges
+                        .iter()
+                        .copied()
+                        .fold((f64::MAX, ToolbarDock::Floating), |best, edge| {
+                            if edge.0 < best.0 { edge } else { best }
+                        });
+
+                if distance <= DOCK_SNAP_DISTANCE {
+                    overlays.set_panel_dock(panel, dock);
+                } else {
+                    // Keep it floating, but inside the overlay.
+                    let max_x = (overlay_width - widget.width() as f64).max(0.0);
+                    let max_y = (overlay_height - widget.height() as f64).max(0.0);
+                    widget.set_margin_start((start_x + offset_x).clamp(0.0, max_x) as i32);
+                    widget.set_margin_top((start_y + offset_y).clamp(0.0, max_y) as i32);
+                }
+            }
+        ));
+
+        handle.add_controller(drag);
     }
 
     pub(crate) fn init(&self, appwindow: &RnAppWindow) {
@@ -150,6 +537,8 @@ impl RnOverlays {
 
         self.setup_colorpicker(appwindow);
         self.setup_tabview(appwindow);
+        self.setup_toolbars();
+        self.imp().setup_toolbar_overlay();
     }
 
     fn setup_colorpicker(&self, appwindow: &RnAppWindow) {
@@ -495,5 +884,123 @@ impl RnOverlays {
         self.toast_overlay().add_toast(toast.clone());
         error!("{err}");
         toast
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three dockable toolbars, in a fixed order so failures name the same panel.
+    const PANELS: [ToolbarPanel; 3] = [
+        ToolbarPanel::PenPicker,
+        ToolbarPanel::ColorPicker,
+        ToolbarPanel::PensSideBar,
+    ];
+
+    fn panel_parent(overlays: &RnOverlays, panel: ToolbarPanel) -> Widget {
+        overlays
+            .panel_widget(panel)
+            .parent()
+            .expect("every toolbar must stay parented")
+    }
+
+    /// The binary registers the widgets' templates and icons in `main`; a test binary has to do
+    /// the same before it builds any widget.
+    fn init_gtk() -> bool {
+        if gtk4::init().is_err() {
+            eprintln!("no GTK display available, skipping the toolbar dock test");
+            return false;
+        }
+        if let Err(err) = gio::resources_register_include!("compiled.gresource") {
+            eprintln!("failed to register compiled gresource, Err: {err:?}");
+            return false;
+        }
+        true
+    }
+
+    #[test]
+    fn toolbars_move_between_dock_slots_and_the_overlay() {
+        // GTK has to be initialized before any widget is built. Without a display (CI, a
+        // headless shell) there is nothing to check here.
+        if !init_gtk() {
+            return;
+        }
+
+        let overlays = RnOverlays::new();
+        let imp = overlays.imp();
+        let overlay: Widget = imp.toolbar_overlay.clone().upcast();
+        let dock = |dock: ToolbarDock| -> Widget {
+            overlays.dock_slot(dock).unwrap().upcast()
+        };
+
+        // Every panel starts floating in the overlay, and its handle is shown.
+        for panel in PANELS {
+            assert_eq!(panel_parent(&overlays, panel), overlay);
+            assert!(overlays.panel_handle(panel).is_visible());
+        }
+
+        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Left);
+        assert_eq!(panel_parent(&overlays, ToolbarPanel::PenPicker), dock(ToolbarDock::Left));
+        assert!(overlays.dock_slot(ToolbarDock::Left).unwrap().is_visible());
+
+        overlays.set_panel_dock(ToolbarPanel::ColorPicker, ToolbarDock::Bottom);
+        assert_eq!(
+            panel_parent(&overlays, ToolbarPanel::ColorPicker),
+            dock(ToolbarDock::Bottom)
+        );
+        assert!(overlays.imp().dock_bottom_scroller.is_visible());
+
+        // The sidebar fills the height of a side dock, the other panels keep their natural size.
+        overlays.set_panel_dock(ToolbarPanel::PensSideBar, ToolbarDock::Right);
+        assert_eq!(
+            panel_parent(&overlays, ToolbarPanel::PensSideBar),
+            dock(ToolbarDock::Right)
+        );
+        assert!(overlays.panel_widget(ToolbarPanel::PensSideBar).vexpands());
+        assert!(!overlays.panel_widget(ToolbarPanel::PenPicker).vexpands());
+
+        // An emptied dock collapses.
+        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Floating);
+        assert!(!overlays.dock_slot(ToolbarDock::Left).unwrap().is_visible());
+        assert_eq!(panel_parent(&overlays, ToolbarPanel::PenPicker), overlay);
+
+        // Floating can place a panel at an exact overlay position.
+        overlays.float_panel_at(ToolbarPanel::PenPicker, 40.0, 50.0);
+        let penpicker = overlays.panel_widget(ToolbarPanel::PenPicker);
+        assert_eq!((penpicker.margin_start(), penpicker.margin_top()), (40, 50));
+        assert_eq!(penpicker.halign(), Align::Start);
+        assert_eq!(penpicker.valign(), Align::Start);
+    }
+
+    #[test]
+    fn locking_moves_every_toolbar_to_the_top_and_hides_handles() {
+        if !init_gtk() {
+            return;
+        }
+
+        let overlays = RnOverlays::new();
+        let top: Widget = overlays.dock_slot(ToolbarDock::Top).unwrap().upcast();
+
+        // The state the window restores from settings before the lock is applied.
+        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Left);
+        overlays.set_panel_dock(ToolbarPanel::ColorPicker, ToolbarDock::Right);
+        overlays.set_panel_dock(ToolbarPanel::PensSideBar, ToolbarDock::Top);
+        overlays.set_toolbars_locked(true);
+
+        for panel in PANELS {
+            assert_eq!(panel_parent(&overlays, panel), top);
+            assert!(!overlays.panel_handle(panel).is_visible());
+        }
+        assert!(overlays.imp().dock_top_scroller.is_visible());
+        assert!(!overlays.dock_slot(ToolbarDock::Right).unwrap().is_visible());
+
+        // Unlocking leaves the panels docked where they are and brings the handles back.
+        overlays.set_toolbars_locked(false);
+        assert!(!overlays.toolbars_locked());
+        for panel in PANELS {
+            assert_eq!(panel_parent(&overlays, panel), top);
+            assert!(overlays.panel_handle(panel).is_visible());
+        }
     }
 }

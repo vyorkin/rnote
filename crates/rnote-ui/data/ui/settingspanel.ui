@@ -60,6 +60,12 @@
                       </object>
                     </child>
                     <child>
+                      <object class="AdwSwitchRow" id="general_lock_toolbars_to_top_row">
+                        <property name="title" translatable="yes">Lock Toolbars to Top</property>
+                        <property name="subtitle" translatable="yes">Keep the toolbars at the top edge of the window. When disabled, drag a toolbar by its handle to dock it to any edge.</property>
+                      </object>
+                    </child>
+                    <child>
                       <object class="AdwSwitchRow" id="general_optimize_epd_row">
                         <property name="title" translatable="yes">Optimize for E-Paper Displays</property>
                         <property name="subtitle" translatable="yes">Changes certain UI elements and modifies behaviour

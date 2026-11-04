@@ -1,5 +1,6 @@
 // Imports
 use crate::appwindow::RnAppWindow;
+use crate::{ToolbarDock, ToolbarPanel};
 use adw::{prelude::*, subclass::prelude::*};
 use gtk4::{gdk, glib, glib::clone};
 use tracing::error;
@@ -472,6 +473,24 @@ impl RnAppWindow {
             };
         }
 
+        {
+            // Toolbar docking
+            let overlays = self.overlays();
+            overlays.set_panel_dock(
+                ToolbarPanel::PenPicker,
+                ToolbarDock::from_name(&app_settings.string("penpicker-dock")),
+            );
+            overlays.set_panel_dock(
+                ToolbarPanel::ColorPicker,
+                ToolbarDock::from_name(&app_settings.string("colorpicker-dock")),
+            );
+            overlays.set_panel_dock(
+                ToolbarPanel::PensSideBar,
+                ToolbarDock::from_name(&app_settings.string("penssidebar-dock")),
+            );
+            overlays.set_toolbars_locked(app_settings.boolean("toolbars-lock-to-top"));
+        }
+
         Ok(())
     }
 
@@ -492,10 +511,28 @@ impl RnAppWindow {
         }
 
         {
-            // Save global config
+            // Global config
             if let Err(err) = self.save_global_config_to_settings(&app_settings) {
                 error!("Unable to save global configuration to app settings, Err: {err:?}");
             }
+        }
+
+        {
+            // Toolbar docking
+            let overlays = self.overlays();
+            app_settings.set_string(
+                "penpicker-dock",
+                overlays.panel_dock(ToolbarPanel::PenPicker).name(),
+            )?;
+            app_settings.set_string(
+                "colorpicker-dock",
+                overlays.panel_dock(ToolbarPanel::ColorPicker).name(),
+            )?;
+            app_settings.set_string(
+                "penssidebar-dock",
+                overlays.panel_dock(ToolbarPanel::PensSideBar).name(),
+            )?;
+            app_settings.set_boolean("toolbars-lock-to-top", overlays.toolbars_locked())?;
         }
 
         {

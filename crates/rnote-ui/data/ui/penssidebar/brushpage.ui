@@ -50,6 +50,16 @@
                 </style>
               </object>
             </child>
+            <child>
+              <object class="GtkToggleButton" id="brushstyle_fountain_toggle">
+                <property name="group">brushstyle_solid_toggle</property>
+                <property name="tooltip_text" translatable="yes">Fountain Pen</property>
+                <property name="icon-name">pen-brush-style-fountain-symbolic</property>
+                <style>
+                  <class name="sidebar_action_button" />
+                </style>
+              </object>
+            </child>
           </object>
         </child>
         <child>
@@ -453,6 +463,57 @@
                             <item translatable="yes" context="A variant of the textured pen texture distribution">Exponential</item>
                             <item translatable="yes" context="A variant of the textured pen texture distribution">Reverse Exponential</item>
                           </items>
+                        </object>
+                      </property>
+                    </object>
+                  </child>
+                </object>
+              </child>
+              <child>
+                <!-- Fountain pen options -->
+                <object class="AdwPreferencesGroup">
+                  <property name="title" translatable="yes">Fountain Pen Style</property>
+                  <child>
+                    <object class="AdwSpinRow" id="fountainstyle_pressure_influence_row">
+                      <property name="title" translatable="yes">Pressure Influence</property>
+                      <property name="subtitle" translatable="yes">How much pressing harder widens the stroke (0 = ignore pressure, 1 = fully pressure driven)</property>
+                      <property name="digits">2</property>
+                      <property name="adjustment">
+                        <object class="GtkAdjustment">
+                          <property name="lower">0</property>
+                          <property name="upper">1</property>
+                          <property name="step-increment">0.05</property>
+                          <property name="page-increment">0.1</property>
+                        </object>
+                      </property>
+                    </object>
+                  </child>
+                  <child>
+                    <object class="AdwSpinRow" id="fountainstyle_speed_influence_row">
+                      <property name="title" translatable="yes">Speed Influence</property>
+                      <property name="subtitle" translatable="yes">How much moving faster thins the stroke (0 = ignore speed, 1 = fully speed driven)</property>
+                      <property name="digits">2</property>
+                      <property name="adjustment">
+                        <object class="GtkAdjustment">
+                          <property name="lower">0</property>
+                          <property name="upper">1</property>
+                          <property name="step-increment">0.05</property>
+                          <property name="page-increment">0.1</property>
+                        </object>
+                      </property>
+                    </object>
+                  </child>
+                  <child>
+                    <object class="AdwSpinRow" id="fountainstyle_taper_length_row">
+                      <property name="title" translatable="yes">Taper Length</property>
+                      <property name="subtitle" translatable="yes">How long the tapered tips at the start and end of a stroke are, as drawn (px)</property>
+                      <property name="digits">1</property>
+                      <property name="adjustment">
+                        <object class="GtkAdjustment">
+                          <property name="lower">0</property>
+                          <property name="upper">60</property>
+                          <property name="step-increment">1</property>
+                          <property name="page-increment">5</property>
                         </object>
                       </property>
                     </object>

@@ -50,7 +50,7 @@ pub(crate) use filetype::FileType;
 pub(crate) use groupediconpicker::RnGroupedIconPicker;
 pub(crate) use iconpicker::RnIconPicker;
 pub(crate) use mainheader::RnMainHeader;
-pub(crate) use overlays::RnOverlays;
+pub(crate) use overlays::{RnOverlays, ToolbarDock, ToolbarPanel};
 pub(crate) use penpicker::RnPenPicker;
 pub(crate) use penssidebar::RnPensSideBar;
 pub(crate) use settingspanel::RnSettingsPanel;

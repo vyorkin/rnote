@@ -189,5 +189,21 @@
       <default>true</default>
       <summary>lock the eraser tool</summary>
     </key>
+    <key name="penpicker-dock" type="s">
+      <default>'floating'</default>
+      <summary>the window edge the pen picker is docked to</summary>
+    </key>
+    <key name="colorpicker-dock" type="s">
+      <default>'floating'</default>
+      <summary>the window edge the color picker is docked to</summary>
+    </key>
+    <key name="penssidebar-dock" type="s">
+      <default>'floating'</default>
+      <summary>the window edge the pen sidebar is docked to</summary>
+    </key>
+    <key name="toolbars-lock-to-top" type="b">
+      <default>false</default>
+      <summary>lock all toolbars to the top edge</summary>
+    </key>
   </schema>
 </schemalist>

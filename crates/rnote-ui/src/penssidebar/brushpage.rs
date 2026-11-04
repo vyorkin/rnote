@@ -10,7 +10,7 @@ use rnote_compose::builders::PenPathBuilderType;
 use rnote_compose::style::PressureCurve;
 use rnote_compose::style::textured::{TexturedDotsDistribution, TexturedOptions};
 use rnote_engine::pens::pensconfig::BrushConfig;
-use rnote_engine::pens::pensconfig::brushconfig::{BrushStyle, SolidOptions};
+use rnote_engine::pens::pensconfig::brushconfig::{BrushStyle, FountainOptions, SolidOptions};
 
 mod imp {
     use super::*;
@@ -24,6 +24,8 @@ mod imp {
         pub(crate) brushstyle_marker_toggle: TemplateChild<ToggleButton>,
         #[template_child]
         pub(crate) brushstyle_textured_toggle: TemplateChild<ToggleButton>,
+        #[template_child]
+        pub(crate) brushstyle_fountain_toggle: TemplateChild<ToggleButton>,
         #[template_child]
         pub(crate) brushconfig_menubutton: TemplateChild<MenuButton>,
         #[template_child]
@@ -44,6 +46,12 @@ mod imp {
         pub(crate) texturedstyle_density_row: TemplateChild<adw::SpinRow>,
         #[template_child]
         pub(crate) texturedstyle_distribution_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) fountainstyle_pressure_influence_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) fountainstyle_speed_influence_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) fountainstyle_taper_length_row: TemplateChild<adw::SpinRow>,
         #[template_child]
         pub(crate) stroke_width_picker: TemplateChild<RnStrokeWidthPicker>,
         #[template_child]
@@ -129,6 +137,8 @@ impl RnBrushPage {
             Some(BrushStyle::Solid)
         } else if self.imp().brushstyle_textured_toggle.is_active() {
             Some(BrushStyle::Textured)
+        } else if self.imp().brushstyle_fountain_toggle.is_active() {
+            Some(BrushStyle::Fountain)
         } else {
             None
         }
@@ -139,6 +149,7 @@ impl RnBrushPage {
             BrushStyle::Marker => self.imp().brushstyle_marker_toggle.set_active(true),
             BrushStyle::Solid => self.imp().brushstyle_solid_toggle.set_active(true),
             BrushStyle::Textured => self.imp().brushstyle_textured_toggle.set_active(true),
+            BrushStyle::Fountain => self.imp().brushstyle_fountain_toggle.set_active(true),
         }
     }
 
@@ -183,6 +194,18 @@ impl RnBrushPage {
                     .pens_config
                     .brush_config
                     .textured_options
+                    .stroke_width;
+                self.imp()
+                    .stroke_width_picker
+                    .set_stroke_width(stroke_width);
+            }
+            BrushStyle::Fountain => {
+                let stroke_width = appwindow
+                    .engine_config()
+                    .read()
+                    .pens_config
+                    .brush_config
+                    .fountain_options
                     .stroke_width;
                 self.imp()
                     .stroke_width_picker
@@ -314,6 +337,15 @@ impl RnBrushPage {
                                 .textured_options
                                 .stroke_width = stroke_width;
                         }
+                        BrushStyle::Fountain => {
+                            appwindow
+                                .engine_config()
+                                .write()
+                                .pens_config
+                                .brush_config
+                                .fountain_options
+                                .stroke_width = stroke_width;
+                        }
                     }
                 }
             ),
@@ -357,6 +389,24 @@ impl RnBrushPage {
         ));
 
         imp.brushstyle_textured_toggle.connect_toggled(clone!(
+            #[weak(rename_to=brushpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |toggle| {
+                if !toggle.is_active() {
+                    return;
+                }
+
+                let Some(brush_style) = brushpage.brush_style() else {
+                    return;
+                };
+
+                brushpage.apply_brush_style_selection(&appwindow, brush_style);
+            }
+        ));
+
+        imp.brushstyle_fountain_toggle.connect_toggled(clone!(
             #[weak(rename_to=brushpage)]
             self,
             #[weak]
@@ -453,6 +503,67 @@ impl RnBrushPage {
                         .brush_config
                         .textured_options
                         .distribution = brushpage.texturedstyle_dots_distribution();
+                }
+            ));
+
+        // Fountain style
+        // Pressure influence
+        imp.fountainstyle_pressure_influence_row
+            .get()
+            .set_value(FountainOptions::default().pressure_influence);
+        imp.fountainstyle_pressure_influence_row
+            .get()
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .brush_config
+                        .fountain_options
+                        .pressure_influence = row.value();
+                }
+            ));
+
+        // Speed influence
+        imp.fountainstyle_speed_influence_row
+            .get()
+            .set_value(FountainOptions::default().speed_influence);
+        imp.fountainstyle_speed_influence_row
+            .get()
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .brush_config
+                        .fountain_options
+                        .speed_influence = row.value();
+                }
+            ));
+
+        // Taper length
+        imp.fountainstyle_taper_length_row
+            .get()
+            .set_value(FountainOptions::default().taper_length);
+        imp.fountainstyle_taper_length_row
+            .get()
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .brush_config
+                        .fountain_options
+                        .taper_length = row.value();
                 }
             ));
 
@@ -624,6 +735,13 @@ impl RnBrushPage {
             .set_value(brush_config.textured_options.density);
         self.set_texturedstyle_distribution_variant(brush_config.textured_options.distribution);
 
+        imp.fountainstyle_pressure_influence_row
+            .set_value(brush_config.fountain_options.pressure_influence);
+        imp.fountainstyle_speed_influence_row
+            .set_value(brush_config.fountain_options.speed_influence);
+        imp.fountainstyle_taper_length_row
+            .set_value(brush_config.fountain_options.taper_length);
+
         self.set_brush_style(brush_config.style);
         self.set_buildertype(brush_config.builder_type);
 
@@ -639,6 +757,10 @@ impl RnBrushPage {
             BrushStyle::Textured => {
                 imp.stroke_width_picker
                     .set_stroke_width(brush_config.textured_options.stroke_width);
+            }
+            BrushStyle::Fountain => {
+                imp.stroke_width_picker
+                    .set_stroke_width(brush_config.fountain_options.stroke_width);
             }
         }
 
