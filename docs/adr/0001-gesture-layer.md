@@ -2,7 +2,12 @@
 
 ## Status
 
-proposed
+accepted (first implementation, 2026-11-04)
+
+The first implementation keeps the recognizers in `Brush` and `PenHolder`
+instead of introducing the `GestureManager`/`GesturePen` indirection. The
+decisions below still describe the target shape; the manager and the transaction
+wrapper are a follow-up refactor once a second pen gesture needs shared state.
 
 ## Context
 
