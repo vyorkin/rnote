@@ -48,6 +48,8 @@ mod imp {
         #[template_child]
         pub(crate) general_lock_toolbars_to_top_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
+        pub(crate) general_dock_toolbars_on_drop_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
         pub(crate) general_optimize_epd_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) general_inertial_scrolling_row: TemplateChild<adw::SwitchRow>,
@@ -666,6 +668,29 @@ impl RnSettingsPanel {
                 appwindow,
                 move |row| {
                     appwindow.overlays().set_toolbars_locked(row.is_active());
+                }
+            ));
+
+        // Dock toolbars that are dropped near a window edge
+        imp.general_dock_toolbars_on_drop_row
+            .set_active(appwindow.overlays().dock_on_drop());
+        imp.general_dock_toolbars_on_drop_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    let dock_on_drop = row.is_active();
+                    // The preference is shared, so every open window follows it at once.
+                    for window in appwindow.app().windows() {
+                        let Ok(window) = window.downcast::<RnAppWindow>() else {
+                            continue;
+                        };
+                        window.overlays().set_dock_on_drop(dock_on_drop);
+                        window
+                            .sidebar()
+                            .settings_panel()
+                            .set_dock_on_drop_active(dock_on_drop);
+                    }
                 }
             ));
         // and on change
@@ -1883,6 +1908,13 @@ impl RnSettingsPanel {
         let mut widget_flags = canvas.engine_mut().doc_resize_to_fit_content();
         widget_flags.store_modified = true;
         appwindow.handle_widget_flags(widget_flags, &canvas);
+    }
+
+    /// Set the dock-on-drop switch to the value another window changed it to.
+    pub(crate) fn set_dock_on_drop_active(&self, active: bool) {
+        self.imp()
+            .general_dock_toolbars_on_drop_row
+            .set_active(active);
     }
 }
 

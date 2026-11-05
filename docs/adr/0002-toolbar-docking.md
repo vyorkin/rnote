@@ -2,7 +2,7 @@
 
 ## Status
 
-accepted (2026-11-04)
+accepted (2026-11-04); amended (2026-11-05): docking is opt-in, see ADR 0005.
 
 ## Context
 

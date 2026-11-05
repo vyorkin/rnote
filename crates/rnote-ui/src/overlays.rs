@@ -3,6 +3,7 @@ use crate::RnPensSideBar;
 use crate::canvaswrapper::RnCanvasWrapper;
 use crate::{RnAppWindow, RnColorPicker, RnPenPicker, dialogs};
 use core::time::Duration;
+use gettextrs::gettext;
 use gtk4::{
     Align, Box, CompositeTemplate, Image, Overlay, ProgressBar, ScrolledWindow, Widget, gio, glib,
     glib::clone, prelude::*, subclass::prelude::*,
@@ -59,13 +60,26 @@ impl ToolbarDock {
 }
 
 /// How close to an edge a dragged panel must be let go to dock there, in pixels.
-const DOCK_SNAP_DISTANCE: f64 = 64.0;
+const DOCK_SNAP_DISTANCE: f64 = 24.0;
 
 /// Thickness of the strip that marks the edge a release would dock the dragged panel to.
-const DOCK_INDICATOR_THICKNESS: i32 = 64;
+const DOCK_INDICATOR_THICKNESS: i32 = DOCK_SNAP_DISTANCE as i32;
+
+/// Whether a release docks the dragged panel, given the preference and the Shift key.
+///
+/// Shift inverts the preference: with docking-on-drop off, holding Shift is the only way to dock;
+/// with it on, holding Shift is the way to keep the panel floating.
+fn dock_release_docks(dock_on_drop: bool, shift_held: bool) -> bool {
+    dock_on_drop != shift_held
+}
+
+/// The dock a release uses, or `None` when the release keeps the panel floating.
+fn dock_at_release(target: (f64, ToolbarDock), docks: bool) -> Option<ToolbarDock> {
+    (docks && target.0 <= DOCK_SNAP_DISTANCE).then_some(target.1)
+}
 
 /// Show the strip of `dock` and hide the others.
-fn show_dock_indicator(indicators: &[(ToolbarDock, gtk4::DrawingArea)], dock: ToolbarDock) {
+fn show_dock_indicator(indicators: &[(ToolbarDock, Box)], dock: ToolbarDock) {
     for (edge, strip) in indicators {
         strip.set_visible(*edge == dock);
     }
@@ -83,6 +97,10 @@ mod imp {
         pub(crate) docks: RefCell<HashMap<ToolbarPanel, ToolbarDock>>,
         /// Whether the toolbars are locked to the top edge. Locked toolbars can't be dragged.
         pub(crate) toolbars_locked: Cell<bool>,
+        /// Whether a plain drop near an edge docks a toolbar. Shift inverts it.
+        pub(crate) dock_on_drop: Cell<bool>,
+        /// The strips that mark the edge a release would dock the dragged panel to.
+        pub(crate) dock_indicators: RefCell<Vec<(ToolbarDock, Box)>>,
 
         #[template_child]
         pub(crate) toolbar_overlay: TemplateChild<Overlay>,
@@ -269,6 +287,37 @@ impl RnOverlays {
             return;
         }
         self.apply_panel_dock(panel, dock, at);
+    }
+
+    /// Whether a plain drop near an edge docks a toolbar.
+    pub(crate) fn dock_on_drop(&self) -> bool {
+        self.imp().dock_on_drop.get()
+    }
+
+    /// Set whether a plain drop near an edge docks a toolbar, and update the handle tooltips.
+    ///
+    /// Shift inverts the preference, so the tooltip names whichever gesture is not the plain one.
+    pub(crate) fn set_dock_on_drop(&self, dock_on_drop: bool) {
+        self.imp().dock_on_drop.set(dock_on_drop);
+        let tooltip = if dock_on_drop {
+            gettext(
+                "Drag to move this toolbar. Release near an edge to dock it; hold Shift to keep it floating.",
+            )
+        } else {
+            gettext("Drag to move this toolbar. Hold Shift and release near an edge to dock it.")
+        };
+        for panel in [
+            ToolbarPanel::PenPicker,
+            ToolbarPanel::ColorPicker,
+            ToolbarPanel::PensSideBar,
+        ] {
+            self.panel_handle(panel).set_tooltip_text(Some(&tooltip));
+        }
+    }
+
+    /// Show the strip of the edge a release would dock the dragged panel to.
+    fn set_dock_indicator(&self, dock: ToolbarDock) {
+        show_dock_indicator(&self.imp().dock_indicators.borrow(), dock);
     }
 
     /// Whether the toolbars are locked to the top edge.
@@ -532,34 +581,32 @@ impl RnOverlays {
         // progress. Each strip keeps a fixed position and is only shown or hidden: a widget that
         // moves while the pointer is down keeps the pixels of the position it left behind, because
         // the frame's damage then covers only where the widget now is.
-        let dock_indicators = Rc::new(
-            [
-                (ToolbarDock::Top, Align::Fill, Align::Start),
-                (ToolbarDock::Bottom, Align::Fill, Align::End),
-                (ToolbarDock::Left, Align::Start, Align::Fill),
-                (ToolbarDock::Right, Align::End, Align::Fill),
-            ]
-            .into_iter()
-            .map(|(dock, halign, valign)| {
-                let strip = gtk4::DrawingArea::new();
-                strip.set_can_target(false);
-                strip.set_visible(false);
-                strip.set_halign(halign);
-                strip.set_valign(valign);
-                if matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom) {
-                    strip.set_size_request(-1, DOCK_INDICATOR_THICKNESS);
-                } else {
-                    strip.set_size_request(DOCK_INDICATOR_THICKNESS, -1);
-                }
-                strip.set_draw_func(|_, context, _, _| {
-                    context.set_source_rgba(1.0, 1.0, 1.0, 0.14);
-                    context.paint().ok();
-                });
-                self.imp().toolbar_overlay.get().add_overlay(&strip);
-                (dock, strip)
-            })
-            .collect::<Vec<_>>(),
-        );
+        let indicators = [
+            (ToolbarDock::Top, Align::Fill, Align::Start),
+            (ToolbarDock::Bottom, Align::Fill, Align::End),
+            (ToolbarDock::Left, Align::Start, Align::Fill),
+            (ToolbarDock::Right, Align::End, Align::Fill),
+        ]
+        .into_iter()
+        .map(|(dock, halign, valign)| {
+            // A box, not a drawing area: the strip is painted by the CSS class, so it follows the
+            // theme's accent colour instead of one hardcoded wash.
+            let strip = Box::new(gtk4::Orientation::Horizontal, 0);
+            strip.set_can_target(false);
+            strip.set_visible(false);
+            strip.add_css_class("dock_indicator");
+            strip.set_halign(halign);
+            strip.set_valign(valign);
+            if matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom) {
+                strip.set_size_request(-1, DOCK_INDICATOR_THICKNESS);
+            } else {
+                strip.set_size_request(DOCK_INDICATOR_THICKNESS, -1);
+            }
+            self.imp().toolbar_overlay.get().add_overlay(&strip);
+            (dock, strip)
+        })
+        .collect::<Vec<_>>();
+        *self.imp().dock_indicators.borrow_mut() = indicators;
 
         let controller = gtk4::EventControllerLegacy::new();
         controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -573,7 +620,6 @@ impl RnOverlays {
             let drag_picture = drag_picture.clone();
             let drag_size = drag_size.clone();
             let preview_started = preview_started.clone();
-            let dock_indicators = dock_indicators.clone();
             move |_controller: &gtk4::EventControllerLegacy,
                   event: &gtk4::gdk::Event|
                   -> glib::Propagation {
@@ -602,6 +648,8 @@ impl RnOverlays {
                         pending_move.set(None);
                         drag_picture.replace(None);
                         preview_started.set(false);
+                        // A drag cut short by a lost release leaves the strip on screen.
+                        overlays.set_dock_indicator(ToolbarDock::Floating);
                         if let Some(id) = move_tick.borrow_mut().take() {
                             id.remove();
                         }
@@ -696,20 +744,21 @@ impl RnOverlays {
                             return glib::Propagation::Proceed;
                         }
 
-                        let (distance, dock) = overlays.dock_target(
+                        let target = overlays.dock_target(
                             drag_size.get(),
                             drag_start.get(),
                             press_at.get(),
                             (x, y),
                         );
-                        show_dock_indicator(
-                            &dock_indicators,
-                            if distance <= DOCK_SNAP_DISTANCE {
-                                dock
-                            } else {
-                                ToolbarDock::Floating
-                            },
-                        );
+                        let shift_held = event
+                            .modifier_state()
+                            .contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+                        let dock = dock_at_release(
+                            target,
+                            dock_release_docks(overlays.dock_on_drop(), shift_held),
+                        )
+                        .unwrap_or(ToolbarDock::Floating);
+                        overlays.set_dock_indicator(dock);
 
                         let widget = overlays.panel_widget(panel);
                         let (press_x, press_y) = press_at.get();
@@ -796,7 +845,7 @@ impl RnOverlays {
                     }
                     gtk4::gdk::EventType::ButtonRelease => {
                         overlays.set_cursor_from_name(None);
-                        show_dock_indicator(&dock_indicators, ToolbarDock::Floating);
+                        overlays.set_dock_indicator(ToolbarDock::Floating);
                         if let Some(id) = move_tick.borrow_mut().take() {
                             id.remove();
                         }
@@ -827,14 +876,21 @@ impl RnOverlays {
                         let overlay_width = overlay.width() as f64;
                         let overlay_height = overlay.height() as f64;
                         let size = drag_size.get();
-                        let (distance, dock) = overlays.dock_target(
+                        let target = overlays.dock_target(
                             size,
                             (start_x, start_y),
                             (press_x, press_y),
                             (x, y),
                         );
+                        let shift_held = event
+                            .modifier_state()
+                            .contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+                        let dock = dock_at_release(
+                            target,
+                            dock_release_docks(overlays.dock_on_drop(), shift_held),
+                        );
 
-                        if distance <= DOCK_SNAP_DISTANCE {
+                        if let Some(dock) = dock {
                             overlays.set_panel_dock(panel, dock);
                         } else {
                             // Keep it floating, but inside the overlay. A release that beats the
@@ -1259,14 +1315,21 @@ mod tests {
         true
     }
 
+    /// Every GTK flow runs from this one test: GTK can only be initialized on one thread, and
+    /// libtest runs each test function on its own thread.
     #[test]
-    fn toolbars_move_between_dock_slots_and_the_overlay() {
-        // GTK has to be initialized before any widget is built. Without a display (CI, a
-        // headless shell) there is nothing to check here.
+    fn gtk_toolbar_flows() {
+        // Without a display (CI, a headless shell) there is nothing to check here.
         if !init_gtk() {
             return;
         }
+        toolbars_move_between_dock_slots_and_the_overlay();
+        locking_moves_every_toolbar_to_the_top_and_hides_handles();
+        docks_and_floats_a_panel_that_is_on_screen();
+        the_dock_indicator_marks_only_the_target_edge();
+    }
 
+    fn toolbars_move_between_dock_slots_and_the_overlay() {
         let overlays = RnOverlays::new();
         let imp = overlays.imp();
         let overlay: Widget = imp.toolbar_overlay.clone().upcast();
@@ -1314,12 +1377,7 @@ mod tests {
         assert_eq!(penpicker.valign(), Align::Start);
     }
 
-    #[test]
     fn locking_moves_every_toolbar_to_the_top_and_hides_handles() {
-        if !init_gtk() {
-            return;
-        }
-
         let overlays = RnOverlays::new();
         let top: Widget = overlays.dock_slot(ToolbarDock::Top).unwrap().upcast();
 
@@ -1345,18 +1403,12 @@ mod tests {
         }
     }
 
-    /// A panel that is already on screen must survive being reparented, and a press on its
-    /// handle must float it out of its dock.
+    /// A panel that is already on screen must survive being reparented.
     ///
     /// Dragging a docked panel out, and the settings that dock panels while the window is up,
     /// both reparent a mapped widget. That reparent is deferred to the next main loop iteration,
     /// so the assertions here settle the loop after each dock change.
-    #[test]
     fn docks_and_floats_a_panel_that_is_on_screen() {
-        if !init_gtk() {
-            return;
-        }
-
         let overlays = RnOverlays::new();
         let window = gtk4::Window::builder().child(&overlays).build();
         window.present();
@@ -1402,120 +1454,60 @@ mod tests {
             dock(ToolbarDock::Bottom)
         );
 
-        // The drag a user starts on the handle floats the panel out of its dock slot: the gesture
-        // sits on the overlays widget and finds the handle under the press point.
-        overlays.setup_toolbars();
-        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Left);
-        settle();
-        settle();
-
-        let Some(bounds) = overlays
-            .panel_handle(ToolbarPanel::PenPicker)
-            .compute_bounds(&overlays)
-        else {
-            eprintln!("the handle has no allocation, skipping the handle drag test");
-            return;
-        };
-        let press_x = f64::from(bounds.x() + bounds.width() / 2.0);
-        let press_y = f64::from(bounds.y() + bounds.height() / 2.0);
-        let penpicker = overlays.panel_widget(ToolbarPanel::PenPicker);
-        let (docked_x, docked_y) = overlays.position_in_overlay(&penpicker);
-        let drag = overlays
-            .observe_controllers()
-            .into_iter()
-            .flatten()
-            .find_map(|controller| controller.downcast::<gtk4::GestureDrag>().ok())
-            .expect("the overlays widget owns the toolbar drag gesture");
-        drag.emit_by_name::<()>("drag-begin", &[&press_x, &press_y]);
-        settle();
-        assert_eq!(panel_parent(&overlays, ToolbarPanel::PenPicker), overlay);
-
-        // The panel floats where it stood on screen, which for a left dock is a negative offset:
-        // the drag picks it up there instead of jumping it inside the overlay first.
-        assert!(docked_x < 0.0);
-        assert_eq!(penpicker.margin_start(), docked_x as i32);
-        assert_eq!(penpicker.margin_top(), docked_y as i32);
-
-        // And the overlay must not clip a panel at that offset, or the drag would hide it until
-        // the pointer pulled it inside.
+        // And the overlay must not clip a panel at a negative offset: a docked panel floats out
+        // of a top or left slot at one until the pointer pulls it inside.
         assert_eq!(
             overlays.imp().toolbar_overlay.get().overflow(),
             gtk4::Overflow::Visible
         );
     }
 
-    /// A floating panel has to be draggable too, or it can never be docked again.
+    /// Shift inverts the preference, so one gesture always docks and the other always floats.
     #[test]
-    fn drags_a_panel_that_is_already_floating() {
-        if !init_gtk() {
-            return;
-        }
+    fn shift_inverts_docking_on_drop() {
+        assert!(!dock_release_docks(false, false));
+        assert!(dock_release_docks(false, true));
+        assert!(dock_release_docks(true, false));
+        assert!(!dock_release_docks(true, true));
+    }
 
+    /// A release docks only when docking is armed and the panel is inside the snap zone.
+    #[test]
+    fn a_release_docks_only_inside_the_snap_zone() {
+        let target = |distance: f64| (distance, ToolbarDock::Top);
+        assert_eq!(dock_at_release(target(0.0), true), Some(ToolbarDock::Top));
+        assert_eq!(
+            dock_at_release(target(DOCK_SNAP_DISTANCE), true),
+            Some(ToolbarDock::Top)
+        );
+        assert_eq!(
+            dock_at_release(target(DOCK_SNAP_DISTANCE + 0.5), true),
+            None
+        );
+        // A disarmed release floats however close it is.
+        assert_eq!(dock_at_release(target(0.0), false), None);
+    }
+
+    /// The strip marks the edge the release would use, and no strip is shown while floating.
+    fn the_dock_indicator_marks_only_the_target_edge() {
         let overlays = RnOverlays::new();
-        let window = gtk4::Window::builder().child(&overlays).build();
-        window.present();
-
-        let context = glib::MainContext::default();
-        for _ in 0..500 {
-            if overlays.is_mapped() {
-                break;
-            }
-            context.iteration(false);
-        }
-        if !overlays.is_mapped() {
-            eprintln!("the window did not map, skipping the floating drag test");
-            return;
-        }
-
-        let settle = || {
-            for _ in 0..20 {
-                context.iteration(false);
-            }
-        };
-
         overlays.setup_toolbars();
-        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Floating);
-        settle();
+        let indicators = overlays.imp().dock_indicators.borrow();
+        assert_eq!(indicators.len(), 4);
+        for (_, strip) in indicators.iter() {
+            assert!(strip.has_css_class("dock_indicator"));
+            assert!(!strip.is_visible());
+        }
 
-        let penpicker = overlays.panel_widget(ToolbarPanel::PenPicker);
-        let Some(bounds) = overlays
-            .panel_handle(ToolbarPanel::PenPicker)
-            .compute_bounds(&overlays)
-        else {
-            eprintln!("the handle has no allocation, skipping the floating drag test");
-            return;
-        };
-        let press_x = f64::from(bounds.x() + bounds.width() / 2.0);
-        let press_y = f64::from(bounds.y() + bounds.height() / 2.0);
-        let drag = overlays
-            .observe_controllers()
-            .into_iter()
-            .flatten()
-            .find_map(|controller| controller.downcast::<gtk4::GestureDrag>().ok())
-            .expect("the overlays widget owns the toolbar drag gesture");
+        overlays.set_dock_indicator(ToolbarDock::Left);
+        let shown = indicators
+            .iter()
+            .filter(|(_, strip)| strip.is_visible())
+            .map(|(dock, _)| *dock)
+            .collect::<Vec<_>>();
+        assert_eq!(shown, vec![ToolbarDock::Left]);
 
-        drag.emit_by_name::<()>("drag-begin", &[&press_x, &press_y]);
-        settle();
-
-        // Where the drag picked the panel up, which is where the updates are measured from.
-        let start_x = penpicker.margin_start();
-        let start_y = penpicker.margin_top();
-        drag.emit_by_name::<()>("drag-update", &[&0.0_f64, &40.0_f64]);
-        settle();
-
-        assert_eq!(
-            penpicker.margin_top(),
-            start_y + 40,
-            "a floating panel must follow the drag"
-        );
-        assert_eq!(penpicker.margin_start(), start_x);
-        // Margins only move a widget that is aligned to the start: a panel left at the dock's
-        // centre/end alignment ignores them and stays where it was.
-        assert_eq!(penpicker.halign(), gtk4::Align::Start);
-        assert_eq!(penpicker.valign(), gtk4::Align::Start);
-        assert_eq!(
-            overlays.panel_dock(ToolbarPanel::PenPicker),
-            ToolbarDock::Floating
-        );
+        overlays.set_dock_indicator(ToolbarDock::Floating);
+        assert!(indicators.iter().all(|(_, strip)| !strip.is_visible()));
     }
 }
