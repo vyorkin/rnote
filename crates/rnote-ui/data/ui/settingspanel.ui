@@ -525,7 +525,7 @@ gets disabled.</property>
                         <child>
                           <object class="AdwSpinRow" id="gestures_scribbleerase_pass_height_row">
                             <property name="title" translatable="yes">Turn Height (%)</property>
-                            <property name="tooltip-text" translatable="yes">How far the stroke has to run back for a turn to count, relative to the scribble's size. Raise it if handwriting gets erased</property>
+                            <property name="tooltip-text" translatable="yes">How far the stroke has to run back for a turn to count, relative to the width of the band it scratches across. Raise it if handwriting gets erased</property>
                             <property name="numeric">true</property>
                             <property name="adjustment">
                               <object class="GtkAdjustment">

@@ -20,11 +20,13 @@ pub struct ScribbleRecognitionOptions {
     /// direction and rarely turns back, while a scribble runs back and forth over the same spot.
     #[serde(rename = "min_reversals")]
     pub min_reversals: u32,
-    /// How far the stroke has to turn back, relative to its extent along the dominant axis, to
-    /// count as a reversal.
+    /// How far the stroke has to turn back, relative to the width of the band it covers across
+    /// the dominant axis, to count as a reversal.
     ///
-    /// A scratch-out runs across the whole area on every pass, while the up- and down-strokes of
-    /// handwriting often cover only part of the letter height.
+    /// A scratch-out runs across its band on every pass, while the up- and down-strokes of
+    /// handwriting often cover only part of the letter height. The band, not the length of the
+    /// whole stroke, is what a single pass turns within: a scratch-out that walks along as it
+    /// goes turns back inside its own leaf and never across the whole stroke.
     #[serde(rename = "reversal_prominence_ratio")]
     pub reversal_prominence_ratio: f64,
     /// The smallest turn back (in surface coordinates) that counts as a reversal, whatever the
@@ -130,7 +132,17 @@ pub fn is_scribble(
         .iter()
         .fold(f64::NEG_INFINITY, |acc, v| acc.max(*v))
         - projected.iter().fold(f64::INFINITY, |acc, v| acc.min(*v));
-    let prominence = (options.reversal_prominence_ratio * span)
+    let lateral = points
+        .iter()
+        .map(|p| p.dot(Vector2::new(-axis.y, axis.x)))
+        .collect::<Vec<f64>>();
+    let lateral_span = lateral.iter().fold(f64::NEG_INFINITY, |acc, v| acc.max(*v))
+        - lateral.iter().fold(f64::INFINITY, |acc, v| acc.min(*v));
+    // How far a single pass has to come back for the turn to count. A scratch-out that walks
+    // along as it goes turns back within the width of its own band, not across the whole stroke,
+    // so the prominence is taken from the band and not from the span: judging by the span, a long
+    // scratch over a whole formula asks for a bigger turn than its passes ever make.
+    let prominence = (options.reversal_prominence_ratio * lateral_span.min(span))
         .max(options.reversal_min_prominence_surface / zoom);
 
     let reversals = count_reversals(&projected, prominence);
@@ -291,6 +303,54 @@ mod tests {
     #[test]
     fn recognizes_a_scratch_out() {
         let points = scribble_points(6, 160.0, 40.0)
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| p + jitter(i, 1.5));
+
+        assert!(is_scribble(
+            &pen_path_from_points(points),
+            1.0,
+            QUICK,
+            &ScribbleRecognitionOptions::default()
+        ));
+    }
+
+    /// A scratch-out that walks along as it goes: every pass covers a leaf of `leaf_width` and
+    /// starts `step` further along, the way one crosses out a phrase rather than a single word.
+    fn drifting_scribble_points(
+        passes: usize,
+        leaf_width: f64,
+        step: f64,
+        height: f64,
+    ) -> Vec<Vector2> {
+        let mut points = Vec::new();
+
+        for leaf in 0..passes {
+            let start = 100.0 + leaf as f64 * step;
+            for i in 0..=20 {
+                let t = i as f64 / 20.0;
+                points.push(Vector2::new(
+                    start + t * leaf_width,
+                    100.0 + t * height,
+                ));
+            }
+            for i in 0..=20 {
+                let t = i as f64 / 20.0;
+                points.push(Vector2::new(
+                    start + leaf_width - t * (leaf_width - step),
+                    100.0 + height - t * height,
+                ));
+            }
+        }
+
+        points
+    }
+
+    #[test]
+    fn recognizes_a_scratch_out_that_walks_along() {
+        // Seven leaves of 80 wide, each one 40 further than the last: a pass turns back by 40,
+        // while the whole stroke is 360 wide. Judged by the whole width, none of the turns count.
+        let points = drifting_scribble_points(7, 80.0, 40.0, 60.0)
             .into_iter()
             .enumerate()
             .map(|(i, p)| p + jitter(i, 1.5));
