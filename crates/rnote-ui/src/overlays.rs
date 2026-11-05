@@ -243,6 +243,19 @@ mod imp {
     }
 }
 
+/// Stops the buttons inside `widget` from taking the keyboard focus when they are clicked.
+/// Keyboard focus can still reach them with Tab.
+fn disable_focus_on_click(widget: &impl IsA<Widget>) {
+    let mut child = widget.first_child();
+    while let Some(child_widget) = child {
+        if child_widget.is::<gtk4::Button>() {
+            child_widget.set_focus_on_click(false);
+        }
+        disable_focus_on_click(&child_widget);
+        child = child_widget.next_sibling();
+    }
+}
+
 /// The default timeout for regular text toasts.
 pub(crate) const TEXT_TOAST_TIMEOUT_DEFAULT: Option<Duration> = Some(Duration::from_secs(5));
 
@@ -1184,6 +1197,18 @@ impl RnOverlays {
         imp.penssidebar.get().eraser_page().init(appwindow);
         imp.penssidebar.get().selector_page().init(appwindow);
         imp.penssidebar.get().tools_page().init(appwindow);
+
+        // The panels are pointer tools. A click that took the keyboard focus would leave the
+        // canvas unfocused, and the bare tool keys (1-6, b/s/t/e/v/x) are only handled by the
+        // canvas's key controller: picking a color would kill them until the canvas is clicked
+        // again. Keep tab-focus intact, just don't move focus on a click.
+        for panel in [
+            imp.penpicker_box.clone(),
+            imp.colorpicker_box.clone(),
+            imp.sidebar_box.clone(),
+        ] {
+            disable_focus_on_click(&panel);
+        }
 
         self.setup_colorpicker(appwindow);
         self.setup_tabview(appwindow);
