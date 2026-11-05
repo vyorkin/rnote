@@ -45,7 +45,9 @@
         </child>
         <child>
           <object class="GtkOverlay" id="toolbar_overlay">
-            <property name="overflow">hidden</property>
+            <!-- A panel dragged out of a top or left dock starts at a negative offset, outside
+                 this allocation: clipping would hide it until the pointer pulls it in. -->
+            <property name="overflow">visible</property>
             <property name="hexpand">true</property>
             <property name="vexpand">true</property>
             <child type="overlay">

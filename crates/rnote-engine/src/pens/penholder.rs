@@ -562,6 +562,17 @@ impl DrawableOnDoc for PenHolder {
     }
 }
 
+fn new_pen(pen_style: PenStyle) -> Pen {
+    match pen_style {
+        PenStyle::Brush => Pen::Brush(Brush::default()),
+        PenStyle::Shaper => Pen::Shaper(Shaper::default()),
+        PenStyle::Typewriter => Pen::Typewriter(Typewriter::default()),
+        PenStyle::Eraser => Pen::Eraser(Eraser::default()),
+        PenStyle::Selector => Pen::Selector(Selector::default()),
+        PenStyle::Tools => Pen::Tools(Tools::default()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,16 +635,5 @@ mod tests {
             1,
             "the loop selects the stroke it went around"
         );
-    }
-}
-
-fn new_pen(pen_style: PenStyle) -> Pen {
-    match pen_style {
-        PenStyle::Brush => Pen::Brush(Brush::default()),
-        PenStyle::Shaper => Pen::Shaper(Shaper::default()),
-        PenStyle::Typewriter => Pen::Typewriter(Typewriter::default()),
-        PenStyle::Eraser => Pen::Eraser(Eraser::default()),
-        PenStyle::Selector => Pen::Selector(Selector::default()),
-        PenStyle::Tools => Pen::Tools(Tools::default()),
     }
 }

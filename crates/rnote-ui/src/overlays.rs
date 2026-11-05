@@ -465,7 +465,8 @@ impl RnOverlays {
         // floating the panel reparents the handle. The overlays widget is the common ancestor of
         // the slots and the overlay and never gets reparented.
         let dragged = Rc::new(Cell::new(None::<ToolbarPanel>));
-        let start_margin = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        // The panel's position in overlay coordinates where the drag started.
+        let drag_start = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
         let drag = gtk4::GestureDrag::new();
 
         drag.connect_drag_begin(clone!(
@@ -474,7 +475,7 @@ impl RnOverlays {
             #[strong]
             dragged,
             #[strong]
-            start_margin,
+            drag_start,
             move |gesture, start_x, start_y| {
                 dragged.set(None);
                 if overlays.imp().toolbars_locked.get() {
@@ -512,8 +513,10 @@ impl RnOverlays {
                 let widget = overlays.panel_widget(panel);
                 let (x, y) = overlays.position_in_overlay(&widget);
                 overlays.float_panel_at(panel, x, y);
-                start_margin.set((x, y));
+                drag_start.set((x, y));
                 dragged.set(Some(panel));
+                // The handle cursor is "grab"; keep the same feedback while the panel follows.
+                overlays.set_cursor_from_name(Some("grabbing"));
             }
         ));
 
@@ -523,7 +526,7 @@ impl RnOverlays {
             #[strong]
             dragged,
             #[strong]
-            start_margin,
+            drag_start,
             move |_gesture, offset_x, offset_y| {
                 let Some(panel) = dragged.get() else {
                     return;
@@ -533,7 +536,14 @@ impl RnOverlays {
                 }
 
                 let widget = overlays.panel_widget(panel);
-                let (start_x, start_y) = start_margin.get();
+                // Floating a panel that is on screen is queued to the next main loop iteration, so
+                // the first updates land while the panel still sits in its dock slot, where margins
+                // mean nothing: the queued float places it.
+                if !widget.is_ancestor(&overlays.imp().toolbar_overlay.get()) {
+                    return;
+                }
+
+                let (start_x, start_y) = drag_start.get();
                 widget.set_margin_start((start_x + offset_x) as i32);
                 widget.set_margin_top((start_y + offset_y) as i32);
             }
@@ -545,8 +555,9 @@ impl RnOverlays {
             #[strong]
             dragged,
             #[strong]
-            start_margin,
+            drag_start,
             move |gesture, _offset_x, _offset_y| {
+                overlays.set_cursor_from_name(None);
                 let Some(panel) = dragged.take() else {
                     return;
                 };
@@ -557,7 +568,7 @@ impl RnOverlays {
                 let widget = overlays.panel_widget(panel);
                 let overlay = overlays.imp().toolbar_overlay.get();
                 let (offset_x, offset_y) = gesture.offset().unwrap_or_default();
-                let (start_x, start_y) = start_margin.get();
+                let (start_x, start_y) = drag_start.get();
                 let overlay_width = overlay.width() as f64;
                 let overlay_height = overlay.height() as f64;
 
@@ -580,11 +591,19 @@ impl RnOverlays {
                 if distance <= DOCK_SNAP_DISTANCE {
                     overlays.set_panel_dock(panel, dock);
                 } else {
-                    // Keep it floating, but inside the overlay.
+                    // Keep it floating, but inside the overlay. A release that beats the queued
+                    // float sets the position it was queued with instead of margins the dock
+                    // ignores.
                     let max_x = (overlay_width - widget.width() as f64).max(0.0);
                     let max_y = (overlay_height - widget.height() as f64).max(0.0);
-                    widget.set_margin_start((start_x + offset_x).clamp(0.0, max_x) as i32);
-                    widget.set_margin_top((start_y + offset_y).clamp(0.0, max_y) as i32);
+                    let x = (start_x + offset_x).clamp(0.0, max_x);
+                    let y = (start_y + offset_y).clamp(0.0, max_y);
+                    if widget.is_ancestor(&overlay) {
+                        widget.set_margin_start(x as i32);
+                        widget.set_margin_top(y as i32);
+                    } else {
+                        overlays.float_panel_at(panel, x, y);
+                    }
                 }
             }
         ));
@@ -1147,6 +1166,8 @@ mod tests {
         };
         let press_x = f64::from(bounds.x() + bounds.width() / 2.0);
         let press_y = f64::from(bounds.y() + bounds.height() / 2.0);
+        let penpicker = overlays.panel_widget(ToolbarPanel::PenPicker);
+        let (docked_x, docked_y) = overlays.position_in_overlay(&penpicker);
         let drag = overlays
             .observe_controllers()
             .into_iter()
@@ -1156,5 +1177,93 @@ mod tests {
         drag.emit_by_name::<()>("drag-begin", &[&press_x, &press_y]);
         settle();
         assert_eq!(panel_parent(&overlays, ToolbarPanel::PenPicker), overlay);
+
+        // The panel floats where it stood on screen, which for a left dock is a negative offset:
+        // the drag picks it up there instead of jumping it inside the overlay first.
+        assert!(docked_x < 0.0);
+        assert_eq!(penpicker.margin_start(), docked_x as i32);
+        assert_eq!(penpicker.margin_top(), docked_y as i32);
+
+        // And the overlay must not clip a panel at that offset, or the drag would hide it until
+        // the pointer pulled it inside.
+        assert_eq!(
+            overlays.imp().toolbar_overlay.get().overflow(),
+            gtk4::Overflow::Visible
+        );
+    }
+
+    /// A floating panel has to be draggable too, or it can never be docked again.
+    #[test]
+    fn drags_a_panel_that_is_already_floating() {
+        if !init_gtk() {
+            return;
+        }
+
+        let overlays = RnOverlays::new();
+        let window = gtk4::Window::builder().child(&overlays).build();
+        window.present();
+
+        let context = glib::MainContext::default();
+        for _ in 0..500 {
+            if overlays.is_mapped() {
+                break;
+            }
+            context.iteration(false);
+        }
+        if !overlays.is_mapped() {
+            eprintln!("the window did not map, skipping the floating drag test");
+            return;
+        }
+
+        let settle = || {
+            for _ in 0..20 {
+                context.iteration(false);
+            }
+        };
+
+        overlays.setup_toolbars();
+        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Floating);
+        settle();
+
+        let penpicker = overlays.panel_widget(ToolbarPanel::PenPicker);
+        let Some(bounds) = overlays
+            .panel_handle(ToolbarPanel::PenPicker)
+            .compute_bounds(&overlays)
+        else {
+            eprintln!("the handle has no allocation, skipping the floating drag test");
+            return;
+        };
+        let press_x = f64::from(bounds.x() + bounds.width() / 2.0);
+        let press_y = f64::from(bounds.y() + bounds.height() / 2.0);
+        let drag = overlays
+            .observe_controllers()
+            .into_iter()
+            .flatten()
+            .find_map(|controller| controller.downcast::<gtk4::GestureDrag>().ok())
+            .expect("the overlays widget owns the toolbar drag gesture");
+
+        drag.emit_by_name::<()>("drag-begin", &[&press_x, &press_y]);
+        settle();
+
+        // Where the drag picked the panel up, which is where the updates are measured from.
+        let start_x = penpicker.margin_start();
+        let start_y = penpicker.margin_top();
+        drag.emit_by_name::<()>("drag-update", &[&0.0_f64, &40.0_f64]);
+        settle();
+
+        assert_eq!(
+            penpicker.margin_top(),
+            start_y + 40,
+            "a floating panel must follow the drag"
+        );
+        assert_eq!(penpicker.margin_start(), start_x);
+        // Margins only move a widget that is aligned to the start: a panel left at the dock's
+        // centre/end alignment ignores them and stays where it was.
+        assert_eq!(penpicker.halign(), gtk4::Align::Start);
+        assert_eq!(penpicker.valign(), gtk4::Align::Start);
+        assert_eq!(
+            overlays.panel_dock(ToolbarPanel::PenPicker),
+            ToolbarDock::Floating
+        );
     }
 }

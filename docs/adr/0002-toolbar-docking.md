@@ -35,3 +35,11 @@ panel stays an overlay child with its current anchors. Docking never reparents i
   the handle. The gesture hit-tests the handles in `RnOverlays` coordinates.
 - Reparenting a panel that is on screen is deferred to the next main loop iteration: unparenting a
   mapped widget from inside `drag-begin` trips GTK's mapped-state assertion and aborts the app.
+- Because the float is deferred, `drag-update` skips a panel that is not yet an overlay child
+  (`is_ancestor`), where margins mean nothing; the queued float places it. The same test decides
+  the release path, so a drag never re-floats a panel that is already floating.
+- A drag-placed panel is aligned `Start`/`Start`: margins only position a widget aligned to the
+  start, and a panel left at the dock's centre/end alignment ignores them and stays put.
+- The overlay's `overflow` is `visible`: a panel dragged out of a top or left dock is picked up at
+  a negative offset, outside the overlay's allocation, and clipping would hide it until the pointer
+  pulled it inside.
