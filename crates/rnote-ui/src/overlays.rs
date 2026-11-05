@@ -607,11 +607,21 @@ impl RnOverlays {
     }
 
     /// The distance `panel` can travel inside the overlay, in pixels.
+    ///
+    /// The panel's allocated size is what the overlay actually gives it. Once the overlay is
+    /// narrower than the panel's content, the content is shrunk, and the panel's measured
+    /// minimum stays its unshrunk size — a range computed from that would push the panel off
+    /// the far edge. Only a panel that has not been allocated yet is measured.
     fn float_travel_range(&self, panel: ToolbarPanel) -> (f64, f64) {
         let overlay = self.imp().toolbar_overlay.get();
         let widget = self.panel_widget(panel);
-        let (_, width, _, _) = widget.measure(gtk4::Orientation::Horizontal, -1);
-        let (_, height, _, _) = widget.measure(gtk4::Orientation::Vertical, -1);
+        let (width, height) = if widget.width() > 0 && widget.height() > 0 {
+            (widget.width(), widget.height())
+        } else {
+            let (_, width, _, _) = widget.measure(gtk4::Orientation::Horizontal, -1);
+            let (_, height, _, _) = widget.measure(gtk4::Orientation::Vertical, -1);
+            (width, height)
+        };
         (
             (f64::from(overlay.width()) - f64::from(width)).max(0.0),
             (f64::from(overlay.height()) - f64::from(height)).max(0.0),
