@@ -1,5 +1,6 @@
 // Imports
 use super::RnCanvas;
+use crate::RnAppWindow;
 use gtk4::{Native, gdk, glib, graphene, prelude::*, subclass::prelude::*};
 use p2d::math::Vector2;
 use rnote_compose::penevent::{KeyboardKey, ModifierKey, PenEvent, PenState, ShortcutKey};
@@ -7,11 +8,36 @@ use rnote_compose::penpath::Element;
 use rnote_engine::WidgetFlags;
 use rnote_engine::ext::EventPropagationExt;
 use rnote_engine::ext::GraphenePointExt;
-use rnote_engine::pens::PenMode;
 use rnote_engine::pens::penholder::BacklogPolicy;
+use rnote_engine::pens::{PenMode, PenStyle};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
-use tracing::trace;
+use tracing::{debug, trace};
+
+/// Maps the bare tool keys to a pen style. Cyrillic keysyms are listed because a physical key
+/// reports a different keysym while the `ru` layout is active; the digits keep their keysyms in
+/// both layouts.
+fn tool_shortcut_pen_style(gdk_key: gdk::Key) -> Option<PenStyle> {
+    match gdk_key {
+        gdk::Key::b | gdk::Key::Cyrillic_i | gdk::Key::_1 | gdk::Key::KP_1 => Some(PenStyle::Brush),
+        gdk::Key::s | gdk::Key::Cyrillic_yeru | gdk::Key::_2 | gdk::Key::KP_2 => {
+            Some(PenStyle::Shaper)
+        }
+        gdk::Key::t | gdk::Key::Cyrillic_ie | gdk::Key::_3 | gdk::Key::KP_3 => {
+            Some(PenStyle::Typewriter)
+        }
+        gdk::Key::e | gdk::Key::Cyrillic_u | gdk::Key::_4 | gdk::Key::KP_4 => {
+            Some(PenStyle::Eraser)
+        }
+        gdk::Key::v | gdk::Key::Cyrillic_em | gdk::Key::_5 | gdk::Key::KP_5 => {
+            Some(PenStyle::Selector)
+        }
+        gdk::Key::x | gdk::Key::Cyrillic_che | gdk::Key::_6 | gdk::Key::KP_6 => {
+            Some(PenStyle::Tools)
+        }
+        _ => None,
+    }
+}
 
 /// Handles a pointer controller event.
 ///
@@ -291,6 +317,27 @@ pub(crate) fn handle_key_controller_key_pressed(
 ) -> glib::Propagation {
     trace!("canvas event key pressed - gdk_key: {gdk_key:?}, gdk_modifiers: {gdk_modifiers:?}");
     canvas.grab_focus();
+
+    // Bare tool keys, so the left hand can switch tools while the right one holds the pen.
+    // `Ctrl`+number stays an accelerator, but the left Ctrl is keyd's Hyper layer on this
+    // machine and the right hand is busy.
+    let blocked_modifiers = gdk::ModifierType::CONTROL_MASK
+        | gdk::ModifierType::ALT_MASK
+        | gdk::ModifierType::SHIFT_MASK
+        | gdk::ModifierType::SUPER_MASK
+        | gdk::ModifierType::HYPER_MASK
+        | gdk::ModifierType::META_MASK;
+    if !gdk_modifiers.intersects(blocked_modifiers)
+        && !canvas.engine_ref().penholder.is_handling_text_input()
+        && let Some(pen_style) = tool_shortcut_pen_style(gdk_key.to_lower())
+        && let Some(appwindow) = canvas
+            .root()
+            .and_then(|root| root.downcast::<RnAppWindow>().ok())
+    {
+        debug!("Tool shortcut: switching to '{pen_style}'");
+        appwindow.set_pen_style_with_lock(pen_style);
+        return glib::Propagation::Stop;
+    }
 
     let now = Instant::now();
     let keyboard_key = retrieve_keyboard_key(gdk_key);
@@ -588,6 +635,85 @@ pub(crate) fn retrieve_keyboard_key(gdk_key: gdk::Key) -> KeyboardKey {
             gdk::Key::End => KeyboardKey::End,
             gdk::Key::KP_End => KeyboardKey::End,
             _ => KeyboardKey::Unsupported,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_maps(keys: &[gdk::Key], pen_style: PenStyle) {
+        for key in keys {
+            assert_eq!(
+                tool_shortcut_pen_style(key.to_lower()),
+                Some(pen_style),
+                "key {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_shortcut_keys_map_to_pen_styles() {
+        assert_maps(
+            &[
+                gdk::Key::b,
+                gdk::Key::B,
+                gdk::Key::Cyrillic_i,
+                gdk::Key::Cyrillic_I,
+                gdk::Key::_1,
+                gdk::Key::KP_1,
+            ],
+            PenStyle::Brush,
+        );
+        assert_maps(
+            &[
+                gdk::Key::s,
+                gdk::Key::Cyrillic_yeru,
+                gdk::Key::_2,
+                gdk::Key::KP_2,
+            ],
+            PenStyle::Shaper,
+        );
+        assert_maps(
+            &[
+                gdk::Key::t,
+                gdk::Key::Cyrillic_ie,
+                gdk::Key::_3,
+                gdk::Key::KP_3,
+            ],
+            PenStyle::Typewriter,
+        );
+        assert_maps(
+            &[
+                gdk::Key::e,
+                gdk::Key::Cyrillic_u,
+                gdk::Key::_4,
+                gdk::Key::KP_4,
+            ],
+            PenStyle::Eraser,
+        );
+        assert_maps(
+            &[
+                gdk::Key::v,
+                gdk::Key::Cyrillic_em,
+                gdk::Key::_5,
+                gdk::Key::KP_5,
+            ],
+            PenStyle::Selector,
+        );
+        assert_maps(
+            &[
+                gdk::Key::x,
+                gdk::Key::Cyrillic_che,
+                gdk::Key::_6,
+                gdk::Key::KP_6,
+            ],
+            PenStyle::Tools,
+        );
+
+        for key in [gdk::Key::a, gdk::Key::Return, gdk::Key::space, gdk::Key::_7] {
+            assert_eq!(tool_shortcut_pen_style(key), None, "key {key:?}");
         }
     }
 }
