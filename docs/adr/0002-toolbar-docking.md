@@ -30,3 +30,8 @@ panel stays an overlay child with its current anchors. Docking never reparents i
   wider than the window, the row scrolls instead of clipping the last panel. The vertical slots
   keep a single column, which the window height accommodates.
 - `set_measure_overlay` and the margin overrides in `settingspanel` apply to floating panels only.
+- The panel drag gesture sits on `RnOverlays`, not on the overlay (nor on each handle): a docked
+  panel is a child of a dock slot, a sibling of the overlay, so a gesture on the overlay never sees
+  the handle. The gesture hit-tests the handles in `RnOverlays` coordinates.
+- Reparenting a panel that is on screen is deferred to the next main loop iteration: unparenting a
+  mapped widget from inside `drag-begin` trips GTK's mapped-state assertion and aborts the app.
