@@ -522,6 +522,23 @@ impl Typewriter {
         let mut widget_flags = WidgetFlags::default();
         self.pos = None;
 
+        // `Escape` leaves the text input session, the way it leaves editing in any text field.
+        // The text stroke is written key by key, so there is nothing left to commit - dropping to
+        // idle is the whole of it. Without this the canvas keeps the bare tool keys gated out
+        // (`is_handling_text_input`) and no key gets the keyboard back from the text box.
+        if keyboard_key == KeyboardKey::Escape && !matches!(self.state, TypewriterState::Idle) {
+            self.state = TypewriterState::Idle;
+
+            return (
+                EventResult {
+                    handled: true,
+                    propagate: EventPropagation::Stop,
+                    progress: PenProgress::Finished,
+                },
+                widget_flags,
+            );
+        }
+
         // `Ctrl` and `Alt` chords are shortcuts before they are text: paste, copy, undo, bold and
         // the rest are window accelerators, and they only run if this handler lets the key pass.
         // The canvas key controller sits in the capture phase, so inserting the bare letter and
@@ -1489,6 +1506,53 @@ mod tests {
             ),
             EventPropagation::Proceed
         );
+        assert!(texts(&engine).is_empty());
+    }
+
+    #[test]
+    fn escape_leaves_an_open_textbox_to_the_tool_keys() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        press(&mut engine, 'h', &[], now);
+        press(&mut engine, 'i', &[], now);
+        assert!(engine.penholder.is_handling_text_input());
+
+        let (propagation, _) = engine.handle_pen_event(
+            PenEvent::KeyPressed {
+                keyboard_key: KeyboardKey::Escape,
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            now,
+        );
+
+        assert_eq!(propagation, EventPropagation::Stop);
+        assert!(
+            !engine.penholder.is_handling_text_input(),
+            "Escape must drop the text session to idle"
+        );
+        assert_eq!(texts(&engine), vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn escape_leaves_an_empty_textbox_without_a_stroke() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        assert!(engine.penholder.is_handling_text_input());
+
+        let (propagation, _) = engine.handle_pen_event(
+            PenEvent::KeyPressed {
+                keyboard_key: KeyboardKey::Escape,
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            now,
+        );
+
+        assert_eq!(propagation, EventPropagation::Stop);
+        assert!(!engine.penholder.is_handling_text_input());
         assert!(texts(&engine).is_empty());
     }
 
