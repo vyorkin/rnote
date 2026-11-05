@@ -41,12 +41,15 @@ pub struct ScribbleRecognitionOptions {
     /// it covers.
     #[serde(rename = "min_length_diag_ratio")]
     pub min_length_diag_ratio: f64,
-    /// How many times per second the stroke has to turn back, on average over the whole stroke.
+    /// The average speed of the pen (in surface coordinates per second) a stroke has to reach.
     ///
     /// A scratch-out is done quickly, while going slowly back and forth is more often marking
-    /// or shading something. `0.0` lets a scribble be as slow as it likes.
-    #[serde(rename = "min_turn_rate")]
-    pub min_turn_rate: f64,
+    /// or shading something. The pen speed is used instead of counting turns per second, because
+    /// a wide scratch-out covers the same distance in fewer, longer passes: judged by turns per
+    /// second, a deliberate scratch across a whole formula looks slower than a small quick one.
+    /// `0.0` lets a scribble be as slow as it likes.
+    #[serde(rename = "min_speed")]
+    pub min_speed: f64,
 }
 
 impl Default for ScribbleRecognitionOptions {
@@ -57,7 +60,7 @@ impl Default for ScribbleRecognitionOptions {
             reversal_min_prominence_surface: 8.0,
             min_extent_surface: 30.0,
             min_length_diag_ratio: 2.0,
-            min_turn_rate: 3.0,
+            min_speed: 400.0,
         }
     }
 }
@@ -83,10 +86,10 @@ impl ScribbleRecognitionOptions {
     pub const MIN_LENGTH_DIAG_RATIO_MIN: f64 = 1.0;
     /// The upper bound of `min_length_diag_ratio`.
     pub const MIN_LENGTH_DIAG_RATIO_MAX: f64 = 20.0;
-    /// The lower bound of `min_turn_rate`, which leaves out the speed.
-    pub const MIN_TURN_RATE_MIN: f64 = 0.0;
-    /// The upper bound of `min_turn_rate`.
-    pub const MIN_TURN_RATE_MAX: f64 = 20.0;
+    /// The lower bound of `min_speed`, which leaves out the speed.
+    pub const MIN_SPEED_MIN: f64 = 0.0;
+    /// The upper bound of `min_speed`.
+    pub const MIN_SPEED_MAX: f64 = 5000.0;
 }
 
 /// Whether the drawn pen path is a scribble, i.e. the gesture of scratching something out.
@@ -115,7 +118,8 @@ pub fn is_scribble(
         return false;
     }
 
-    if polyline_len(&points) < options.min_length_diag_ratio * diagonal {
+    let length = polyline_len(&points);
+    if length < options.min_length_diag_ratio * diagonal {
         return false;
     }
 
@@ -134,8 +138,10 @@ pub fn is_scribble(
         return false;
     }
 
-    options.min_turn_rate <= 0.0
-        || reversals as f64 >= options.min_turn_rate * duration.as_secs_f64()
+    // The mean pen speed on screen. It is compared against the plain speed of the hand, not
+    // against the turns it makes, so that a wide scratch-out is judged the same as a narrow one.
+    options.min_speed <= 0.0
+        || length * zoom / duration.as_secs_f64().max(f64::EPSILON) >= options.min_speed
 }
 
 /// Extract the flattened points of the pen path.
@@ -412,13 +418,26 @@ mod tests {
     }
 
     #[test]
-    fn hasty_handwriting_passes_the_default_thresholds() {
-        // Why the thresholds are adjustable: fast handwriting turns back often enough.
-        assert!(is_scribble(
-            &pen_path_from_points(hasty_h_points()),
+    fn the_speed_floor_keeps_hasty_handwriting() {
+        // A hastily written "h" turns back often enough to pass the shape checks; the pen that
+        // draws it does not move as fast as one that scratches something out.
+        let path = pen_path_from_points(hasty_h_points());
+
+        assert!(!is_scribble(
+            &path,
             1.0,
             QUICK,
             &ScribbleRecognitionOptions::default()
+        ));
+        // Which is why the speed floor is adjustable: without it, the shape alone lets it through.
+        assert!(is_scribble(
+            &path,
+            1.0,
+            QUICK,
+            &ScribbleRecognitionOptions {
+                min_speed: 0.0,
+                ..Default::default()
+            }
         ));
     }
 
@@ -427,6 +446,7 @@ mod tests {
         let options = ScribbleRecognitionOptions {
             min_reversals: 4,
             reversal_prominence_ratio: 0.6,
+            min_speed: 0.0,
             ..Default::default()
         };
 
@@ -457,10 +477,22 @@ mod tests {
     }
 
     #[test]
-    fn no_turn_rate_lets_a_scribble_be_slow() {
+    fn a_wide_scratch_out_is_judged_by_pen_speed_not_by_turns() {
+        // A scratch-out across a whole formula makes fewer turns per second than a small quick
+        // one, because every pass is longer. It is still drawn at the same pen speed.
+        let path = pen_path_from_points(scribble_points(5, 800.0, 60.0));
+        let options = ScribbleRecognitionOptions::default();
+
+        assert!(is_scribble(&path, 1.0, Duration::from_millis(1600), &options));
+        // Drawn as slowly as shading, it stays a stroke.
+        assert!(!is_scribble(&path, 1.0, Duration::from_secs(12), &options));
+    }
+
+    #[test]
+    fn no_speed_floor_lets_a_scribble_be_slow() {
         let path = pen_path_from_points(scribble_points(6, 160.0, 40.0));
         let options = ScribbleRecognitionOptions {
-            min_turn_rate: 0.0,
+            min_speed: 0.0,
             ..Default::default()
         };
 

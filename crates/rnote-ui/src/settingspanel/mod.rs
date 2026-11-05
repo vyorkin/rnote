@@ -128,7 +128,7 @@ mod imp {
         #[template_child]
         pub(crate) gestures_scribbleerase_min_turns_row: TemplateChild<adw::SpinRow>,
         #[template_child]
-        pub(crate) gestures_scribbleerase_min_turn_rate_row: TemplateChild<adw::SpinRow>,
+        pub(crate) gestures_scribbleerase_min_speed_row: TemplateChild<adw::SpinRow>,
         #[template_child]
         pub(crate) gestures_scribbleerase_pass_height_row: TemplateChild<adw::SpinRow>,
         #[template_child]
@@ -1346,13 +1346,13 @@ impl RnSettingsPanel {
                 }
             ));
 
-        imp.gestures_scribbleerase_min_turn_rate_row
+        imp.gestures_scribbleerase_min_speed_row
             .get()
             .set_range(
-                ScribbleRecognitionOptions::MIN_TURN_RATE_MIN,
-                ScribbleRecognitionOptions::MIN_TURN_RATE_MAX,
+                ScribbleRecognitionOptions::MIN_SPEED_MIN,
+                ScribbleRecognitionOptions::MIN_SPEED_MAX,
             );
-        imp.gestures_scribbleerase_min_turn_rate_row
+        imp.gestures_scribbleerase_min_speed_row
             .connect_changed(clone!(
                 #[weak]
                 appwindow,
@@ -1362,7 +1362,7 @@ impl RnSettingsPanel {
                         .write()
                         .gestures
                         .scribble_recognition_options
-                        .min_turn_rate = row.value();
+                        .min_speed = row.value();
                 }
             ));
 
@@ -1541,8 +1541,8 @@ impl RnSettingsPanel {
             .set_enable_expansion(gestures.scribble_erase_enabled);
         imp.gestures_scribbleerase_min_turns_row
             .set_value(gestures.scribble_recognition_options.min_reversals as f64);
-        imp.gestures_scribbleerase_min_turn_rate_row
-            .set_value(gestures.scribble_recognition_options.min_turn_rate);
+        imp.gestures_scribbleerase_min_speed_row
+            .set_value(gestures.scribble_recognition_options.min_speed);
         imp.gestures_scribbleerase_pass_height_row.set_value(
             gestures
                 .scribble_recognition_options
