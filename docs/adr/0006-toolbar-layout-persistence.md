@@ -28,6 +28,15 @@ session runs, but the settings they share are global.
   A window opens at its default size and is then maximized, so several sizes arrive in a row; an
   application at each of them makes the panels glide down the window after every start, because
   each panel's position moves with the window's height. Only the size the window keeps is used.
+- The size that has to settle is the *window surface's*, not the overlay's. A placement changes the
+  overlay's size whenever the overlay measures a floating panel, so comparing the overlay's size
+  makes every apply a new size to apply for, and the panels slide out of the window one reapply at
+  a time.
+- A floating panel is never measured into the overlay (`set_measure_overlay(panel, false)`). Its
+  margin is part of the overlay's size while it is measured, and the panel is placed inside the
+  overlay by that margin: the overlay grows by the panel's position, the travel range grows with
+  it, and the next apply places the panel further out. The overlay takes its size from the canvas
+  alone.
 - The layout is written when a window stops being active, and when an active window saves its
   settings. Only the last active window's layout is restored on the next start.
 - On start, a stored layout restores docks and positions. If `toolbars-layout` is empty or

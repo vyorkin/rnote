@@ -222,12 +222,15 @@ mod imp {
     }
     impl RnOverlays {
         pub(crate) fn setup_toolbar_overlay(&self) {
+            // The panels are placed inside the overlay by their margins. Measuring them into the
+            // overlay would make a panel's position part of the overlay's size, and the panel is
+            // placed inside the size it changes.
             self.toolbar_overlay
-                .set_measure_overlay(&*self.colorpicker_box, true);
+                .set_measure_overlay(&*self.colorpicker_box, false);
             self.toolbar_overlay
-                .set_measure_overlay(&*self.penpicker_box, true);
+                .set_measure_overlay(&*self.penpicker_box, false);
             self.toolbar_overlay
-                .set_measure_overlay(&*self.sidebar_box, true);
+                .set_measure_overlay(&*self.sidebar_box, false);
         }
     }
 }
@@ -479,10 +482,13 @@ impl RnOverlays {
                 // `add_overlay` reparents the panel out of its dock slot, so measure has to be
                 // set after it is an overlay child.
                 overlay.add_overlay(&widget);
-                // A dragged panel is measured on its own and keeps its natural size: letting it
-                // contribute to the overlay's measure makes every pointer motion re-measure the
-                // whole overlay, canvas included, and the panel drops out of the frame.
-                overlay.set_measure_overlay(&widget, at.is_none());
+                // A floating panel is never measured into the overlay: its margin would become
+                // part of the overlay's own size, so moving the panel would resize the overlay
+                // that the panel is placed inside of. A panel is placed by its margins and keeps
+                // its natural size; letting it contribute to the measure also makes every pointer
+                // motion re-measure the whole overlay, canvas included, and the panel drops out of
+                // the frame.
+                overlay.set_measure_overlay(&widget, false);
 
                 // A dragged panel is placed at the position the drag started from; one that is
                 // only floating goes back to its default corner.
@@ -694,8 +700,20 @@ impl RnOverlays {
         let source = glib::timeout_add_local_once(Duration::from_millis(100), move || {
             overlays.imp().float_apply_source.take();
             let overlay = overlays.imp().toolbar_overlay.get();
-            let size = (overlay.width(), overlay.height());
-            if size.0 > 0 && size.1 > 0 && size != overlays.imp().float_apply_size.get() {
+            // The size that is compared is the window's, not the overlay's: a placement that
+            // changes the overlay's own size must not count as a new size to place the panels for,
+            // or the panel would slide across the window one reapply at a time.
+            let size = overlays
+                .native()
+                .and_then(|native| native.surface())
+                .map(|surface| (surface.width(), surface.height()))
+                .unwrap_or((0, 0));
+            if size.0 > 0
+                && size.1 > 0
+                && overlay.width() > 0
+                && overlay.height() > 0
+                && size != overlays.imp().float_apply_size.get()
+            {
                 overlays.imp().float_apply_size.set(size);
                 overlays.apply_float_positions();
             }
