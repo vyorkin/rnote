@@ -150,11 +150,28 @@ impl CubicBezier {
             let t = Vector2::new(-v.y, v.x) / v.length();
             if t.dot(direction) < 0.0 { -t } else { t }
         };
+        let mut cp1 = start + tangent(start) * handle;
+        let mut cp2 = end - tangent(end) * handle;
+
+        // The projection of the tangents on the chord vanishes on an arc close to a half circle,
+        // and the sign of the handles is then left to the rounding of the noise. Which side the
+        // middle of the arc lands on decides it: an arc never bulges away from `outward`.
+        let middle = (start + end) * 0.5;
+        let apex = cubbez_calc(start, cp1, cp2, end, 0.5);
+        if normal.dot(apex - middle) < 0.0 {
+            // Mirror both handles across the chord.
+            let reflect = |point: Vector2| {
+                let w = point - start;
+                start + direction * (2.0 * w.dot(direction)) - w
+            };
+            cp1 = reflect(cp1);
+            cp2 = reflect(cp2);
+        }
 
         Some(Self {
             start,
-            cp1: start + tangent(start) * handle,
-            cp2: end - tangent(end) * handle,
+            cp1,
+            cp2,
             end,
         })
     }
@@ -227,4 +244,42 @@ pub fn cubbez_calc(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: f64) -
         + p1 * 3.0 * one_minus_t_square * t
         + p2 * 3.0 * one_minus_t * t_square
         + p3 * t_cube
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_circular_arc_always_bulges_to_the_outward_side() {
+        // The sagitta of a deep arc makes the tangent signs a near tie, and a mirrored arc is a
+        // different shape: every arc has to bulge to the side it was asked for.
+        for &bulge_ratio in &[0.05, 0.1, 0.25, 0.4, 0.5, 0.55, 0.6] {
+            for &angle in &[0.0_f64, 0.7, 1.6, 2.5, 4.0, 5.5] {
+                let direction = Vector2::new(angle.cos(), angle.sin());
+                let chord = direction * 200.0;
+                let normal = Vector2::new(-direction.y, direction.x);
+                let start = Vector2::new(300.0, 400.0);
+                let end = start + chord;
+                let bulge = bulge_ratio * chord.length();
+
+                let arc = CubicBezier::new_circular_arc(start, end, bulge, normal).expect("an arc");
+                let apex = cubbez_calc(arc.start, arc.cp1, arc.cp2, arc.end, 0.5);
+                let middle = (start + end) * 0.5;
+                assert!(
+                    normal.dot(apex - middle) > 0.0,
+                    "mirrored at bulge ratio {bulge_ratio}, angle {angle}"
+                );
+
+                // The other side of the same chord gives the other arc.
+                let arc =
+                    CubicBezier::new_circular_arc(start, end, bulge, -normal).expect("an arc");
+                let apex = cubbez_calc(arc.start, arc.cp1, arc.cp2, arc.end, 0.5);
+                assert!(
+                    normal.dot(apex - middle) < 0.0,
+                    "mirrored at bulge ratio {bulge_ratio}, angle {angle}"
+                );
+            }
+        }
+    }
 }

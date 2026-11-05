@@ -87,15 +87,23 @@ A bracket whose ends lie on one vertical line, whose deepest point is at the mid
 _Avoid_: neat bracket, clean bracket
 
 **Bracket snap**:
-Draw-and-Hold replacing a parenthesis stroke with a canonical bracket of the same height and bulge.
+Draw-and-Hold replacing an upright parenthesis stroke — its chord within `BRACKET_MAX_TILT` of the
+vertical — with a canonical bracket of the same height and bulge.
 _Avoid_: bracket completion, paren auto-shape
 
 **Curve**:
 An open pen stroke that bends without a corner, as opposed to a line or a closed shape.
 _Avoid_: arc (when any bend is meant), polyline
 
+**Bend**:
+A curve's single bend, the one it makes when it stays on one side of its chord; a curve that
+crosses its chord has two.
+_Avoid_: hump, bow
+
 **Curve snap**:
-Draw-and-Hold replacing a curve stroke with a smooth curve through the same path.
+Draw-and-Hold replacing a curve stroke with a smooth curve at the same ends: a stroke with one
+bend becomes one quadratic, a stroke with more keeps a chain of cubic segments through the same
+path.
 _Avoid_: curve fit, spline snap
 
 ## Pens

@@ -1,6 +1,9 @@
 // Imports
 use crate::penpath::PenPath;
-use crate::shapes::{CubicBezier, Curve, Ellipse, Line, Polygon, Rectangle, Shape};
+use crate::shapes::quadbez::quadbez_calc;
+use crate::shapes::{
+    CubicBezier, Curve, Ellipse, Line, Polygon, QuadraticBezier, Rectangle, Shape,
+};
 use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
@@ -98,6 +101,21 @@ const CURVE_MAX_TURN: f64 = 30.0 * std::f64::consts::PI / 180.0;
 const CURVE_KNOT_TOLERANCE_SURFACE: f64 = 1.5;
 /// The largest number of points an open curve is built through.
 const CURVE_MAX_KNOTS: usize = 24;
+/// The maximum distance of the stroke points from a single quadratic bend, relative to its chord
+/// length, for the stroke to be snapped to it.
+///
+/// Tighter than [`CURVE_MAX_DEV_RATIO`]: a bend is a template the stroke is snapped to, so a stroke
+/// that only roughly follows one is left as its own curve rather than pulled onto it.
+const BEND_MAX_DEV_RATIO: f64 = 0.035;
+/// The distance from a single quadratic bend (in surface coordinates) that is tolerated regardless
+/// of its size.
+const BEND_MIN_TOLERANCE_SURFACE: f64 = 2.0;
+/// The distance from the chord (in surface coordinates) within which a point of the stroke does not
+/// say which side of the chord the bend is on.
+///
+/// Without it the tremor of a nearly straight stroke flips the side of single points, and a bend
+/// would be refused to the stroke that comes closest to a line.
+const BEND_SIDE_TOLERANCE_SURFACE: f64 = 3.0;
 /// How many times the tolerance is raised when the stroke wiggles too much for [`CURVE_MAX_KNOTS`].
 const CURVE_KNOT_PASSES: usize = 8;
 /// The samples per cubic segment that the recognized curve is measured from the stroke at.
@@ -570,6 +588,11 @@ fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
         return None;
     }
 
+    // A stroke that bends once is one clean bend, not a chain of segments through it.
+    if let Some(bend) = recognize_bend_curve(&resampled, start, end, zoom) {
+        return Some(bend);
+    }
+
     // The resampled stroke stops one spacing short of its end, so the curve takes the stroke's own
     // endpoints: it has to start where the pen landed and end where it was lifted.
     let mut knots = curve_knots(&resampled, zoom)?;
@@ -606,6 +629,78 @@ fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
         .fold(0.0, f64::max);
     let tolerance = (CURVE_MAX_DEV_RATIO * chord).max(CURVE_MIN_TOLERANCE_SURFACE / zoom);
     (deviation <= tolerance).then_some(Shape::Curve(curve))
+}
+
+/// Recognize an open stroke that bends once as a single quadratic.
+///
+/// A stroke that bends once — a swoosh, an arch, a shallow `C` — is neither a line nor a bracket:
+/// it is one smooth bend, and snapping it to a quadratic cleans it into a careful curve. The stroke
+/// has to stay on one side of its chord: a stroke that crosses the line between its ends bends
+/// twice, and one bend would be a different shape than the one drawn.
+fn recognize_bend_curve(
+    points: &[Vector2],
+    start: Vector2,
+    end: Vector2,
+    zoom: f64,
+) -> Option<Shape> {
+    let chord_vec = end - start;
+    let chord = chord_vec.length();
+    if chord < f64::EPSILON {
+        return None;
+    }
+    let normal = Vector2::new(-chord_vec.y, chord_vec.x) / chord;
+
+    // The side the stroke is on. Points close to the chord say nothing about it, and a stroke that
+    // is on neither side is a straight stroke, which is a line and not a bend.
+    let side_tolerance = BEND_SIDE_TOLERANCE_SURFACE / zoom;
+    let mut side = 0.0;
+    for point in points {
+        let distance = normal.dot(*point - start);
+        if distance.abs() <= side_tolerance {
+            continue;
+        }
+        if side != 0.0 && distance.signum() != side {
+            return None;
+        }
+        side = distance.signum();
+    }
+    if side == 0.0 {
+        return None;
+    }
+
+    // The quadratic passes through the point of the bend furthest from the chord, which is where the
+    // tangent runs parallel to the chord, and that is the middle of the quadratic: the control point
+    // follows from it directly, so the stroke is not distorted by a fit that could move the bend.
+    let apex = points
+        .iter()
+        .map(|point| (normal.dot(*point - start).abs(), point))
+        .fold((0.0, &points[0]), |worst, point| {
+            if point.0 > worst.0 { point } else { worst }
+        })
+        .1;
+    let bend = QuadraticBezier {
+        start,
+        cp: *apex * 2.0 - (start + end) * 0.5,
+        end,
+    };
+
+    // How far the stroke is from the bend, measured the way the chain of segments is measured: a
+    // bend the stroke only roughly follows would pull it somewhere the pen never went.
+    const SAMPLES: usize = 32;
+    let samples = (0..=SAMPLES)
+        .map(|i| quadbez_calc(bend.start, bend.cp, bend.end, i as f64 / SAMPLES as f64))
+        .collect::<Vec<_>>();
+    let deviation = points
+        .iter()
+        .map(|point| {
+            samples
+                .windows(2)
+                .map(|segment| dist_to_segment(*point, segment[0], segment[1]))
+                .fold(f64::MAX, f64::min)
+        })
+        .fold(0.0, f64::max);
+    let tolerance = (BEND_MAX_DEV_RATIO * chord).max(BEND_MIN_TOLERANCE_SURFACE / zoom);
+    (deviation <= tolerance).then_some(Shape::QuadraticBezier(bend))
 }
 
 /// The points an open curve is built through.
@@ -1205,6 +1300,35 @@ mod tests {
     }
 
     #[test]
+    fn recognized_brackets_bulge_toward_the_drawn_arc() {
+        // A deep bracket is an arc of more than ninety degrees, where the choice of the tangent for
+        // the canonical arc is close to a tie. The recognized bracket still has to bulge the way the
+        // stroke does: a bracket mirrored to the other side is not the shape that was drawn.
+        for &bulge_ratio in &[0.2, 0.3, 0.4, 0.5, 0.55] {
+            for &tilt_deg in &[-30.0_f64, -15.0, 0.0, 15.0, 30.0] {
+                let start = Vector2::new(140.0, 200.0);
+                let tilt = tilt_deg.to_radians();
+                let chord = Vector2::new(-300.0 * tilt.sin(), 300.0 * tilt.cos());
+                let end = start + chord;
+                let normal = Vector2::new(-chord.y, chord.x) / chord.length();
+                let points = parenthesis_points(start, end, bulge_ratio * chord.length());
+
+                let recognized = recognize_shape(&pen_path_from_points(points), 1.0)
+                    .unwrap_or_else(|| panic!("not recognized at {bulge_ratio}, {tilt_deg}"));
+                let Shape::CubicBezier(arc) = recognized else {
+                    panic!("expected a bracket, got {recognized:?}");
+                };
+                let apex = cubic_point(arc.start, arc.cp1, arc.cp2, arc.end, 0.5);
+                let middle = (arc.start + arc.end) * 0.5;
+                assert!(
+                    normal.dot(apex - middle) > 0.0,
+                    "the bracket is mirrored at bulge ratio {bulge_ratio}, tilt {tilt_deg}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_straight_stroke_is_a_line_and_not_a_bracket() {
         let points =
             with_resting_tail((0..=20).map(|i| Vector2::new(100.0, 200.0 + 5.0 * i as f64)));
@@ -1267,9 +1391,16 @@ mod tests {
         let points =
             parenthesis_points(Vector2::new(100.0, 200.0), Vector2::new(183.9, 300.0), 12.0);
 
-        let bracket = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
-            .map_or(false, |r| r.bracket);
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true);
+        let bracket = recognized
+            .as_ref()
+            .is_some_and(|recognized| recognized.bracket);
         assert!(!bracket);
+        // A bend that is not upright is still a bend, cleaned into one quadratic.
+        assert!(
+            matches!(recognized.map(|r| r.shape), Some(Shape::QuadraticBezier(_))),
+            "a tilted bend is not cleaned into one bend"
+        );
     }
 
     #[test]
@@ -1421,18 +1552,19 @@ mod tests {
         let points = drawn.iter().enumerate().map(|(i, p)| *p + jitter(i, 0.25));
 
         match recognize_shape(&pen_path_from_points(points), 1.0) {
-            Some(Shape::Curve(curve)) => {
-                let first = curve.cubics.first().unwrap();
-                let last = curve.cubics.last().unwrap();
-                assert!((first.start - start).length() < 0.5);
-                assert!((last.end - end).length() < 0.5);
-                // The curve is clean, but it is still the stroke that was drawn.
+            // One bend is cleaned into one quadratic, not a chain of segments: the curve is a
+            // careful version of the stroke, and a bend is all the stroke has.
+            Some(Shape::QuadraticBezier(bend)) => {
+                assert!((bend.start - start).length() < 0.5);
+                assert!((bend.end - end).length() < 0.5);
+                let drawn_middle = start * 0.25 + cp * 0.5 + end * 0.25;
+                let bend_middle = bend.start * 0.25 + bend.cp * 0.5 + bend.end * 0.25;
                 assert!(
-                    max_deviation(&drawn, &curve) < 3.0,
-                    "the curve leaves the stroke"
+                    (bend_middle - drawn_middle).length() < 0.5,
+                    "the bend is not the stroke's"
                 );
             }
-            other => panic!("expected a curve, got {other:?}"),
+            other => panic!("expected a single bend, got {other:?}"),
         }
     }
 
