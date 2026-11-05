@@ -19,6 +19,11 @@ session runs, but the settings they share are global.
 - `position` is a pair of fractions of the distance the panel can travel inside the overlay:
   `fx = x / (overlay_width - panel_width)`. On a resize the fractions are applied again, so a panel
   keeps its relative place and can never leave the window.
+- Positions are applied from the window surface's "layout" signal, once the panels have been
+  allocated for that size. This is the only hook that fires for every size: `size_allocate` on the
+  overlays widget is bypassed once the template's box layout manages it, and `GtkWidget`'s
+  "width"/"height" don't notify in GTK4. Applying the fractions before the first allocation would
+  put every panel at the overlay's top-left corner, where they would stay.
 - The layout is written when a window stops being active, and when an active window saves its
   settings. Only the last active window's layout is restored on the next start.
 - On start, a stored layout restores docks and positions. If `toolbars-layout` is empty or
@@ -33,5 +38,5 @@ session runs, but the settings they share are global.
 - A panel in its default corner stores no position; its margins still come from the show-scrollbars
   setting. A stored position replaces those default margins.
 - Positions are fractions of a measured travel range, so they are only meaningful once the panel
-  and the overlay have a size; before the first resize the panel is placed at its stored fraction
-  of whatever range the layout has at that point.
+  and the overlay have been allocated a size. Until then the panels keep the position the layout
+  gave them.

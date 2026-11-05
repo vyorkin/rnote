@@ -131,6 +131,12 @@ mod imp {
         pub(crate) dock_indicators: RefCell<Vec<(ToolbarDock, Box)>>,
         /// Where each panel was left, as fractions of its travel range inside the overlay.
         pub(crate) float_positions: RefCell<HashMap<ToolbarPanel, (f64, f64)>>,
+        /// The toolbar overlay size the remembered positions were last applied at.
+        pub(crate) float_apply_size: Cell<(i32, i32)>,
+        /// Whether applying the remembered positions is already queued.
+        pub(crate) float_apply_queued: Cell<bool>,
+        /// Whether the window surface's "layout" signal is connected.
+        pub(crate) float_layout_connected: Cell<bool>,
 
         #[template_child]
         pub(crate) toolbar_overlay: TemplateChild<Overlay>,
@@ -202,7 +208,18 @@ mod imp {
         }
     }
 
-    impl WidgetImpl for RnOverlays {}
+    impl WidgetImpl for RnOverlays {
+        fn map(&self) {
+            self.parent_map();
+            self.obj().connect_float_layout();
+            self.obj().queue_float_positions();
+        }
+
+        fn realize(&self) {
+            self.parent_realize();
+            self.obj().connect_float_layout();
+        }
+    }
     impl RnOverlays {
         pub(crate) fn setup_toolbar_overlay(&self) {
             self.toolbar_overlay
@@ -626,6 +643,50 @@ impl RnOverlays {
         }
     }
 
+    /// Reapply the remembered positions whenever the window surface is laid out.
+    ///
+    /// A remembered position is a fraction of the travel range, so it can only be applied once
+    /// the toolbar overlay is allocated, and has to be applied again when a resize changes that
+    /// range. GTK4 notifies neither through the overlay's "width"/"height" properties nor
+    /// through this widget: the template puts a `GtkBoxLayout` on it, and with a layout manager
+    /// set GTK never calls `size_allocate` on the widget itself. The surface's "layout" signal
+    /// reports every new size.
+    fn connect_float_layout(&self) {
+        if self.imp().float_layout_connected.replace(true) {
+            return;
+        }
+        match self.native().and_then(|native| native.surface()) {
+            Some(surface) => {
+                let overlays = self.clone();
+                surface.connect_layout(move |_, _, _| overlays.queue_float_positions());
+            }
+            None => {
+                // Not attached to a window yet. `map` tries again.
+                self.imp().float_layout_connected.set(false);
+            }
+        }
+    }
+
+    /// Apply the remembered positions once the toolbar overlay has been allocated.
+    ///
+    /// The application is deferred to an idle: a resize is announced before the widgets are
+    /// allocated for it, and the panels can only be placed inside a range the overlay has.
+    pub(crate) fn queue_float_positions(&self) {
+        if self.imp().float_apply_queued.replace(true) {
+            return;
+        }
+        let overlays = self.clone();
+        glib::idle_add_local_once(move || {
+            overlays.imp().float_apply_queued.set(false);
+            let overlay = overlays.imp().toolbar_overlay.get();
+            let size = (overlay.width(), overlay.height());
+            if size.0 > 0 && size.1 > 0 && size != overlays.imp().float_apply_size.get() {
+                overlays.imp().float_apply_size.set(size);
+                overlays.apply_float_positions();
+            }
+        });
+    }
+
     /// The window edge a release at `at` would dock `panel` to, and the distance to that edge.
     fn dock_target(
         &self,
@@ -1042,26 +1103,6 @@ impl RnOverlays {
         self.setup_tabview(appwindow);
         self.setup_toolbars();
         self.imp().setup_toolbar_overlay();
-
-        // A remembered position is a fraction of the travel range, so it has to be applied
-        // again when a resize changes that range.
-        let overlay = self.imp().toolbar_overlay.get();
-        overlay.connect_notify_local(
-            Some("width"),
-            clone!(
-                #[weak(rename_to = overlays)]
-                self,
-                move |_, _| overlays.apply_float_positions()
-            ),
-        );
-        overlay.connect_notify_local(
-            Some("height"),
-            clone!(
-                #[weak(rename_to = overlays)]
-                self,
-                move |_, _| overlays.apply_float_positions()
-            ),
-        );
     }
 
     fn setup_colorpicker(&self, appwindow: &RnAppWindow) {
