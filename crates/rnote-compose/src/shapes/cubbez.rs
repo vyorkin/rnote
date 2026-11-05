@@ -112,6 +112,53 @@ impl CubicBezier {
         Some(cubbez)
     }
 
+    /// A cubic curve approximating the circular arc from `start` to `end`.
+    ///
+    /// The deepest point of the arc lies `bulge` away from the middle of the chord between the two
+    /// ends, on the side `outward` points to. Unlike a quadratic curve, whose deepest point is
+    /// always halfway between its ends, an arc keeps its shape when it is deep: a parenthesis that
+    /// bends in from both ends has its ends nearly along the chord of the arc, not on a parabola.
+    ///
+    /// `None` when the ends coincide or the arc has no bulge.
+    pub fn new_circular_arc(
+        start: Vector2,
+        end: Vector2,
+        bulge: f64,
+        outward: Vector2,
+    ) -> Option<Self> {
+        let chord_vec = end - start;
+        let chord = chord_vec.length();
+        if chord < f64::EPSILON || !(bulge > f64::EPSILON) {
+            return None;
+        }
+
+        // The circle through both ends whose arc has the given sagitta. Its center lies behind the
+        // arc, at the radius' distance from the middle of the chord.
+        let radius = (chord * chord * 0.25 + bulge * bulge) / (2.0 * bulge);
+        let half_angle = (chord * 0.5 / radius).clamp(-1.0, 1.0).asin();
+        let direction = chord_vec / chord;
+        let mut normal = Vector2::new(-direction.y, direction.x);
+        if normal.dot(outward) < 0.0 {
+            normal = -normal;
+        }
+        let center = (start + end) * 0.5 + normal * (bulge - radius);
+
+        // The handles of a cubic that traces an arc of the given angle.
+        let handle = 4.0 / 3.0 * (half_angle * 0.5).tan() * radius;
+        let tangent = |point: Vector2| {
+            let v = point - center;
+            let t = Vector2::new(-v.y, v.x) / v.length();
+            if t.dot(direction) < 0.0 { -t } else { t }
+        };
+
+        Some(Self {
+            start,
+            cp1: start + tangent(start) * handle,
+            cp2: end - tangent(end) * handle,
+            end,
+        })
+    }
+
     /// Split a cubic bezier into two at t where t in [0.0 - 1.0].
     pub fn split(&self, t: f64) -> (CubicBezier, CubicBezier) {
         let a0 = self.start;

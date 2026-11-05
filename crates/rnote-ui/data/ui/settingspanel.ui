@@ -604,6 +604,12 @@ gets disabled.</property>
                       </object>
                     </child>
                     <child>
+                      <object class="AdwSwitchRow" id="gestures_curve_recognition_row">
+                        <property name="title" translatable="yes">Smooth Curves</property>
+                        <property name="subtitle" translatable="yes">Hold the pen still at the end of a drawn stroke to replace it with a smooth curve</property>
+                      </object>
+                    </child>
+                    <child>
                       <object class="AdwSwitchRow" id="gestures_circle_lasso_row">
                         <property name="title" translatable="yes">Circle to Lasso</property>
                         <property name="subtitle" translatable="yes">Draw a closed loop around ink to select it and switch to the selector</property>

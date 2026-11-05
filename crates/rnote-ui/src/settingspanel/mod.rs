@@ -142,6 +142,8 @@ mod imp {
         #[template_child]
         pub(crate) gestures_shaperecognition_delay_row: TemplateChild<adw::SpinRow>,
         #[template_child]
+        pub(crate) gestures_curve_recognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
         pub(crate) gestures_circle_lasso_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) gestures_multi_touch_undo_redo_row: TemplateChild<adw::SwitchRow>,
@@ -1444,6 +1446,23 @@ impl RnSettingsPanel {
                         .imp()
                         .gestures_shaperecognition_delay_row
                         .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_curve_recognition_row
+                        .set_sensitive(row.is_active());
+                }
+            ));
+
+        imp.gestures_curve_recognition_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .curve_recognition_enabled = row.is_active();
                 }
             ));
 
@@ -1521,6 +1540,10 @@ impl RnSettingsPanel {
             .set_sensitive(gestures.shape_recognition_enabled);
         imp.gestures_shaperecognition_delay_row
             .set_value(gestures.shape_recognition_delay.as_secs_f64());
+        imp.gestures_curve_recognition_row
+            .set_active(gestures.curve_recognition_enabled);
+        imp.gestures_curve_recognition_row
+            .set_sensitive(gestures.shape_recognition_enabled);
         imp.gestures_circle_lasso_row
             .set_active(gestures.circle_lasso_enabled);
         imp.gestures_multi_touch_undo_redo_row

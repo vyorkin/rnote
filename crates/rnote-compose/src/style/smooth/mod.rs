@@ -10,7 +10,8 @@ use crate::PenPath;
 use crate::ext::Vector2Ext;
 use crate::penpath::{self, Segment};
 use crate::shapes::{
-    Arrow, CubicBezier, Ellipse, Line, Polygon, Polyline, QuadraticBezier, Rectangle, Shapeable,
+    Arrow, CubicBezier, Curve, Ellipse, Line, Polygon, Polyline, QuadraticBezier, Rectangle,
+    Shapeable,
 };
 use kurbo::Shape;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
@@ -197,6 +198,33 @@ impl Composer<SmoothOptions> for CubicBezier {
             let stroke_brush = cx.solid_brush(stroke_color.into());
             cx.stroke_styled(
                 cubbez,
+                &stroke_brush,
+                options.stroke_width,
+                &options.piet_stroke_style,
+            );
+        }
+        cx.restore().unwrap();
+    }
+}
+
+impl Composer<SmoothOptions> for Curve {
+    fn composed_bounds(&self, options: &SmoothOptions) -> Aabb {
+        self.bounds().loosened(options.stroke_width * 0.5)
+    }
+
+    fn draw_composed(&self, cx: &mut impl piet::RenderContext, options: &SmoothOptions) {
+        cx.save().unwrap();
+        let curve = self.outline_path();
+
+        if let Some(fill_color) = options.fill_color {
+            let fill_brush = cx.solid_brush(fill_color.into());
+            cx.fill(&curve, &fill_brush);
+        }
+
+        if let Some(stroke_color) = options.stroke_color {
+            let stroke_brush = cx.solid_brush(stroke_color.into());
+            cx.stroke_styled(
+                curve,
                 &stroke_brush,
                 options.stroke_width,
                 &options.piet_stroke_style,
@@ -432,6 +460,7 @@ impl Composer<SmoothOptions> for crate::Shape {
             crate::Shape::Ellipse(ellipse) => ellipse.composed_bounds(options),
             crate::Shape::QuadraticBezier(quadbez) => quadbez.composed_bounds(options),
             crate::Shape::CubicBezier(cubbez) => cubbez.composed_bounds(options),
+            crate::Shape::Curve(curve) => curve.composed_bounds(options),
             crate::Shape::Polyline(polyline) => polyline.composed_bounds(options),
             crate::Shape::Polygon(polygon) => polygon.composed_bounds(options),
         }
@@ -445,6 +474,7 @@ impl Composer<SmoothOptions> for crate::Shape {
             crate::Shape::Ellipse(ellipse) => ellipse.draw_composed(cx, options),
             crate::Shape::QuadraticBezier(quadbez) => quadbez.draw_composed(cx, options),
             crate::Shape::CubicBezier(cubbez) => cubbez.draw_composed(cx, options),
+            crate::Shape::Curve(curve) => curve.draw_composed(cx, options),
             crate::Shape::Polyline(polyline) => polyline.draw_composed(cx, options),
             crate::Shape::Polygon(polygon) => polygon.draw_composed(cx, options),
         }

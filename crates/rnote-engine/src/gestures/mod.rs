@@ -25,6 +25,9 @@ pub struct GestureConfig {
     /// The duration the pen has to be held still to recognize a shape.
     #[serde(rename = "shape_recognition_delay")]
     pub shape_recognition_delay: Duration,
+    /// Whether a held open stroke is replaced with a smooth curve.
+    #[serde(rename = "curve_recognition_enabled")]
+    pub curve_recognition_enabled: bool,
     /// Whether a closed loop around ink selects it and switches to the selector.
     #[serde(rename = "circle_lasso_enabled")]
     pub circle_lasso_enabled: bool,
@@ -40,6 +43,7 @@ impl Default for GestureConfig {
             scribble_recognition_options: ScribbleRecognitionOptions::default(),
             shape_recognition_enabled: true,
             shape_recognition_delay: Self::SHAPE_RECOGNITION_DELAY_DEFAULT,
+            curve_recognition_enabled: false,
             circle_lasso_enabled: true,
             multi_touch_undo_redo_enabled: true,
         }

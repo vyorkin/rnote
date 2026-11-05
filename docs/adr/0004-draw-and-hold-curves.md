@@ -2,7 +2,10 @@
 
 ## Status
 
-accepted (2026-11-04)
+accepted (2026-11-04), superseded by [0006](0006-goodnotes-style-curves.md):
+the one-segment Bézier fit is replaced by a chain of cubic segments, and a
+parenthesis now becomes a canonical bracket rather than the raw fitted Bézier
+([0005](0005-bracket-snap.md))
 
 ## Context
 

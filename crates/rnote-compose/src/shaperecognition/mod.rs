@@ -1,6 +1,6 @@
 // Imports
 use crate::penpath::PenPath;
-use crate::shapes::{CubicBezier, Ellipse, Line, Polygon, QuadraticBezier, Rectangle, Shape};
+use crate::shapes::{CubicBezier, Curve, Ellipse, Line, Polygon, Rectangle, Shape};
 use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
@@ -80,11 +80,12 @@ const RECT_MAX_ANGLE_DEV: f64 = 30.0 * std::f64::consts::PI / 180.0;
 const RECT_AXIS_SNAP_ANGLE: f64 = 5.0 * std::f64::consts::PI / 180.0;
 /// The maximum number of polygon corners that are recognized.
 const POLYGON_MAX_CORNERS: usize = 6;
-/// The maximum mean distance of the stroke points to an open curve, relative to its chord length,
+/// The maximum distance of the stroke points from an open curve, relative to its chord length,
 /// for the curve to be accepted.
-const CURVE_MAX_MEAN_RESIDUAL_CHORD_RATIO: f64 = 0.04;
-/// The maximum distance of a single stroke point to an open curve, relative to its chord length.
-const CURVE_MAX_RESIDUAL_CHORD_RATIO: f64 = 0.10;
+///
+/// The curve is built through the stroke, so this only grows when the stroke wiggles between the
+/// points it was simplified to: a curve is a cleaning of the stroke, not a different shape.
+const CURVE_MAX_DEV_RATIO: f64 = 0.06;
 /// The distance from an open curve (in surface coordinates) that is tolerated regardless of its length,
 /// because the jitter of the hand is large compared to a short stroke.
 const CURVE_MIN_TOLERANCE_SURFACE: f64 = 2.0;
@@ -92,24 +93,93 @@ const CURVE_MIN_TOLERANCE_SURFACE: f64 = 2.0;
 ///
 /// A sharper turn is a corner of a handwriting stroke, not a bend of a curve.
 const CURVE_MAX_TURN: f64 = 30.0 * std::f64::consts::PI / 180.0;
-/// How much smaller the residual of a cubic fit has to be than the quadratic fit's for the stroke
-/// to be treated as having two bends. Below that, the simpler quadratic curve is kept.
-const CURVE_CUBIC_IMPROVEMENT: f64 = 0.6;
-/// The number of samples used to find the nearest point on a fitted curve when re-parameterizing.
-const CURVE_PROJECTION_SAMPLES: usize = 200;
-/// The number of fit-and-reparameterize passes.
-const CURVE_FIT_PASSES: usize = 3;
+/// The distance (in surface coordinates) the stroke is simplified at, to the points the curve is
+/// built through.
+const CURVE_KNOT_TOLERANCE_SURFACE: f64 = 1.5;
+/// The largest number of points an open curve is built through.
+const CURVE_MAX_KNOTS: usize = 24;
+/// How many times the tolerance is raised when the stroke wiggles too much for [`CURVE_MAX_KNOTS`].
+const CURVE_KNOT_PASSES: usize = 8;
+/// The samples per cubic segment that the recognized curve is measured from the stroke at.
+const CURVE_SAMPLES_PER_CUBIC: usize = 8;
+/// The maximum tilt (radians) from the vertical for a stroke to be recognized as a parenthesis.
+///
+/// A bracket drawn by hand leans: the chord between its ends is the hand's idea of a vertical, and
+/// the hooks where the pen lands and lifts pull its ends sideways. Measured that way, brackets are
+/// drawn ten to twenty-five degrees off the vertical. The canonical bracket is straightened onto the
+/// vertical whatever the drawing was, so a stroke this far off is still snapped into one; an arc
+/// further off is closer to a chevron or a smile than to a bracket.
+const BRACKET_MAX_TILT: f64 = 35.0 * std::f64::consts::PI / 180.0;
+/// The minimum height (in surface coordinates) of a parenthesis.
+///
+/// Shorter strokes are as often parts of a letter, which only wait longer to be held.
+const BRACKET_MIN_HEIGHT_SURFACE: f64 = 30.0;
+/// The maximum bulge of a parenthesis, relative to its chord.
+///
+/// A hand-drawn parenthesis is often a deep arc, close to a half circle. A stroke that wraps
+/// further than this folds back towards itself, which is a hook or a letter.
+const BRACKET_MAX_BULGE_RATIO: f64 = 0.6;
+
+/// The share of the stroke at each end that is the pen landing and lifting, not the bracket.
+///
+/// The hooks there turn sharper than the rest of the stroke and carry the pen's tremor, so the bend
+/// is judged over the body between them. They still keep their place in the shape that is drawn.
+const BRACKET_HOOK_RATIO: f64 = 0.08;
+
+/// How far from the middle of the stroke its deepest point may sit, as a share of its length.
+///
+/// A bracket bends most in the middle. A stroke whose bulge sits near one end is a hook, or a
+/// letter.
+const BRACKET_MAX_APEX_OFFSET: f64 = 0.2;
+
+/// A recognized shape and whether it is a canonical bracket.
+#[derive(Debug, Clone)]
+pub struct RecognizedShape {
+    /// The shape the stroke is replaced with.
+    pub shape: Shape,
+    /// Whether the shape is a canonical bracket, which is adjusted by its ends and not by its bend.
+    pub bracket: bool,
+}
+
+impl RecognizedShape {
+    fn plain(shape: Shape) -> Self {
+        Self {
+            shape,
+            bracket: false,
+        }
+    }
+
+    fn bracket(bracket: CubicBezier) -> Self {
+        Self {
+            shape: Shape::CubicBezier(bracket),
+            bracket: true,
+        }
+    }
+}
 
 /// Attempt to recognize a geometric shape from a drawn pen path.
 ///
 /// Returns the recognized shape when the path resembles one closely enough, `None` otherwise.
 ///
-/// Recognized are: lines, open quadratic and cubic curves, ellipses and circles, rectangles
-/// (possibly rotated) and closed polygons with up to 6 corners (triangles, quadrilaterals, ..).
+/// Recognized are: lines, parentheses, open curves as a chain of cubic segments, ellipses and circles,
+/// rectangles (possibly rotated) and closed polygons with up to 6 corners (triangles,
+/// quadrilaterals, ..).
 ///
 /// `zoom` is the zoom of the view the path was drawn in. It converts the tolerances for the jitter of the hand,
 /// which are defined in surface coordinates, to document coordinates.
 pub fn recognize_shape(path: &PenPath, zoom: f64) -> Option<Shape> {
+    recognize_shape_with_kind(path, zoom, true).map(|recognized| recognized.shape)
+}
+
+/// Like [`recognize_shape`], and tells a canonical bracket from an ordinary open curve.
+///
+/// `curves` enables the recognition of open curves, which are drawn as a chain of cubic segments.
+/// With it off, a stroke that is only a curve is not recognized at all.
+pub fn recognize_shape_with_kind(
+    path: &PenPath,
+    zoom: f64,
+    curves: bool,
+) -> Option<RecognizedShape> {
     let input_points = flattened_points(path);
     if input_points.len() < MIN_INPUT_POINTS {
         return None;
@@ -132,10 +202,23 @@ pub fn recognize_shape(path: &PenPath, zoom: f64) -> Option<Shape> {
     let closed = gap < CLOSED_GAP_PERIMETER_RATIO * perimeter;
 
     if closed {
-        recognize_closed(&input_points, bounds_diag)
+        recognize_closed(&input_points, bounds_diag).map(RecognizedShape::plain)
     } else {
+        // A parenthesis is judged before a line, so that a shallow one stays a bracket. The bracket
+        // gate rejects every stroke a line is: its bulge has to be larger than the deviation a line
+        // of that length may have.
+        if let Some(bracket) = recognize_bracket(&input_points, zoom) {
+            return Some(RecognizedShape::bracket(bracket));
+        }
+
         recognize_line(&input_points, perimeter, zoom)
-            .or_else(|| recognize_curve(&input_points, zoom))
+            .map(RecognizedShape::plain)
+            .or_else(|| {
+                curves
+                    .then(|| recognize_curve(&input_points, zoom))
+                    .flatten()
+                    .map(RecognizedShape::plain)
+            })
     }
 }
 
@@ -310,6 +393,107 @@ fn resample(points: &[Vector2], n: usize, wrap: bool) -> Vec<Vector2> {
     resampled
 }
 
+/// The deviation from a line (in document coordinates) that is tolerated for a stroke of the given
+/// length, together with the distance within which the jitter of the hand is forgiven.
+fn line_dev_tolerance(span: f64, zoom: f64) -> f64 {
+    let long = ((span * zoom - LINE_SHORT_SURFACE) / (LINE_LONG_SURFACE - LINE_SHORT_SURFACE))
+        .clamp(0.0, 1.0);
+    let ratio =
+        LINE_SHORT_MAX_DEV_RATIO + (LINE_LONG_MAX_DEV_RATIO - LINE_SHORT_MAX_DEV_RATIO) * long;
+
+    (ratio * span).max(LINE_MIN_DEV_TOLERANCE_SURFACE / zoom)
+}
+
+/// Recognize an upright, single-bend stroke as a parenthesis and snap it to a canonical bracket.
+///
+/// The canonical bracket keeps the drawn height and the drawn bulge, and puts the ends on one
+/// vertical line and the deepest point in the middle of the height. The bulge is the largest
+/// distance between the stroke and its chord; it is the sagitta of the circular arc that the
+/// bracket is snapped to, which keeps the shape of a deep bracket instead of flattening it.
+fn recognize_bracket(points: &[Vector2], zoom: f64) -> Option<CubicBezier> {
+    let start = *points.first()?;
+    let end = *points.last()?;
+    let chord_vec = end - start;
+    let chord = chord_vec.length();
+    if chord < f64::EPSILON {
+        return None;
+    }
+
+    // A parenthesis stands upright.
+    let upright = (chord_vec / chord).dot(Vector2::new(0.0, 1.0)).abs();
+    if upright < BRACKET_MAX_TILT.cos() {
+        return None;
+    }
+    let height = (end.y - start.y).abs();
+    if height * zoom < BRACKET_MIN_HEIGHT_SURFACE {
+        return None;
+    }
+
+    let resampled = resample(points, N_RESAMPLE, false);
+    let hook = (resampled.len() as f64 * BRACKET_HOOK_RATIO).round() as usize;
+    let body = &resampled[hook..resampled.len() - hook];
+    if body.len() <= 2 * TURN_WINDOW {
+        return None;
+    }
+    if max_open_turn(body) > CURVE_MAX_TURN {
+        return None;
+    }
+
+    // One bulge only: the stroke stays on one side of its chord. Points close to the chord say
+    // nothing about the side, they are the jitter of the hand near the ends.
+    let side_tolerance = LINE_MIN_DEV_TOLERANCE_SURFACE / zoom;
+    let normal = Vector2::new(-chord_vec.y, chord_vec.x) / chord;
+    let mut bulge = 0.0_f64;
+    let mut bulge_side = 0.0_f64;
+    let mut apex = 0;
+    for (index, point) in body.iter().enumerate() {
+        let distance = normal.dot(*point - start);
+        if distance.abs() <= side_tolerance {
+            continue;
+        }
+        let side = distance.signum();
+        if bulge_side != 0.0 && side != bulge_side {
+            return None;
+        }
+        bulge_side = side;
+        if distance.abs() > bulge {
+            bulge = distance.abs();
+            apex = index;
+        }
+    }
+    if bulge_side == 0.0 {
+        return None;
+    }
+
+    // A stroke the line recognizer accepts is a line, not a shallow bracket.
+    if bulge <= line_dev_tolerance(chord, zoom) || bulge > BRACKET_MAX_BULGE_RATIO * chord {
+        return None;
+    }
+
+    // The stroke bends where a bracket bends: in the middle. The exact curve is not measured
+    // against the canonical one, since a deep bracket is closer to a circular arc than to the
+    // quadratic it is snapped into.
+    let apex_fraction = apex as f64 / (body.len() - 1) as f64;
+    if (apex_fraction - 0.5).abs() > BRACKET_MAX_APEX_OFFSET {
+        return None;
+    }
+
+    // Snap the ends onto one vertical, keep their height, and keep the bulge.
+    let x = (start.x + end.x) * 0.5;
+    let outward_x = if bulge_side * normal.x < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+
+    CubicBezier::new_circular_arc(
+        Vector2::new(x, start.y),
+        Vector2::new(x, end.y),
+        bulge,
+        Vector2::new(outward_x, 0.0),
+    )
+}
+
 /// Recognize an open stroke as a line.
 ///
 /// Short strokes have to be nearly straight, since they could as well be parts of letters. The
@@ -354,9 +538,7 @@ fn recognize_line(points: &[Vector2], perimeter: f64, zoom: f64) -> Option<Shape
         .iter()
         .map(|p| direction.perp_dot(*p - body_first).abs())
         .fold(0.0, f64::max);
-    let dev_tolerance = (lerp(LINE_SHORT_MAX_DEV_RATIO, LINE_LONG_MAX_DEV_RATIO) * span)
-        .max(LINE_MIN_DEV_TOLERANCE_SURFACE / zoom);
-    if max_dev > dev_tolerance {
+    if max_dev > line_dev_tolerance(span, zoom) {
         return None;
     }
 
@@ -368,24 +550,12 @@ fn recognize_line(points: &[Vector2], perimeter: f64, zoom: f64) -> Option<Shape
     }))
 }
 
-/// The distances of the stroke points from a fitted curve.
-struct Residuals {
-    mean: f64,
-    max: f64,
-}
-
-impl Residuals {
-    /// Whether the fit stays within the allowed mean and maximum deviation.
-    fn accepts(&self, max_mean: f64, max_max: f64) -> bool {
-        self.mean <= max_mean && self.max <= max_max
-    }
-}
-
-/// Recognize an open stroke as a quadratic or cubic curve.
+/// Recognize an open stroke as a curve, a chain of cubic segments.
 ///
-/// The endpoints of the fit are the endpoints of the stroke, so the curve keeps where the stroke
-/// started and ended. A quadratic curve is preferred, because it has a single bend; a cubic one is
-/// only used when it fits markedly better, which means the stroke has two bends.
+/// The first and the last segment start and end where the stroke does, so the curve keeps where the
+/// stroke started and ended. Between them the curve is built through the stroke simplified to
+/// [`CURVE_MAX_KNOTS`] points, which removes the jitter of the hand and leaves the shape: the curve
+/// is a cleaning of the stroke, not a template it is snapped to.
 fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
     let start = *points.first()?;
     let end = *points.last()?;
@@ -400,27 +570,98 @@ fn recognize_curve(points: &[Vector2], zoom: f64) -> Option<Shape> {
         return None;
     }
 
-    let tolerance = CURVE_MIN_TOLERANCE_SURFACE / zoom;
-    let max_mean = (CURVE_MAX_MEAN_RESIDUAL_CHORD_RATIO * chord).max(tolerance);
-    let max_max = (CURVE_MAX_RESIDUAL_CHORD_RATIO * chord).max(tolerance * 2.0);
+    // The resampled stroke stops one spacing short of its end, so the curve takes the stroke's own
+    // endpoints: it has to start where the pen landed and end where it was lifted.
+    let mut knots = curve_knots(&resampled, zoom)?;
+    let last = knots.len() - 1;
+    knots[0] = start;
+    knots[last] = end;
+    let curve = Curve::new_through_points(&knots)?;
 
-    if let Some((quadratic, residuals)) = fit_quadratic(&resampled, start, end)
-        && residuals.accepts(max_mean, max_max)
-    {
-        if let Some((cubic, cubic_residuals)) = fit_cubic(&resampled, start, end)
-            && cubic_residuals.mean < residuals.mean * CURVE_CUBIC_IMPROVEMENT
-            && cubic_residuals.accepts(max_mean, max_max)
-        {
-            return Some(Shape::CubicBezier(cubic));
+    // The curve passes through the knots, but between them it may leave the stroke. Measure it
+    // against the stroke, so that a stroke the knots describe badly stays as it was drawn.
+    let samples = curve
+        .cubics
+        .iter()
+        .flat_map(|cubic| {
+            (0..=CURVE_SAMPLES_PER_CUBIC).map(move |i| {
+                cubic_point(
+                    cubic.start,
+                    cubic.cp1,
+                    cubic.cp2,
+                    cubic.end,
+                    i as f64 / CURVE_SAMPLES_PER_CUBIC as f64,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let deviation = resampled
+        .iter()
+        .map(|point| {
+            samples
+                .iter()
+                .map(|sample| (*sample - *point).length())
+                .fold(f64::MAX, f64::min)
+        })
+        .fold(0.0, f64::max);
+    let tolerance = (CURVE_MAX_DEV_RATIO * chord).max(CURVE_MIN_TOLERANCE_SURFACE / zoom);
+    (deviation <= tolerance).then_some(Shape::Curve(curve))
+}
+
+/// The points an open curve is built through.
+///
+/// The stroke is simplified until it has few enough points, raising the tolerance each pass: a
+/// stroke that still wiggles at that tolerance is not a smooth curve.
+fn curve_knots(points: &[Vector2], zoom: f64) -> Option<Vec<Vector2>> {
+    let mut tolerance = (CURVE_KNOT_TOLERANCE_SURFACE / zoom).max(f64::EPSILON);
+
+    for _ in 0..CURVE_KNOT_PASSES {
+        let knots = simplify(points, tolerance);
+        if knots.len() <= CURVE_MAX_KNOTS {
+            return Some(knots);
         }
-
-        return Some(Shape::QuadraticBezier(quadratic));
+        tolerance *= 1.5;
     }
 
-    let (cubic, residuals) = fit_cubic(&resampled, start, end)?;
-    residuals
-        .accepts(max_mean, max_max)
-        .then_some(Shape::CubicBezier(cubic))
+    None
+}
+
+/// Simplify a polyline with the Douglas-Peucker algorithm.
+///
+/// Every point left out is within `tolerance` of the line between the two points that are kept
+/// around it.
+fn simplify(points: &[Vector2], tolerance: f64) -> Vec<Vector2> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut ranges = vec![(0, points.len() - 1)];
+
+    while let Some((first, last)) = ranges.pop() {
+        let (mut worst, mut index) = (0.0, first);
+        for i in first + 1..last {
+            let distance = dist_to_segment(points[i], points[first], points[last]);
+            if distance > worst {
+                worst = distance;
+                index = i;
+            }
+        }
+        if worst > tolerance {
+            keep[index] = true;
+            ranges.push((first, index));
+            ranges.push((index, last));
+        }
+    }
+
+    points
+        .iter()
+        .zip(keep)
+        .filter(|(_, keep)| *keep)
+        .map(|(point, _)| *point)
+        .collect()
 }
 
 /// The largest turn angle along an open polyline, measured over [`TURN_WINDOW`] points.
@@ -443,118 +684,6 @@ fn max_open_turn(points: &[Vector2]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Fit a quadratic bezier curve with fixed endpoints to the points.
-fn fit_quadratic(
-    points: &[Vector2],
-    start: Vector2,
-    end: Vector2,
-) -> Option<(QuadraticBezier, Residuals)> {
-    if points.len() < 3 {
-        return None;
-    }
-
-    let mut ts = uniform_parameters(points.len());
-    let mut cp = (start + end) * 0.5;
-
-    for _ in 0..CURVE_FIT_PASSES {
-        let mut numerator = Vector2::ZERO;
-        let mut denominator = 0.0;
-
-        for (point, t) in points.iter().zip(&ts) {
-            let (mt, t) = (1.0 - t, *t);
-            let weight = 2.0 * mt * t;
-            if weight <= f64::EPSILON {
-                continue;
-            }
-            let base = start * (mt * mt) + end * (t * t);
-            numerator += (*point - base) * weight;
-            denominator += weight * weight;
-        }
-
-        if denominator <= f64::EPSILON {
-            return None;
-        }
-        cp = numerator / denominator;
-
-        for i in 1..points.len() - 1 {
-            ts[i] = nearest_parameter(|t| quad_point(start, cp, end, t), points[i]);
-        }
-    }
-
-    let residuals = residuals(points, &ts, |t| quad_point(start, cp, end, t));
-    Some((QuadraticBezier { start, cp, end }, residuals))
-}
-
-/// Fit a cubic bezier curve with fixed endpoints to the points.
-fn fit_cubic(points: &[Vector2], start: Vector2, end: Vector2) -> Option<(CubicBezier, Residuals)> {
-    if points.len() < 3 {
-        return None;
-    }
-
-    let chord = (end - start).length();
-    let mut ts = uniform_parameters(points.len());
-    let mut cp1 = start + (end - start) / 3.0;
-    let mut cp2 = start + (end - start) * (2.0 / 3.0);
-
-    for _ in 0..CURVE_FIT_PASSES {
-        let (mut aa, mut ab, mut bb) = (0.0, 0.0, 0.0);
-        let (mut ra, mut rb) = (Vector2::ZERO, Vector2::ZERO);
-
-        for (point, t) in points.iter().zip(&ts) {
-            let (mt, t) = (1.0 - t, *t);
-            let a = 3.0 * mt * mt * t;
-            let b = 3.0 * mt * t * t;
-            let base = start * (mt * mt * mt) + end * (t * t * t);
-            let delta = *point - base;
-
-            aa += a * a;
-            ab += a * b;
-            bb += b * b;
-            ra += delta * a;
-            rb += delta * b;
-        }
-
-        let determinant = aa * bb - ab * ab;
-        if determinant.abs() <= f64::EPSILON {
-            return None;
-        }
-        cp1 = (ra * bb - rb * ab) / determinant;
-        cp2 = (aa * rb - ab * ra) / determinant;
-
-        for i in 1..points.len() - 1 {
-            ts[i] = nearest_parameter(|t| cubic_point(start, cp1, cp2, end, t), points[i]);
-        }
-    }
-
-    // Control points far outside the stroke describe an overfit, not a curve the hand drew.
-    let midpoint = (start + end) * 0.5;
-    if (cp1 - midpoint).length() > 3.0 * chord || (cp2 - midpoint).length() > 3.0 * chord {
-        return None;
-    }
-
-    let residuals = residuals(points, &ts, |t| cubic_point(start, cp1, cp2, end, t));
-    Some((
-        CubicBezier {
-            start,
-            cp1,
-            cp2,
-            end,
-        },
-        residuals,
-    ))
-}
-
-/// The parameters of the points, evenly spaced from 0 to 1.
-fn uniform_parameters(n: usize) -> Vec<f64> {
-    (0..n).map(|i| i as f64 / (n.max(2) - 1) as f64).collect()
-}
-
-/// The point on a quadratic bezier curve at the given parameter.
-fn quad_point(start: Vector2, cp: Vector2, end: Vector2, t: f64) -> Vector2 {
-    let mt = 1.0 - t;
-    start * (mt * mt) + cp * (2.0 * mt * t) + end * (t * t)
-}
-
 /// The point on a cubic bezier curve at the given parameter.
 fn cubic_point(start: Vector2, cp1: Vector2, cp2: Vector2, end: Vector2, t: f64) -> Vector2 {
     let mt = 1.0 - t;
@@ -562,40 +691,6 @@ fn cubic_point(start: Vector2, cp1: Vector2, cp2: Vector2, end: Vector2, t: f64)
         + cp1 * (3.0 * mt * mt * t)
         + cp2 * (3.0 * mt * t * t)
         + end * (t * t * t)
-}
-
-/// The parameter of the point on the curve closest to the given point.
-fn nearest_parameter(curve: impl Fn(f64) -> Vector2, point: Vector2) -> f64 {
-    let mut best_t = 0.0;
-    let mut best_distance = f64::MAX;
-
-    for i in 0..=CURVE_PROJECTION_SAMPLES {
-        let t = i as f64 / CURVE_PROJECTION_SAMPLES as f64;
-        let distance = (curve(t) - point).length_squared();
-        if distance < best_distance {
-            best_distance = distance;
-            best_t = t;
-        }
-    }
-
-    best_t
-}
-
-/// The distances of the points from the curve, at their parameters.
-fn residuals(points: &[Vector2], ts: &[f64], curve: impl Fn(f64) -> Vector2) -> Residuals {
-    let mut sum = 0.0;
-    let mut max: f64 = 0.0;
-
-    for (point, t) in points.iter().zip(ts) {
-        let distance = (curve(*t) - *point).length();
-        sum += distance;
-        max = max.max(distance);
-    }
-
-    Residuals {
-        mean: sum / points.len() as f64,
-        max,
-    }
 }
 
 /// Smooth a closed resampled loop with a cyclic three-point moving average.
@@ -1034,21 +1129,286 @@ mod tests {
         );
     }
 
+    /// A parenthesis drawn from `start` to `end`, bulging the given distance to one side.
+    fn parenthesis_points(start: Vector2, end: Vector2, bulge: f64) -> Vec<Vector2> {
+        let chord = end - start;
+        let normal = Vector2::new(-chord.y, chord.x) / chord.length();
+
+        (0..=40)
+            .map(|i| {
+                let t = i as f64 / 40.0;
+                start + chord * t + normal * (bulge * (t * std::f64::consts::PI).sin())
+            })
+            .collect()
+    }
+
     #[test]
-    fn recognize_short_arc() {
-        // A parenthesis is short and nearly straight, but must become a curve and not a line.
+    fn recognize_short_parenthesis() {
+        // A parenthesis is short and nearly straight, but must become a bracket and not a line.
         let points = with_resting_tail((0..=20).map(|i| {
             let t = i as f64 / 20.0;
             Vector2::new(
                 100.0 - 5.0 * (t * std::f64::consts::PI).sin(),
-                200.0 + 30.0 * t,
+                200.0 + 40.0 * t,
             )
         }));
 
-        let shape = recognize_shape(&pen_path_from_points(points), 1.0);
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .expect("a parenthesis is recognized");
         assert!(
-            matches!(shape, Some(Shape::QuadraticBezier(_))),
-            "expected quadratic curve, got {shape:?}"
+            recognized.bracket,
+            "expected a bracket, got {:?}",
+            recognized.shape
+        );
+        match recognized.shape {
+            Shape::CubicBezier(cubic) => {
+                assert!((cubic.start.x - 100.0).abs() < 0.01);
+                assert!((cubic.end.x - 100.0).abs() < 0.01);
+                // The bulge is kept: the arc bends five pixels away from the chord.
+                let apex = cubic_point(cubic.start, cubic.cp1, cubic.cp2, cubic.end, 0.5);
+                assert!((apex.x - 95.0).abs() < 1.0, "apex at {apex:?}");
+            }
+            other => panic!("expected a cubic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recognize_upright_parenthesis_as_a_canonical_bracket() {
+        let start = Vector2::new(100.0, 200.0);
+        let end = Vector2::new(106.0, 260.0);
+        let recognized = recognize_shape_with_kind(
+            &pen_path_from_points(parenthesis_points(start, end, 12.0)),
+            1.0,
+            true,
+        )
+        .expect("a parenthesis is recognized");
+        assert!(
+            recognized.bracket,
+            "expected a bracket, got {:?}",
+            recognized.shape
+        );
+
+        let Shape::CubicBezier(cubic) = recognized.shape else {
+            panic!("expected a cubic");
+        };
+        // The ends are on one vertical, at the mean of where they were drawn, keeping their height.
+        assert!((cubic.start.x - 103.0).abs() < 0.01);
+        assert!((cubic.end.x - 103.0).abs() < 0.01);
+        assert!((cubic.start.y - 200.0).abs() < 0.01);
+        assert!((cubic.end.y - 260.0).abs() < 0.01);
+        // The deepest point is in the middle of the height.
+        let apex = cubic_point(cubic.start, cubic.cp1, cubic.cp2, cubic.end, 0.5);
+        assert!((apex.y - 230.0).abs() < 0.01);
+        // The bulge is the one that was drawn.
+        let bulge = (apex.x - 103.0).abs();
+        assert!((bulge - 12.0).abs() < 0.5, "bulge {bulge}");
+    }
+
+    #[test]
+    fn a_straight_stroke_is_a_line_and_not_a_bracket() {
+        let points =
+            with_resting_tail((0..=20).map(|i| Vector2::new(100.0, 200.0 + 5.0 * i as f64)));
+
+        let recognized =
+            recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true).expect("a line");
+        assert!(!recognized.bracket);
+        assert!(matches!(recognized.shape, Shape::Line(_)));
+    }
+
+    #[test]
+    fn a_shallow_bow_on_a_line_is_still_a_line() {
+        // Six percent of the height, under the deviation a line of that length may have.
+        let points =
+            parenthesis_points(Vector2::new(100.0, 100.0), Vector2::new(100.0, 300.0), 12.0);
+
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .expect("a line is recognized");
+        assert!(!recognized.bracket);
+        assert!(
+            matches!(recognized.shape, Shape::Line(_)),
+            "expected a line, got {:?}",
+            recognized.shape
+        );
+    }
+
+    #[test]
+    fn a_parenthesis_drawn_at_a_slant_is_straightened() {
+        // A bracket as it is drawn by hand: the chord between its ends leans twenty-five degrees,
+        // and the ends are put on one vertical, keeping the height and the bulge.
+        let start = Vector2::new(100.0, 200.0);
+        let end = Vector2::new(146.7, 300.0);
+        let points = parenthesis_points(start, end, 30.0);
+
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .expect("a slanted parenthesis is recognized");
+        assert!(
+            recognized.bracket,
+            "expected a bracket, got {:?}",
+            recognized.shape
+        );
+
+        let Shape::CubicBezier(cubic) = recognized.shape else {
+            panic!("expected a cubic");
+        };
+        let x = (start.x + end.x) * 0.5;
+        assert!((cubic.start.x - x).abs() < 0.01);
+        assert!((cubic.end.x - x).abs() < 0.01);
+        assert!((cubic.start.y - 200.0).abs() < 0.01);
+        assert!((cubic.end.y - 300.0).abs() < 0.01);
+        let apex = cubic_point(cubic.start, cubic.cp1, cubic.cp2, cubic.end, 0.5);
+        assert!((apex.y - 250.0).abs() < 0.01);
+        let bulge = (apex.x - x).abs();
+        assert!((bulge - 30.0).abs() < 0.5, "bulge {bulge}");
+    }
+
+    #[test]
+    fn a_parenthesis_tilted_too_far_is_not_a_bracket() {
+        // Forty degrees off the vertical: an arc that far from upright is not a bracket.
+        let points =
+            parenthesis_points(Vector2::new(100.0, 200.0), Vector2::new(183.9, 300.0), 12.0);
+
+        let bracket = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .map_or(false, |r| r.bracket);
+        assert!(!bracket);
+    }
+
+    #[test]
+    fn a_deep_parenthesis_is_a_bracket() {
+        // A hand-drawn parenthesis is often a deep arc: forty-seven percent of its chord, as in the
+        // stroke of a 200 px tall bracket that bulges 94 px.
+        let points =
+            parenthesis_points(Vector2::new(100.0, 200.0), Vector2::new(100.0, 340.0), 66.0);
+
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .expect("a deep parenthesis is recognized");
+        assert!(
+            recognized.bracket,
+            "expected a bracket, got {:?}",
+            recognized.shape
+        );
+
+        let Shape::CubicBezier(cubic) = recognized.shape else {
+            panic!("expected a cubic");
+        };
+        let apex = cubic_point(cubic.start, cubic.cp1, cubic.cp2, cubic.end, 0.5);
+        let bulge = (apex.x - 100.0).abs();
+        assert!((bulge - 66.0).abs() < 1.0, "bulge {bulge}");
+        assert!((apex.y - 270.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_parenthesis_with_hooked_ends_is_still_a_bracket() {
+        // The pen lands with a short lead-in and lifts with a short tail, each of them turning
+        // sharper than the bracket itself.
+        let mut points =
+            parenthesis_points(Vector2::new(100.0, 200.0), Vector2::new(100.0, 300.0), 30.0);
+        let mut lead_in: Vec<Vector2> = (0..5)
+            .map(|i| Vector2::new(100.0 + 7.0 - 1.4 * i as f64, 200.0))
+            .collect();
+        lead_in.extend(points.drain(..));
+        let mut points = lead_in;
+        points.extend((0..5).map(|i| Vector2::new(100.0 + 1.4 * i as f64, 300.0)));
+
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .expect("a parenthesis with hooked ends is recognized");
+        assert!(
+            recognized.bracket,
+            "expected a bracket, got {:?}",
+            recognized.shape
+        );
+    }
+
+    #[test]
+    fn a_deep_bend_is_not_a_bracket() {
+        // Three quarters of the chord: the stroke wraps back towards itself, it is a hook.
+        let points =
+            parenthesis_points(Vector2::new(100.0, 100.0), Vector2::new(100.0, 200.0), 75.0);
+
+        let bracket = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .map_or(false, |r| r.bracket);
+        assert!(!bracket);
+    }
+
+    #[test]
+    fn a_parenthesis_shorter_than_the_minimum_is_not_a_bracket() {
+        let points =
+            parenthesis_points(Vector2::new(100.0, 100.0), Vector2::new(100.0, 120.0), 5.0);
+
+        let bracket = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .map_or(false, |r| r.bracket);
+        assert!(!bracket);
+    }
+
+    #[test]
+    fn an_s_curve_is_not_a_bracket() {
+        let points = (0..=60).map(|i| {
+            let t = i as f64 / 60.0;
+            Vector2::new(
+                100.0 + 20.0 * (2.0 * std::f64::consts::PI * t).sin(),
+                100.0 + 200.0 * t,
+            )
+        });
+
+        let bracket = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, true)
+            .map_or(false, |r| r.bracket);
+        assert!(!bracket);
+    }
+
+    /// The points of a quadratic bezier, for strokes a test draws along it.
+    fn quadratic_points(start: Vector2, cp: Vector2, end: Vector2, n: usize) -> Vec<Vector2> {
+        (0..=n)
+            .map(|i| {
+                let t = i as f64 / n as f64;
+                let mt = 1.0 - t;
+                start * (mt * mt) + cp * (2.0 * mt * t) + end * (t * t)
+            })
+            .collect()
+    }
+
+    /// How far the stroke is from the curve, at its furthest.
+    fn max_deviation(stroke: &[Vector2], curve: &Curve) -> f64 {
+        let samples = curve
+            .cubics
+            .iter()
+            .flat_map(|cubic| {
+                (0..=16).map(move |i| {
+                    cubic_point(
+                        cubic.start,
+                        cubic.cp1,
+                        cubic.cp2,
+                        cubic.end,
+                        i as f64 / 16.0,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        stroke
+            .iter()
+            .map(|point| {
+                samples
+                    .iter()
+                    .map(|sample| (*sample - *point).length())
+                    .fold(f64::MAX, f64::min)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn a_curve_is_not_recognized_with_curves_off() {
+        let drawn = quadratic_points(
+            Vector2::new(100.0, 200.0),
+            Vector2::new(150.0, 120.0),
+            Vector2::new(200.0, 200.0),
+            60,
+        );
+
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(drawn), 1.0, false);
+
+        assert!(
+            recognized.is_none(),
+            "got {:?}",
+            recognized.map(|recognized| recognized.shape)
         );
     }
 
@@ -1057,22 +1417,22 @@ mod tests {
         let start = Vector2::new(100.0, 200.0);
         let cp = Vector2::new(150.0, 120.0);
         let end = Vector2::new(200.0, 200.0);
-        let points = (0..=60).map(|i| {
-            let t = i as f64 / 60.0;
-            quad_point(start, cp, end, t) + jitter(i, 0.25)
-        });
+        let drawn = quadratic_points(start, cp, end, 60);
+        let points = drawn.iter().enumerate().map(|(i, p)| *p + jitter(i, 0.25));
 
         match recognize_shape(&pen_path_from_points(points), 1.0) {
-            Some(Shape::QuadraticBezier(quadratic)) => {
-                assert!((quadratic.start - start).length() < 0.5);
-                assert!((quadratic.end - end).length() < 0.5);
+            Some(Shape::Curve(curve)) => {
+                let first = curve.cubics.first().unwrap();
+                let last = curve.cubics.last().unwrap();
+                assert!((first.start - start).length() < 0.5);
+                assert!((last.end - end).length() < 0.5);
+                // The curve is clean, but it is still the stroke that was drawn.
                 assert!(
-                    (quadratic.cp - cp).length() < 12.0,
-                    "control point {:?} is too far from {cp:?}",
-                    quadratic.cp
+                    max_deviation(&drawn, &curve) < 3.0,
+                    "the curve leaves the stroke"
                 );
             }
-            other => panic!("expected quadratic curve, got {other:?}"),
+            other => panic!("expected a curve, got {other:?}"),
         }
     }
 
@@ -1082,18 +1442,47 @@ mod tests {
         let cp1 = Vector2::new(130.0, 110.0);
         let cp2 = Vector2::new(170.0, 290.0);
         let end = Vector2::new(200.0, 200.0);
-        let points = (0..=80).map(|i| {
-            let t = i as f64 / 80.0;
-            cubic_point(start, cp1, cp2, end, t) + jitter(i, 0.25)
-        });
+        let drawn = (0..=80)
+            .map(|i| cubic_point(start, cp1, cp2, end, i as f64 / 80.0))
+            .collect::<Vec<_>>();
+        let points = drawn.iter().enumerate().map(|(i, p)| *p + jitter(i, 0.25));
 
         match recognize_shape(&pen_path_from_points(points), 1.0) {
-            Some(Shape::CubicBezier(cubic)) => {
-                assert!((cubic.start - start).length() < 0.5);
-                assert!((cubic.end - end).length() < 0.5);
+            Some(Shape::Curve(curve)) => {
+                let first = curve.cubics.first().unwrap();
+                let last = curve.cubics.last().unwrap();
+                assert!((first.start - start).length() < 0.5);
+                assert!((last.end - end).length() < 0.5);
+                // Two bends are two segments at the least, and the curve keeps them.
+                assert!(curve.cubics.len() > 1);
+                assert!(
+                    max_deviation(&drawn, &curve) < 3.0,
+                    "the curve leaves the stroke"
+                );
             }
-            other => panic!("expected cubic curve, got {other:?}"),
+            other => panic!("expected a curve, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_s_curve_is_a_curve_and_not_a_bracket() {
+        let drawn = (0..=60)
+            .map(|i| {
+                let t = i as f64 / 60.0;
+                Vector2::new(
+                    100.0 + 20.0 * (2.0 * std::f64::consts::PI * t).sin(),
+                    100.0 + 200.0 * t,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let recognized = recognize_shape_with_kind(&pen_path_from_points(drawn.clone()), 1.0, true)
+            .expect("a smooth stroke is recognized");
+        assert!(!recognized.bracket, "an s-curve is not a bracket");
+        let Shape::Curve(curve) = recognized.shape else {
+            panic!("expected a curve, got {:?}", recognized.shape);
+        };
+        assert!(max_deviation(&drawn, &curve) < 3.0);
     }
 
     #[test]

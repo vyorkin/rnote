@@ -1,6 +1,7 @@
 // Imports
 use super::{
-    Arrow, CubicBezier, Ellipse, Line, Polygon, Polyline, QuadraticBezier, Rectangle, Shapeable,
+    Arrow, CubicBezier, Curve, Ellipse, Line, Polygon, Polyline, QuadraticBezier, Rectangle,
+    Shapeable,
 };
 use crate::Transformable;
 use p2d::bounding_volume::Aabb;
@@ -29,6 +30,9 @@ pub enum Shape {
     /// A cubic bezier curve shape.
     #[serde(rename = "cubbez")]
     CubicBezier(CubicBezier),
+    /// A curve, a chain of cubic bezier segments.
+    #[serde(rename = "curve")]
+    Curve(Curve),
     /// A polyline shape.
     #[serde(rename = "polyline")]
     Polyline(Polyline),
@@ -64,6 +68,9 @@ impl Transformable for Shape {
             Self::CubicBezier(cubbez) => {
                 cubbez.translate(offset);
             }
+            Self::Curve(curve) => {
+                curve.translate(offset);
+            }
             Self::Polyline(polyline) => {
                 polyline.translate(offset);
             }
@@ -92,6 +99,9 @@ impl Transformable for Shape {
             }
             Self::CubicBezier(cubbez) => {
                 cubbez.rotate(angle, center);
+            }
+            Self::Curve(curve) => {
+                curve.rotate(angle, center);
             }
             Self::Polyline(polyline) => {
                 polyline.rotate(angle, center);
@@ -122,6 +132,9 @@ impl Transformable for Shape {
             Self::CubicBezier(cubbez) => {
                 cubbez.scale(scale);
             }
+            Self::Curve(curve) => {
+                curve.scale(scale);
+            }
             Self::Polyline(polyline) => {
                 polyline.scale(scale);
             }
@@ -141,6 +154,7 @@ impl Shapeable for Shape {
             Self::Ellipse(ellipse) => ellipse.bounds(),
             Self::QuadraticBezier(quadbez) => quadbez.bounds(),
             Self::CubicBezier(cubbez) => cubbez.bounds(),
+            Self::Curve(curve) => curve.bounds(),
             Self::Polyline(polyline) => polyline.bounds(),
             Self::Polygon(polygon) => polygon.bounds(),
         }
@@ -154,6 +168,7 @@ impl Shapeable for Shape {
             Self::Ellipse(ellipse) => ellipse.hitboxes(),
             Self::QuadraticBezier(quadbez) => quadbez.hitboxes(),
             Self::CubicBezier(cubbez) => cubbez.hitboxes(),
+            Self::Curve(curve) => curve.hitboxes(),
             Self::Polyline(polyline) => polyline.hitboxes(),
             Self::Polygon(polygon) => polygon.hitboxes(),
         }
@@ -167,6 +182,7 @@ impl Shapeable for Shape {
             Self::Ellipse(ellipse) => ellipse.outline_path(),
             Self::QuadraticBezier(quadbez) => quadbez.outline_path(),
             Self::CubicBezier(cubbez) => cubbez.outline_path(),
+            Self::Curve(curve) => curve.outline_path(),
             Self::Polyline(polyline) => polyline.outline_path(),
             Self::Polygon(polygon) => polygon.outline_path(),
         }

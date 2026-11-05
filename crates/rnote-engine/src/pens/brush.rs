@@ -764,7 +764,12 @@ impl Brush {
         {
             let zoom = engine_view.camera.total_zoom();
             let brush_config = &engine_view.config.pens_config.brush_config;
-            shaperecognition::recognize_shape(&brushstroke.path, zoom).map(|shape| {
+            shaperecognition::recognize_shape_with_kind(
+                &brushstroke.path,
+                zoom,
+                engine_view.config.gestures.curve_recognition_enabled,
+            )
+            .map(|recognized| {
                 // The shape is as wide as the stroke it replaces was on average, which is what sets
                 // how it looks: a firm press is a thick line, a light one a thin line.
                 let width = shaperecognition::mean_width(&brushstroke.path, zoom, |pressure| {
@@ -774,14 +779,15 @@ impl Brush {
                     brush_config.stroke_width_for_pressure(Element::PRESSURE_DEFAULT)
                 });
 
-                (shape, width)
+                (recognized, width)
             })
         } else {
             None
         };
-        let Some((shape, stroke_width)) = recognized_shape else {
+        let Some((recognized, stroke_width)) = recognized_shape else {
             return widget_flags;
         };
+        let shape = recognized.shape;
 
         // Replace the drawn stroke with the recognized shape
         engine_view.store.remove_stroke(current_stroke_key);
@@ -821,7 +827,7 @@ impl Brush {
         // The pen keeps adjusting the recognized shape until it is lifted
         self.state = BrushState::AdjustingShape {
             stroke_key: shape_stroke_key,
-            adjust: ShapeAdjust::new(shape, self.hold_anchor),
+            adjust: ShapeAdjust::new(shape, self.hold_anchor, recognized.bracket),
             adjusted: false,
         };
         self.hold_task_handle = None;

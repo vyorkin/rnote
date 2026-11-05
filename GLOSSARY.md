@@ -74,6 +74,30 @@ _Avoid_: pause, dwell
 A recognition policy that prefers missing a gesture over firing one during ordinary writing.
 _Avoid_: conservative detection
 
+**Parenthesis**:
+A round bracket glyph, `(` or `)`, written as a single stroke.
+_Avoid_: bracket (when the round one is meant), paren
+
+**Bulge**:
+The depth of a bracket's bend, the largest distance between its stroke and the chord joining its ends.
+_Avoid_: curve depth, sagitta
+
+**Canonical bracket**:
+A bracket whose ends lie on one vertical line, whose deepest point is at the middle of its height, and whose bend is a circular arc.
+_Avoid_: neat bracket, clean bracket
+
+**Bracket snap**:
+Draw-and-Hold replacing a parenthesis stroke with a canonical bracket of the same height and bulge.
+_Avoid_: bracket completion, paren auto-shape
+
+**Curve**:
+An open pen stroke that bends without a corner, as opposed to a line or a closed shape.
+_Avoid_: arc (when any bend is meant), polyline
+
+**Curve snap**:
+Draw-and-Hold replacing a curve stroke with a smooth curve through the same path.
+_Avoid_: curve fit, spline snap
+
 ## Pens
 
 **Fountain Pen**:
