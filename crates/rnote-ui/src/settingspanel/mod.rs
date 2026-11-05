@@ -640,16 +640,15 @@ impl RnSettingsPanel {
         let set_overlays_margins = |appwindow: &RnAppWindow, row_active: bool| {
             let (m1, m2) = if row_active { (18, 72) } else { (9, 63) };
             let overlays = appwindow.overlays();
-            // Margins only apply to floating panels; docked panels sit flush against their edge.
-            if overlays.panel_dock(crate::ToolbarPanel::ColorPicker) == crate::ToolbarDock::Floating
-            {
+            // The defaults apply to a panel in its default corner, not to a docked panel and not
+            // to one the user placed.
+            if overlays.uses_default_margins(crate::ToolbarPanel::ColorPicker) {
                 overlays.colorpicker_box().set_margin_top(m1);
             }
-            if overlays.panel_dock(crate::ToolbarPanel::PenPicker) == crate::ToolbarDock::Floating {
+            if overlays.uses_default_margins(crate::ToolbarPanel::PenPicker) {
                 overlays.penpicker_box().set_margin_bottom(m1);
             }
-            if overlays.panel_dock(crate::ToolbarPanel::PensSideBar) == crate::ToolbarDock::Floating
-            {
+            if overlays.uses_default_margins(crate::ToolbarPanel::PensSideBar) {
                 overlays.sidebar_box().set_margin_start(m1);
                 overlays.sidebar_box().set_margin_end(m1);
                 overlays.sidebar_box().set_margin_top(m2);

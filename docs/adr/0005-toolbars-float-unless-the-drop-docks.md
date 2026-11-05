@@ -29,4 +29,4 @@ plain drag, not a choice.
 - Docking is discovered through the switch or the handle tooltip, not through trying a drag.
 - Touch and pen input carry no Shift, so they can dock only with the switch on.
 - Toolbars that are already docked stay docked; only later drops change.
-- Free positions are not persisted yet; see ADR 0006.
+- Free positions are persisted per window; see ADR 0006.

@@ -23,6 +23,20 @@ pub(crate) enum ToolbarPanel {
     PensSideBar,
 }
 
+impl ToolbarPanel {
+    /// Every panel that can be floating or docked.
+    pub(crate) const ALL: [Self; 3] = [Self::PenPicker, Self::ColorPicker, Self::PensSideBar];
+
+    /// The name the panel is stored under in the toolbar layout.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::PenPicker => "penpicker",
+            Self::ColorPicker => "colorpicker",
+            Self::PensSideBar => "penssidebar",
+        }
+    }
+}
+
 /// The window edge a toolbar panel is attached to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ToolbarDock {
@@ -78,6 +92,20 @@ fn dock_at_release(target: (f64, ToolbarDock), docks: bool) -> Option<ToolbarDoc
     (docks && target.0 <= DOCK_SNAP_DISTANCE).then_some(target.1)
 }
 
+/// A pixel position as a fraction of the distance the panel can travel inside the overlay.
+fn position_fraction(position: f64, range: f64) -> f64 {
+    if range <= 0.0 {
+        0.0
+    } else {
+        (position / range).clamp(0.0, 1.0)
+    }
+}
+
+/// The pixel position a stored fraction stands for.
+fn fraction_position(fraction: f64, range: f64) -> f64 {
+    fraction.clamp(0.0, 1.0) * range.max(0.0)
+}
+
 /// Show the strip of `dock` and hide the others.
 fn show_dock_indicator(indicators: &[(ToolbarDock, Box)], dock: ToolbarDock) {
     for (edge, strip) in indicators {
@@ -101,6 +129,8 @@ mod imp {
         pub(crate) dock_on_drop: Cell<bool>,
         /// The strips that mark the edge a release would dock the dragged panel to.
         pub(crate) dock_indicators: RefCell<Vec<(ToolbarDock, Box)>>,
+        /// Where each panel was left, as fractions of its travel range inside the overlay.
+        pub(crate) float_positions: RefCell<HashMap<ToolbarPanel, (f64, f64)>>,
 
         #[template_child]
         pub(crate) toolbar_overlay: TemplateChild<Overlay>,
@@ -513,11 +543,87 @@ impl RnOverlays {
 
     /// Float a panel at the given position of the overlay, in overlay coordinates.
     fn float_panel_at(&self, panel: ToolbarPanel, x: f64, y: f64) {
+        self.remember_float_position(panel, (x, y));
         self.imp()
             .docks
             .borrow_mut()
             .insert(panel, ToolbarDock::Floating);
         self.reparent_panel(panel, ToolbarDock::Floating, Some((x, y)));
+    }
+
+    /// Where the panel was left, as fractions of its travel range inside the overlay.
+    pub(crate) fn panel_position(&self, panel: ToolbarPanel) -> Option<(f64, f64)> {
+        self.imp().float_positions.borrow().get(&panel).copied()
+    }
+
+    /// Remember a panel position given as fractions of its travel range.
+    ///
+    /// A floating panel moves to it at once; a docked one keeps the position for when it floats.
+    pub(crate) fn set_panel_position(&self, panel: ToolbarPanel, fraction: (f64, f64)) {
+        self.imp().float_positions.borrow_mut().insert(
+            panel,
+            (fraction.0.clamp(0.0, 1.0), fraction.1.clamp(0.0, 1.0)),
+        );
+        self.apply_float_position(panel);
+    }
+
+    /// Remember the position of a floating panel given in overlay pixels.
+    ///
+    /// The pixels are not applied here: the drag that produced them moved the panel itself.
+    pub(crate) fn remember_float_position(&self, panel: ToolbarPanel, at: (f64, f64)) {
+        let range = self.float_travel_range(panel);
+        self.imp().float_positions.borrow_mut().insert(
+            panel,
+            (
+                position_fraction(at.0, range.0),
+                position_fraction(at.1, range.1),
+            ),
+        );
+    }
+
+    /// Whether the default floating margins still apply to the panel.
+    ///
+    /// A panel the user placed keeps its own position, so the defaults must leave its margins
+    /// alone.
+    pub(crate) fn uses_default_margins(&self, panel: ToolbarPanel) -> bool {
+        self.panel_dock(panel) == ToolbarDock::Floating && self.panel_position(panel).is_none()
+    }
+
+    /// The distance `panel` can travel inside the overlay, in pixels.
+    fn float_travel_range(&self, panel: ToolbarPanel) -> (f64, f64) {
+        let overlay = self.imp().toolbar_overlay.get();
+        let widget = self.panel_widget(panel);
+        let (_, width, _, _) = widget.measure(gtk4::Orientation::Horizontal, -1);
+        let (_, height, _, _) = widget.measure(gtk4::Orientation::Vertical, -1);
+        (
+            (f64::from(overlay.width()) - f64::from(width)).max(0.0),
+            (f64::from(overlay.height()) - f64::from(height)).max(0.0),
+        )
+    }
+
+    /// Move a floating panel to its remembered position.
+    fn apply_float_position(&self, panel: ToolbarPanel) {
+        if self.panel_dock(panel) != ToolbarDock::Floating {
+            return;
+        }
+        let Some(fraction) = self.panel_position(panel) else {
+            return;
+        };
+        let range = self.float_travel_range(panel);
+        let widget = self.panel_widget(panel);
+        widget.set_halign(Align::Start);
+        widget.set_valign(Align::Start);
+        widget.set_margin_start(fraction_position(fraction.0, range.0) as i32);
+        widget.set_margin_top(fraction_position(fraction.1, range.1) as i32);
+        widget.set_margin_end(0);
+        widget.set_margin_bottom(0);
+    }
+
+    /// Move every floating panel that has a remembered position to it.
+    fn apply_float_positions(&self) {
+        for panel in ToolbarPanel::ALL {
+            self.apply_float_position(panel);
+        }
     }
 
     /// The window edge a release at `at` would dock `panel` to, and the distance to that edge.
@@ -901,6 +1007,7 @@ impl RnOverlays {
                             let x = (start_x + offset_x).clamp(0.0, max_x);
                             let y = (start_y + offset_y).clamp(0.0, max_y);
                             if widget.is_ancestor(&overlay) {
+                                overlays.remember_float_position(panel, (x, y));
                                 widget.set_margin_start(x as i32);
                                 widget.set_margin_top(y as i32);
                                 overlay.queue_draw();
@@ -935,6 +1042,26 @@ impl RnOverlays {
         self.setup_tabview(appwindow);
         self.setup_toolbars();
         self.imp().setup_toolbar_overlay();
+
+        // A remembered position is a fraction of the travel range, so it has to be applied
+        // again when a resize changes that range.
+        let overlay = self.imp().toolbar_overlay.get();
+        overlay.connect_notify_local(
+            Some("width"),
+            clone!(
+                #[weak(rename_to = overlays)]
+                self,
+                move |_, _| overlays.apply_float_positions()
+            ),
+        );
+        overlay.connect_notify_local(
+            Some("height"),
+            clone!(
+                #[weak(rename_to = overlays)]
+                self,
+                move |_, _| overlays.apply_float_positions()
+            ),
+        );
     }
 
     fn setup_colorpicker(&self, appwindow: &RnAppWindow) {
@@ -1327,6 +1454,7 @@ mod tests {
         locking_moves_every_toolbar_to_the_top_and_hides_handles();
         docks_and_floats_a_panel_that_is_on_screen();
         the_dock_indicator_marks_only_the_target_edge();
+        default_margins_yield_to_a_stored_position();
     }
 
     fn toolbars_move_between_dock_slots_and_the_overlay() {
@@ -1509,5 +1637,40 @@ mod tests {
 
         overlays.set_dock_indicator(ToolbarDock::Floating);
         assert!(indicators.iter().all(|(_, strip)| !strip.is_visible()));
+    }
+
+    #[test]
+    fn a_stored_position_is_a_fraction_of_the_travel_range() {
+        assert_eq!(position_fraction(0.0, 400.0), 0.0);
+        assert_eq!(position_fraction(200.0, 400.0), 0.5);
+        assert_eq!(position_fraction(400.0, 400.0), 1.0);
+        // A position past the end of the range and a range that has not been laid out yet both
+        // stay valid.
+        assert_eq!(position_fraction(600.0, 400.0), 1.0);
+        assert_eq!(position_fraction(10.0, 0.0), 0.0);
+
+        assert_eq!(fraction_position(0.5, 400.0), 200.0);
+        assert_eq!(fraction_position(1.0, 400.0), 400.0);
+        assert_eq!(fraction_position(2.0, 400.0), 400.0);
+
+        // The same fraction of a wider range keeps the panel in the same relative place.
+        let stored = position_fraction(100.0, 400.0);
+        assert_eq!(fraction_position(stored, 800.0), 200.0);
+    }
+
+    fn default_margins_yield_to_a_stored_position() {
+        let overlays = RnOverlays::new();
+        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Floating);
+        assert!(overlays.uses_default_margins(ToolbarPanel::PenPicker));
+
+        overlays.set_panel_position(ToolbarPanel::PenPicker, (0.5, 0.5));
+        assert!(!overlays.uses_default_margins(ToolbarPanel::PenPicker));
+        assert_eq!(
+            overlays.panel_position(ToolbarPanel::PenPicker),
+            Some((0.5, 0.5))
+        );
+
+        overlays.set_panel_dock(ToolbarPanel::PenPicker, ToolbarDock::Top);
+        assert!(!overlays.uses_default_margins(ToolbarPanel::PenPicker));
     }
 }

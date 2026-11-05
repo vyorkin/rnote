@@ -121,3 +121,12 @@ _Avoid_: drop zone, snap area
 **Toolbar dock**:
 The window edge a docked toolbar is attached to: top, bottom, left or right.
 _Avoid_: toolbar position, toolbar side
+
+**Toolbar layout**:
+The docks and floating positions of all toolbar panels of one window.
+_Avoid_: toolbar state, panel arrangement
+
+**Stored position**:
+A floating toolbar's place, kept as fractions of its travel range so that a window resize keeps
+its relative place instead of a pixel coordinate.
+_Avoid_: saved coordinates, pixel position
