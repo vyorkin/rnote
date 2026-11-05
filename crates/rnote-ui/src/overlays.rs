@@ -133,8 +133,8 @@ mod imp {
         pub(crate) float_positions: RefCell<HashMap<ToolbarPanel, (f64, f64)>>,
         /// The toolbar overlay size the remembered positions were last applied at.
         pub(crate) float_apply_size: Cell<(i32, i32)>,
-        /// Whether applying the remembered positions is already queued.
-        pub(crate) float_apply_queued: Cell<bool>,
+        /// The pending application of the remembered positions, if one is queued.
+        pub(crate) float_apply_source: RefCell<Option<glib::SourceId>>,
         /// Whether the window surface's "layout" signal is connected.
         pub(crate) float_layout_connected: Cell<bool>,
 
@@ -679,15 +679,20 @@ impl RnOverlays {
 
     /// Apply the remembered positions once the toolbar overlay has been allocated.
     ///
-    /// The application is deferred to an idle: a resize is announced before the widgets are
-    /// allocated for it, and the panels can only be placed inside a range the overlay has.
+    /// The application is deferred: a resize is announced before the widgets are allocated for
+    /// it, so the panels can only be placed inside a range the overlay has.
+    ///
+    /// It is also delayed until the surface stops changing size. A window opens at its default
+    /// size, is maximized, and the compositor may resize it again while it animates in, and a
+    /// position applied at every one of those sizes makes the panels glide across the window
+    /// after every start. A settle is the size the window keeps.
     pub(crate) fn queue_float_positions(&self) {
-        if self.imp().float_apply_queued.replace(true) {
-            return;
+        if let Some(source) = self.imp().float_apply_source.take() {
+            source.remove();
         }
         let overlays = self.clone();
-        glib::idle_add_local_once(move || {
-            overlays.imp().float_apply_queued.set(false);
+        let source = glib::timeout_add_local_once(Duration::from_millis(100), move || {
+            overlays.imp().float_apply_source.take();
             let overlay = overlays.imp().toolbar_overlay.get();
             let size = (overlay.width(), overlay.height());
             if size.0 > 0 && size.1 > 0 && size != overlays.imp().float_apply_size.get() {
@@ -695,6 +700,7 @@ impl RnOverlays {
                 overlays.apply_float_positions();
             }
         });
+        self.imp().float_apply_source.replace(Some(source));
     }
 
     /// The window edge a release at `at` would dock `panel` to, and the distance to that edge.

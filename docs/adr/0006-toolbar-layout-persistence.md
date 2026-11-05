@@ -24,6 +24,10 @@ session runs, but the settings they share are global.
   overlays widget is bypassed once the template's box layout manages it, and `GtkWidget`'s
   "width"/"height" don't notify in GTK4. Applying the fractions before the first allocation would
   put every panel at the overlay's top-left corner, where they would stay.
+- The signal only *queues* an application, and the queue waits for the size to settle for 100 ms.
+  A window opens at its default size and is then maximized, so several sizes arrive in a row; an
+  application at each of them makes the panels glide down the window after every start, because
+  each panel's position moves with the window's height. Only the size the window keeps is used.
 - The layout is written when a window stops being active, and when an active window saves its
   settings. Only the last active window's layout is restored on the next start.
 - On start, a stored layout restores docks and positions. If `toolbars-layout` is empty or
