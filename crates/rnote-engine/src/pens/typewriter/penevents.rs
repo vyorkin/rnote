@@ -522,6 +522,33 @@ impl Typewriter {
         let mut widget_flags = WidgetFlags::default();
         self.pos = None;
 
+        // `Ctrl` and `Alt` chords are shortcuts before they are text: paste, copy, undo, bold and
+        // the rest are window accelerators, and they only run if this handler lets the key pass.
+        // The canvas key controller sits in the capture phase, so inserting the bare letter and
+        // returning `Stop` also swallowed the chord - dictating with voxtype, which pastes with
+        // `Ctrl`+`V`, left a lone "v" in the text box instead of the transcribed sentence.
+        // `Ctrl`+`A` is the one chord the typewriter handles itself, by selecting the whole text.
+        if let KeyboardKey::Unicode(keychar) = keyboard_key
+            && (modifier_keys.contains(&ModifierKey::KeyboardCtrl)
+                || modifier_keys.contains(&ModifierKey::KeyboardAlt))
+            && !(keychar == 'a' && matches!(self.state, TypewriterState::Modifying { .. }))
+        {
+            let progress = match self.state {
+                TypewriterState::Idle => PenProgress::Idle,
+                TypewriterState::Start(_) | TypewriterState::Modifying { .. } => {
+                    PenProgress::InProgress
+                }
+            };
+            return (
+                EventResult {
+                    handled: false,
+                    propagate: EventPropagation::Proceed,
+                    progress,
+                },
+                widget_flags,
+            );
+        }
+
         let text_width = engine_view
             .config
             .pens_config
@@ -1359,5 +1386,124 @@ impl Typewriter {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Engine;
+    use crate::pens::PenStyle;
+    use p2d::math::Vector2;
+    use rnote_compose::penevent::PenEvent;
+
+    /// Places a new text box by clicking the canvas with the typewriter tool.
+    fn start_textbox(engine: &mut Engine, now: Instant) {
+        let _ = engine.change_pen_style(PenStyle::Typewriter);
+        let _ = engine.handle_pen_event(
+            PenEvent::Down {
+                element: Element::new(Vector2::new(100.0, 100.0), Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            now,
+        );
+    }
+
+    fn press(
+        engine: &mut Engine,
+        keychar: char,
+        modifier_keys: &[ModifierKey],
+        now: Instant,
+    ) -> EventPropagation {
+        let (propagation, _) = engine.handle_pen_event(
+            PenEvent::KeyPressed {
+                keyboard_key: KeyboardKey::Unicode(keychar),
+                modifier_keys: modifier_keys.iter().copied().collect(),
+            },
+            None,
+            now,
+        );
+        propagation
+    }
+
+    fn texts(engine: &Engine) -> Vec<String> {
+        engine
+            .store
+            .stroke_keys_unordered()
+            .into_iter()
+            .filter_map(|key| match engine.store.get_stroke_ref(key) {
+                Some(Stroke::TextStroke(textstroke)) => Some(textstroke.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ctrl_v_leaves_a_new_textbox_to_the_paste_accelerator() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+
+        assert_eq!(
+            press(&mut engine, 'v', &[ModifierKey::KeyboardCtrl], now),
+            EventPropagation::Proceed
+        );
+        assert!(
+            texts(&engine).is_empty(),
+            "Ctrl+V must not start a text stroke with 'v'"
+        );
+
+        // The same key without the modifier is text, so the box is not simply refusing input.
+        assert_eq!(press(&mut engine, 'v', &[], now), EventPropagation::Stop);
+        assert_eq!(texts(&engine), vec!["v".to_string()]);
+    }
+
+    #[test]
+    fn ctrl_v_leaves_an_open_textbox_to_the_paste_accelerator() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        press(&mut engine, 'h', &[], now);
+        press(&mut engine, 'i', &[], now);
+
+        assert_eq!(
+            press(&mut engine, 'v', &[ModifierKey::KeyboardCtrl], now),
+            EventPropagation::Proceed
+        );
+        assert_eq!(texts(&engine), vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn ctrl_alt_chords_are_not_text_either() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+
+        assert_eq!(
+            press(
+                &mut engine,
+                '1',
+                &[ModifierKey::KeyboardCtrl, ModifierKey::KeyboardAlt],
+                now,
+            ),
+            EventPropagation::Proceed
+        );
+        assert!(texts(&engine).is_empty());
+    }
+
+    #[test]
+    fn ctrl_a_still_selects_the_whole_text() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        press(&mut engine, 'a', &[], now);
+        press(&mut engine, 'b', &[], now);
+
+        assert_eq!(
+            press(&mut engine, 'a', &[ModifierKey::KeyboardCtrl], now),
+            EventPropagation::Stop
+        );
+        assert_eq!(texts(&engine), vec!["ab".to_string()]);
     }
 }
