@@ -606,7 +606,17 @@ gets disabled.</property>
                         <property name="subtitle" translatable="yes">The duration in seconds the pen has to be held still to recognize the shape</property>
                         <property name="numeric">true</property>
                         <property name="digits">2</property>
+                        <property name="width-chars">6</property>
                         <property name="climb-rate">0.01</property>
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">0.1</property>
+                            <property name="upper">2</property>
+                            <property name="step-increment">0.05</property>
+                            <property name="page-increment">0.25</property>
+                            <property name="value">0.2</property>
+                          </object>
+                        </property>
                       </object>
                     </child>
                     <child>
