@@ -79,7 +79,7 @@
                     <property name="icon-name">open-menu-symbolic</property>
                     <property name="pixel-size">16</property>
                     <property name="valign">center</property>
-                    <property name="tooltip_text" translatable="yes">Drag to dock this toolbar to a window edge</property>
+                    <property name="tooltip_text" translatable="yes">Drag to move this toolbar. Hold Shift and release near an edge to dock it.</property>
                     <style>
                       <class name="toolbar_handle" />
                     </style>
@@ -112,7 +112,7 @@
                     <property name="icon-name">open-menu-symbolic</property>
                     <property name="pixel-size">16</property>
                     <property name="valign">center</property>
-                    <property name="tooltip_text" translatable="yes">Drag to dock this toolbar to a window edge</property>
+                    <property name="tooltip_text" translatable="yes">Drag to move this toolbar. Hold Shift and release near an edge to dock it.</property>
                     <style>
                       <class name="toolbar_handle" />
                     </style>
@@ -145,7 +145,7 @@
                     <property name="icon-name">open-menu-symbolic</property>
                     <property name="pixel-size">16</property>
                     <property name="halign">center</property>
-                    <property name="tooltip_text" translatable="yes">Drag to dock this toolbar to a window edge</property>
+                    <property name="tooltip_text" translatable="yes">Drag to move this toolbar. Hold Shift and release near an edge to dock it.</property>
                     <style>
                       <class name="toolbar_handle" />
                     </style>

@@ -205,5 +205,15 @@
       <default>false</default>
       <summary>lock all toolbars to the top edge</summary>
     </key>
+
+    <key name="toolbars-dock-on-drop" type="b">
+      <default>false</default>
+      <summary>dock a toolbar that is dropped near a window edge</summary>
+      <description>
+        When enabled, releasing a dragged toolbar near a window edge docks it there. Shift
+        inverts the preference: it keeps the toolbar floating when this is enabled, and docks it
+        when this is disabled.
+      </description>
+    </key>
   </schema>
 </schemalist>

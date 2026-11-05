@@ -489,6 +489,7 @@ impl RnAppWindow {
                 ToolbarDock::from_name(&app_settings.string("penssidebar-dock")),
             );
             overlays.set_toolbars_locked(app_settings.boolean("toolbars-lock-to-top"));
+            overlays.set_dock_on_drop(app_settings.boolean("toolbars-dock-on-drop"));
         }
 
         Ok(())
@@ -533,6 +534,7 @@ impl RnAppWindow {
                 overlays.panel_dock(ToolbarPanel::PensSideBar).name(),
             )?;
             app_settings.set_boolean("toolbars-lock-to-top", overlays.toolbars_locked())?;
+            app_settings.set_boolean("toolbars-dock-on-drop", overlays.dock_on_drop())?;
         }
 
         {

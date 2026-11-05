@@ -62,7 +62,13 @@
                     <child>
                       <object class="AdwSwitchRow" id="general_lock_toolbars_to_top_row">
                         <property name="title" translatable="yes">Lock Toolbars to Top</property>
-                        <property name="subtitle" translatable="yes">Keep the toolbars at the top edge of the window. When disabled, drag a toolbar by its handle to dock it to any edge.</property>
+                        <property name="subtitle" translatable="yes">Keep the toolbars at the top edge of the window. When disabled, drag a toolbar by its handle to place it where you want.</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="general_dock_toolbars_on_drop_row">
+                        <property name="title" translatable="yes">Dock Toolbars When Dropped at Edges</property>
+                        <property name="subtitle" translatable="yes">When enabled, releasing a toolbar near a window edge docks it; hold Shift to keep it floating. When disabled, hold Shift to dock it.</property>
                       </object>
                     </child>
                     <child>

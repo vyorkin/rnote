@@ -114,6 +114,10 @@ _Avoid_: overlay toolbar, popover
 A toolbar that sits at a window edge and takes layout space, shrinking the canvas.
 _Avoid_: pinned toolbar, fixed toolbar
 
+**Dock zone**:
+The band along a window edge, as wide as `DOCK_SNAP_DISTANCE`, inside which a released toolbar docks.
+_Avoid_: drop zone, snap area
+
 **Toolbar dock**:
 The window edge a docked toolbar is attached to: top, bottom, left or right.
 _Avoid_: toolbar position, toolbar side
