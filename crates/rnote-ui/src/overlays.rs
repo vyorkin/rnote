@@ -61,6 +61,16 @@ impl ToolbarDock {
 /// How close to an edge a dragged panel must be let go to dock there, in pixels.
 const DOCK_SNAP_DISTANCE: f64 = 64.0;
 
+/// Thickness of the strip that marks the edge a release would dock the dragged panel to.
+const DOCK_INDICATOR_THICKNESS: i32 = 64;
+
+/// Show the strip of `dock` and hide the others.
+fn show_dock_indicator(indicators: &[(ToolbarDock, gtk4::DrawingArea)], dock: ToolbarDock) {
+    for (edge, strip) in indicators {
+        strip.set_visible(*edge == dock);
+    }
+}
+
 mod imp {
     use super::*;
 
@@ -365,24 +375,37 @@ impl RnOverlays {
 
         match dock {
             ToolbarDock::Floating => {
+                // A dragged panel is placed at the position the drag started from; one that is
+                // only floating goes back to its default corner.
+                widget.set_hexpand(false);
+                widget.set_vexpand(false);
+
                 // `add_overlay` reparents the panel out of its dock slot, so measure has to be
                 // set after it is an overlay child.
                 overlay.add_overlay(&widget);
-                overlay.set_measure_overlay(&widget, true);
+                // A dragged panel is measured on its own and keeps its natural size: letting it
+                // contribute to the overlay's measure makes every pointer motion re-measure the
+                // whole overlay, canvas included, and the panel drops out of the frame.
+                overlay.set_measure_overlay(&widget, at.is_none());
 
                 // A dragged panel is placed at the position the drag started from; one that is
                 // only floating goes back to its default corner.
-                let (halign, valign, margin_start, margin_top, margin_end, margin_bottom) =
-                    match (at, panel) {
-                        (Some((x, y)), _) => (Align::Start, Align::Start, x as i32, y as i32, 0, 0),
-                        (None, ToolbarPanel::PenPicker) => (Align::Center, Align::End, 6, 6, 6, 18),
-                        (None, ToolbarPanel::ColorPicker) => {
-                            (Align::Center, Align::Start, 18, 18, 18, 6)
-                        }
-                        (None, ToolbarPanel::PensSideBar) => {
-                            (Align::End, Align::Center, 18, 72, 18, 72)
-                        }
-                    };
+                let (halign, valign, margin_start, margin_top, margin_end, margin_bottom) = match at
+                {
+                    Some((x, y)) => (
+                        Align::Start,
+                        Align::Start,
+                        x.round() as i32,
+                        y.round() as i32,
+                        0,
+                        0,
+                    ),
+                    None => match panel {
+                        ToolbarPanel::PenPicker => (Align::Center, Align::End, 6, 6, 6, 18),
+                        ToolbarPanel::ColorPicker => (Align::Center, Align::Start, 18, 18, 18, 6),
+                        ToolbarPanel::PensSideBar => (Align::End, Align::Center, 18, 72, 18, 72),
+                    },
+                };
 
                 widget.set_margin_top(margin_top);
                 widget.set_margin_bottom(margin_bottom);
@@ -390,8 +413,6 @@ impl RnOverlays {
                 widget.set_margin_end(margin_end);
                 widget.set_halign(halign);
                 widget.set_valign(valign);
-                widget.set_hexpand(false);
-                widget.set_vexpand(false);
             }
             docked => {
                 widget.set_margin_top(0);
@@ -450,6 +471,31 @@ impl RnOverlays {
         self.reparent_panel(panel, ToolbarDock::Floating, Some((x, y)));
     }
 
+    /// The window edge a release at `at` would dock `panel` to, and the distance to that edge.
+    fn dock_target(
+        &self,
+        size: (f64, f64),
+        start: (f64, f64),
+        press: (f64, f64),
+        at: (f64, f64),
+    ) -> (f64, ToolbarDock) {
+        let overlay = self.imp().toolbar_overlay.get();
+        let center_x = start.0 + at.0 - press.0 + size.0 / 2.0;
+        let center_y = start.1 + at.1 - press.1 + size.1 / 2.0;
+        let edges = [
+            (center_y, ToolbarDock::Top),
+            (overlay.height() as f64 - center_y, ToolbarDock::Bottom),
+            (center_x, ToolbarDock::Left),
+            (overlay.width() as f64 - center_x, ToolbarDock::Right),
+        ];
+        edges
+            .iter()
+            .copied()
+            .fold((f64::MAX, ToolbarDock::Floating), |best, edge| {
+                if edge.0 < best.0 { edge } else { best }
+            })
+    }
+
     fn setup_toolbars(&self) {
         for panel in [
             ToolbarPanel::PenPicker,
@@ -459,156 +505,362 @@ impl RnOverlays {
             self.panel_handle(panel).set_cursor_from_name(Some("grab"));
         }
 
-        // The drag sits on the whole overlays widget, on neither a panel handle nor the toolbar
-        // overlay: a docked panel lives in a dock slot that is a sibling of the overlay, so an
-        // overlay-owned gesture never sees a press on it, and a handle-owned gesture dies when
-        // floating the panel reparents the handle. The overlays widget is the common ancestor of
-        // the slots and the overlay and never gets reparented.
+        // The drag is driven from raw events on the whole overlays widget, on neither a panel
+        // handle nor the toolbar overlay: a docked panel lives in a dock slot that is a sibling of
+        // the overlay, so an overlay-owned gesture never sees a press on it. A `GestureDrag` is no
+        // good either: floating a docked panel reparents it into the overlay and hides it for the
+        // move, which drops the pointer focus of the press target, and GTK cancels a gesture whose
+        // sequence loses its target mid-way - the drag then reports no offset update at all. Raw
+        // events keep arriving whichever child the pointer is over, and reparenting does not stop
+        // them.
         let dragged = Rc::new(Cell::new(None::<ToolbarPanel>));
+        // Where the press landed, in overlays coordinates.
+        let press_at = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
         // The panel's position in overlay coordinates where the drag started.
         let drag_start = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
-        let drag = gtk4::GestureDrag::new();
-
-        drag.connect_drag_begin(clone!(
-            #[weak(rename_to = overlays)]
-            self,
-            #[strong]
-            dragged,
-            #[strong]
-            drag_start,
-            move |gesture, start_x, start_y| {
-                dragged.set(None);
-                if overlays.imp().toolbars_locked.get() {
-                    return;
-                }
-
-                // Press coordinates are relative to the widget the gesture sits on (the overlays
-                // widget), so the handle bounds are taken in that same space.
-                let hit = [
-                    ToolbarPanel::PenPicker,
-                    ToolbarPanel::ColorPicker,
-                    ToolbarPanel::PensSideBar,
-                ]
-                .into_iter()
-                .find(|panel| {
-                    overlays
-                        .panel_handle(*panel)
-                        .compute_bounds(&overlays)
-                        .is_some_and(|bounds| {
-                            let (x, y) = (f64::from(bounds.x()), f64::from(bounds.y()));
-                            start_x >= x
-                                && start_x <= x + f64::from(bounds.width())
-                                && start_y >= y
-                                && start_y <= y + f64::from(bounds.height())
-                        })
-                });
-                let Some(panel) = hit else {
-                    gesture.set_state(gtk4::EventSequenceState::Denied);
-                    return;
-                };
-
-                // Float the panel where it is, so a docked panel can be dragged out too. The
-                // position can be negative: a panel docked above or left of the overlay starts
-                // outside it, and the drag has to pick it up without a jump.
-                let widget = overlays.panel_widget(panel);
-                let (x, y) = overlays.position_in_overlay(&widget);
-                overlays.float_panel_at(panel, x, y);
-                drag_start.set((x, y));
-                dragged.set(Some(panel));
-                // The handle cursor is "grab"; keep the same feedback while the panel follows.
-                overlays.set_cursor_from_name(Some("grabbing"));
-            }
-        ));
-
-        drag.connect_drag_update(clone!(
-            #[weak(rename_to = overlays)]
-            self,
-            #[strong]
-            dragged,
-            #[strong]
-            drag_start,
-            move |_gesture, offset_x, offset_y| {
-                let Some(panel) = dragged.get() else {
-                    return;
-                };
-                if overlays.imp().toolbars_locked.get() {
-                    return;
-                }
-
-                let widget = overlays.panel_widget(panel);
-                // Floating a panel that is on screen is queued to the next main loop iteration, so
-                // the first updates land while the panel still sits in its dock slot, where margins
-                // mean nothing: the queued float places it.
-                if !widget.is_ancestor(&overlays.imp().toolbar_overlay.get()) {
-                    return;
-                }
-
-                let (start_x, start_y) = drag_start.get();
-                widget.set_margin_start((start_x + offset_x) as i32);
-                widget.set_margin_top((start_y + offset_y) as i32);
-            }
-        ));
-
-        drag.connect_drag_end(clone!(
-            #[weak(rename_to = overlays)]
-            self,
-            #[strong]
-            dragged,
-            #[strong]
-            drag_start,
-            move |gesture, _offset_x, _offset_y| {
-                overlays.set_cursor_from_name(None);
-                let Some(panel) = dragged.take() else {
-                    return;
-                };
-                if overlays.imp().toolbars_locked.get() {
-                    return;
-                }
-
-                let widget = overlays.panel_widget(panel);
-                let overlay = overlays.imp().toolbar_overlay.get();
-                let (offset_x, offset_y) = gesture.offset().unwrap_or_default();
-                let (start_x, start_y) = drag_start.get();
-                let overlay_width = overlay.width() as f64;
-                let overlay_height = overlay.height() as f64;
-
-                let center_x = start_x + offset_x + widget.width() as f64 / 2.0;
-                let center_y = start_y + offset_y + widget.height() as f64 / 2.0;
-                let edges = [
-                    (center_y, ToolbarDock::Top),
-                    (overlay_height - center_y, ToolbarDock::Bottom),
-                    (center_x, ToolbarDock::Left),
-                    (overlay_width - center_x, ToolbarDock::Right),
-                ];
-                let (distance, dock) =
-                    edges
-                        .iter()
-                        .copied()
-                        .fold((f64::MAX, ToolbarDock::Floating), |best, edge| {
-                            if edge.0 < best.0 { edge } else { best }
-                        });
-
-                if distance <= DOCK_SNAP_DISTANCE {
-                    overlays.set_panel_dock(panel, dock);
+        // The position the panel has to move to, applied once per frame: a pen reports several
+        // motions per frame, and one move per event costs a whole frame for each.
+        let pending_move = Rc::new(Cell::new(None::<(i32, i32)>));
+        let move_tick = Rc::new(RefCell::new(None::<gtk4::TickCallbackId>));
+        // The picture of the dragged panel and its size, taken while the panel is still on screen.
+        // A widget that moves is damaged only where it now is, so the panel is not moved at all:
+        // it is hidden for the drag and the canvas paints its picture at the pointer.
+        let drag_picture = Rc::new(RefCell::new(None::<(gtk4::gdk::Paintable, (f64, f64))>));
+        let drag_size = Rc::new(Cell::new((0.0_f64, 0.0_f64)));
+        let preview_started = Rc::new(Cell::new(false));
+        // The strip of the edge a release would dock the panel to, shown while the drag is in
+        // progress. Each strip keeps a fixed position and is only shown or hidden: a widget that
+        // moves while the pointer is down keeps the pixels of the position it left behind, because
+        // the frame's damage then covers only where the widget now is.
+        let dock_indicators = Rc::new(
+            [
+                (ToolbarDock::Top, Align::Fill, Align::Start),
+                (ToolbarDock::Bottom, Align::Fill, Align::End),
+                (ToolbarDock::Left, Align::Start, Align::Fill),
+                (ToolbarDock::Right, Align::End, Align::Fill),
+            ]
+            .into_iter()
+            .map(|(dock, halign, valign)| {
+                let strip = gtk4::DrawingArea::new();
+                strip.set_can_target(false);
+                strip.set_visible(false);
+                strip.set_halign(halign);
+                strip.set_valign(valign);
+                if matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom) {
+                    strip.set_size_request(-1, DOCK_INDICATOR_THICKNESS);
                 } else {
-                    // Keep it floating, but inside the overlay. A release that beats the queued
-                    // float sets the position it was queued with instead of margins the dock
-                    // ignores.
-                    let max_x = (overlay_width - widget.width() as f64).max(0.0);
-                    let max_y = (overlay_height - widget.height() as f64).max(0.0);
-                    let x = (start_x + offset_x).clamp(0.0, max_x);
-                    let y = (start_y + offset_y).clamp(0.0, max_y);
-                    if widget.is_ancestor(&overlay) {
-                        widget.set_margin_start(x as i32);
-                        widget.set_margin_top(y as i32);
-                    } else {
-                        overlays.float_panel_at(panel, x, y);
-                    }
+                    strip.set_size_request(DOCK_INDICATOR_THICKNESS, -1);
                 }
-            }
-        ));
+                strip.set_draw_func(|_, context, _, _| {
+                    context.set_source_rgba(1.0, 1.0, 1.0, 0.14);
+                    context.paint().ok();
+                });
+                self.imp().toolbar_overlay.get().add_overlay(&strip);
+                (dock, strip)
+            })
+            .collect::<Vec<_>>(),
+        );
 
-        self.add_controller(drag);
+        let controller = gtk4::EventControllerLegacy::new();
+        controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let on_event = {
+            let overlays = self.clone();
+            let dragged = dragged.clone();
+            let press_at = press_at.clone();
+            let drag_start = drag_start.clone();
+            let pending_move = pending_move.clone();
+            let move_tick = move_tick.clone();
+            let drag_picture = drag_picture.clone();
+            let drag_size = drag_size.clone();
+            let preview_started = preview_started.clone();
+            let dock_indicators = dock_indicators.clone();
+            move |_controller: &gtk4::EventControllerLegacy,
+                  event: &gtk4::gdk::Event|
+                  -> glib::Propagation {
+                // `Event::position` is in surface coordinates; the handle bounds are in the
+                // overlays widget's own space, so the point is mapped through the window first.
+                let (surface_x, surface_y) = event.position().unwrap_or_default();
+                let (x, y) = overlays
+                    .root()
+                    .and_then(|root| {
+                        root.upcast::<glib::Object>()
+                            .downcast::<gtk4::Window>()
+                            .ok()
+                    })
+                    .and_then(|root| {
+                        root.compute_point(
+                            &overlays,
+                            &gtk4::graphene::Point::new(surface_x as f32, surface_y as f32),
+                        )
+                    })
+                    .map(|point| (f64::from(point.x()), f64::from(point.y())))
+                    .unwrap_or((surface_x, surface_y));
+
+                match event.event_type() {
+                    gtk4::gdk::EventType::ButtonPress => {
+                        dragged.set(None);
+                        pending_move.set(None);
+                        drag_picture.replace(None);
+                        preview_started.set(false);
+                        if let Some(id) = move_tick.borrow_mut().take() {
+                            id.remove();
+                        }
+                        let primary = event
+                            .downcast_ref::<gtk4::gdk::ButtonEvent>()
+                            .is_some_and(|button| button.button() == gtk4::gdk::BUTTON_PRIMARY);
+                        if !primary || overlays.imp().toolbars_locked.get() {
+                            return glib::Propagation::Proceed;
+                        }
+
+                        // Press coordinates and the handle bounds are both taken in the overlays
+                        // widget's space.
+                        let hit = [
+                            ToolbarPanel::PenPicker,
+                            ToolbarPanel::ColorPicker,
+                            ToolbarPanel::PensSideBar,
+                        ]
+                        .into_iter()
+                        .find(|panel| {
+                            overlays
+                                .panel_handle(*panel)
+                                .compute_bounds(&overlays)
+                                .is_some_and(|bounds| {
+                                    let (left, top) =
+                                        (f64::from(bounds.x()), f64::from(bounds.y()));
+                                    x >= left
+                                        && x <= left + f64::from(bounds.width())
+                                        && y >= top
+                                        && y <= top + f64::from(bounds.height())
+                                })
+                        });
+                        let Some(panel) = hit else {
+                            return glib::Propagation::Proceed;
+                        };
+
+                        // Float the panel where it is, so a docked panel can be dragged out too. The
+                        // position can be negative: a panel docked above or left of the overlay
+                        // starts outside it, and the drag has to pick it up without a jump.
+                        let widget = overlays.panel_widget(panel);
+                        let (start_x, start_y) = overlays.position_in_overlay(&widget);
+                        // A drag cut short by a lost release leaves the panel hidden; the next
+                        // press brings it back before anything else reads its position.
+                        widget.set_visible(true);
+                        // The panel is on screen and drawn here, so its picture is taken now: it
+                        // is hidden for the drag, and a hidden widget paints nothing.
+                        // The picture covers the panel's whole box, border included, while
+                        // `width()` and `height()` leave the CSS border out: drawing the picture
+                        // at the content size squeezes the panel by the border width. Its own size
+                        // draws it one to one.
+                        let picture = gtk4::WidgetPaintable::new(Some(&widget)).current_image();
+                        let size = (
+                            f64::from(picture.intrinsic_width()),
+                            f64::from(picture.intrinsic_height()),
+                        );
+                        drag_size.set(size);
+                        drag_picture.replace(Some((picture, size)));
+                        press_at.set((x, y));
+                        drag_start.set((start_x, start_y));
+                        overlays
+                            .imp()
+                            .docks
+                            .borrow_mut()
+                            .insert(panel, ToolbarDock::Floating);
+                        // A panel already floating in the overlay stays where it is: reparenting
+                        // it would hide and show it in the middle of the drag. Its margins only
+                        // position it when it is aligned to the start.
+                        let overlay = overlays.imp().toolbar_overlay.get();
+                        if widget.parent().is_some_and(|parent| parent == overlay) {
+                            overlay.set_measure_overlay(&widget, false);
+                            widget.set_halign(Align::Start);
+                            widget.set_valign(Align::Start);
+                            widget.set_margin_end(0);
+                            widget.set_margin_bottom(0);
+                            widget.set_margin_start(start_x.round() as i32);
+                            widget.set_margin_top(start_y.round() as i32);
+                        } else {
+                            overlays.reparent_panel(
+                                panel,
+                                ToolbarDock::Floating,
+                                Some((start_x, start_y)),
+                            );
+                        }
+                        dragged.set(Some(panel));
+                        // The handle cursor is "grab"; keep the same feedback while the panel moves.
+                        overlays.set_cursor_from_name(Some("grabbing"));
+                    }
+                    gtk4::gdk::EventType::MotionNotify => {
+                        let Some(panel) = dragged.get() else {
+                            return glib::Propagation::Proceed;
+                        };
+                        if overlays.imp().toolbars_locked.get() {
+                            return glib::Propagation::Proceed;
+                        }
+
+                        let (distance, dock) = overlays.dock_target(
+                            drag_size.get(),
+                            drag_start.get(),
+                            press_at.get(),
+                            (x, y),
+                        );
+                        show_dock_indicator(
+                            &dock_indicators,
+                            if distance <= DOCK_SNAP_DISTANCE {
+                                dock
+                            } else {
+                                ToolbarDock::Floating
+                            },
+                        );
+
+                        let widget = overlays.panel_widget(panel);
+                        let (press_x, press_y) = press_at.get();
+                        let (start_x, start_y) = drag_start.get();
+                        let (next_x, next_y) = (start_x + x - press_x, start_y + y - press_y);
+
+                        // Floating a panel that is on screen is queued to the next main loop
+                        // iteration, so the first moves land while the panel still sits in its dock
+                        // slot, where margins mean nothing: the queued float places it.
+                        if !widget.is_ancestor(&overlays.imp().toolbar_overlay.get()) {
+                            return glib::Propagation::Proceed;
+                        }
+
+                        pending_move.set(Some((next_x.round() as i32, next_y.round() as i32)));
+                        if move_tick.borrow().is_none() {
+                            let overlays_for_tick = overlays.clone();
+                            let dragged_for_tick = dragged.clone();
+                            let pending_move_for_tick = pending_move.clone();
+                            let move_tick_for_tick = move_tick.clone();
+                            let drag_picture_for_tick = drag_picture.clone();
+                            let preview_started_for_tick = preview_started.clone();
+                            let id = overlays.add_tick_callback(move |_, _| {
+                                let Some((move_x, move_y)) = pending_move_for_tick.take() else {
+                                    *move_tick_for_tick.borrow_mut() = None;
+                                    return glib::ControlFlow::Break;
+                                };
+                                if let Some(panel) = dragged_for_tick.get() {
+                                    let widget = overlays_for_tick.panel_widget(panel);
+                                    let overlay = overlays_for_tick.imp().toolbar_overlay.get();
+                                    if widget.is_ancestor(&overlay) {
+                                        let canvas = overlays_for_tick
+                                            .root()
+                                            .and_then(|root| root.downcast::<RnAppWindow>().ok())
+                                            .and_then(|appwindow| appwindow.active_tab_canvas());
+                                        let picture = drag_picture_for_tick
+                                            .borrow()
+                                            .as_ref()
+                                            .map(|(picture, size)| (picture.clone(), *size));
+                                        match (canvas, picture) {
+                                            (Some(canvas), Some((picture, size)))
+                                                if picture.intrinsic_width() > 0 =>
+                                            {
+                                                let at = overlay
+                                                    .compute_point(
+                                                        &canvas,
+                                                        &gtk4::graphene::Point::new(
+                                                            move_x as f32,
+                                                            move_y as f32,
+                                                        ),
+                                                    )
+                                                    .map(|at| {
+                                                        (f64::from(at.x()), f64::from(at.y()))
+                                                    });
+                                                let Some(at) = at else {
+                                                    return glib::ControlFlow::Continue;
+                                                };
+                                                if preview_started_for_tick.replace(true) {
+                                                    canvas.move_drag_preview(at);
+                                                } else {
+                                                    // The panel is not moved at all: a widget that
+                                                    // moves keeps the pixels of the place it left,
+                                                    // and under a pen, which moves it far from frame
+                                                    // to frame, they read as flicker. The canvas
+                                                    // repaints itself as a whole, so the picture is
+                                                    // drawn there and the panel waits out the drag
+                                                    // hidden.
+                                                    canvas.start_drag_preview(picture, size, at);
+                                                    widget.set_visible(false);
+                                                }
+                                            }
+                                            _ => {
+                                                // No canvas to draw on, or no picture taken: fall
+                                                // back to moving the panel itself.
+                                                widget.set_margin_start(move_x);
+                                                widget.set_margin_top(move_y);
+                                            }
+                                        }
+                                    }
+                                }
+                                glib::ControlFlow::Continue
+                            });
+                            *move_tick.borrow_mut() = Some(id);
+                        }
+                    }
+                    gtk4::gdk::EventType::ButtonRelease => {
+                        overlays.set_cursor_from_name(None);
+                        show_dock_indicator(&dock_indicators, ToolbarDock::Floating);
+                        if let Some(id) = move_tick.borrow_mut().take() {
+                            id.remove();
+                        }
+                        // The picture was drawn by the canvas in the panel's place; the panel
+                        // itself is shown again where the release puts it.
+                        if preview_started.replace(false)
+                            && let Some(canvas) = overlays
+                                .root()
+                                .and_then(|root| root.downcast::<RnAppWindow>().ok())
+                                .and_then(|appwindow| appwindow.active_tab_canvas())
+                        {
+                            canvas.end_drag_preview();
+                        }
+                        let Some(panel) = dragged.take() else {
+                            return glib::Propagation::Proceed;
+                        };
+                        let widget = overlays.panel_widget(panel);
+                        widget.set_visible(true);
+                        pending_move.set(None);
+                        if overlays.imp().toolbars_locked.get() {
+                            return glib::Propagation::Proceed;
+                        }
+
+                        let overlay = overlays.imp().toolbar_overlay.get();
+                        let (press_x, press_y) = press_at.get();
+                        let (start_x, start_y) = drag_start.get();
+                        let (offset_x, offset_y) = (x - press_x, y - press_y);
+                        let overlay_width = overlay.width() as f64;
+                        let overlay_height = overlay.height() as f64;
+                        let size = drag_size.get();
+                        let (distance, dock) = overlays.dock_target(
+                            size,
+                            (start_x, start_y),
+                            (press_x, press_y),
+                            (x, y),
+                        );
+
+                        if distance <= DOCK_SNAP_DISTANCE {
+                            overlays.set_panel_dock(panel, dock);
+                        } else {
+                            // Keep it floating, but inside the overlay. A release that beats the
+                            // queued float sets the position it was queued with instead of margins
+                            // the dock ignores.
+                            let max_x = (overlay_width - size.0).max(0.0);
+                            let max_y = (overlay_height - size.1).max(0.0);
+                            let x = (start_x + offset_x).clamp(0.0, max_x);
+                            let y = (start_y + offset_y).clamp(0.0, max_y);
+                            if widget.is_ancestor(&overlay) {
+                                widget.set_margin_start(x as i32);
+                                widget.set_margin_top(y as i32);
+                                overlay.queue_draw();
+                            } else {
+                                overlays.float_panel_at(panel, x, y);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                glib::Propagation::Proceed
+            }
+        };
+        controller.connect_event(on_event);
+        self.add_controller(controller);
     }
 
     pub(crate) fn init(&self, appwindow: &RnAppWindow) {

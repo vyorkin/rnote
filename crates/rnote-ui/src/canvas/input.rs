@@ -110,6 +110,18 @@ pub(crate) fn handle_pointer_controller_event(
                 {
                     handle_pen_event = true;
                     handle_shortcut_key = true;
+
+                    // The pen touching the surface is a `Down`, exactly as a mouse
+                    // button press is. Leaving `pen_state` as it was sends a
+                    // `Proximity` (or `Up`) event, which the pens don't consume, so
+                    // the press goes on to parent gesture handlers - while the
+                    // matching release, sent once the pen is down, is consumed. A
+                    // `GestureDrag` on an ancestor (`RnOverlays`) then keeps the
+                    // pen's device from that unmatched press and rejects every
+                    // later mouse press, which leaves the toolbar panels undraggable.
+                    if gdk_button == gdk::BUTTON_PRIMARY || gdk_button == gdk::BUTTON_SECONDARY {
+                        pen_state = PenState::Down;
+                    }
                 }
             } else {
                 #[allow(clippy::collapsible_else_if)]

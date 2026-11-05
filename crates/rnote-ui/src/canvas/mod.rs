@@ -36,6 +36,19 @@ use tracing::{debug, error, warn};
 /// How long the pen can be gone before the cursor hidden for it is shown again.
 const PEN_GONE_DELAY: Duration = Duration::from_millis(250);
 
+/// The picture of a widget being dragged, and where over the canvas it is drawn.
+///
+/// A widget that moves is damaged only where it now is, so the pixels of the place it left are
+/// never repainted and the widget leaves a trail behind it. The canvas repaints itself as a whole
+/// while its content changes, so a drag is painted there instead: the widget's own picture is
+/// taken once, and the canvas draws it at the pointer.
+#[derive(Debug)]
+pub(crate) struct DragPreview {
+    pub(crate) paintable: gdk::Paintable,
+    pub(crate) size: (f64, f64),
+    pub(crate) position: Cell<(f64, f64)>,
+}
+
 #[derive(Debug, Default)]
 struct Connections {
     hadjustment: Option<glib::SignalHandlerId>,
@@ -108,6 +121,9 @@ mod imp {
         pub(crate) text_input_enabled: Cell<bool>,
 
         pub(crate) last_export_dir: RefCell<Option<gio::File>>,
+
+        /// The picture of a widget being dragged, painted over the canvas.
+        pub(crate) drag_preview: RefCell<Option<DragPreview>>,
     }
 
     impl Default for RnCanvas {
@@ -212,6 +228,8 @@ mod imp {
                 text_input_enabled: Cell::new(false),
 
                 last_export_dir: RefCell::new(None),
+
+                drag_preview: RefCell::new(None),
             }
         }
     }
@@ -544,6 +562,26 @@ mod imp {
 
                 // pop the clip
                 snapshot.pop();
+
+                // A drag in progress is drawn over everything the engine paints. The canvas is the
+                // widget repainted on every frame of the drag, so the picture is cut to its bounds:
+                // the area outside them belongs to other widgets and would keep its pixels.
+                if let Some(preview) = self.drag_preview.borrow().as_ref() {
+                    let (x, y) = preview.position.get();
+                    snapshot.push_clip(&graphene::Rect::new(
+                        0.0,
+                        0.0,
+                        obj.width() as f32,
+                        obj.height() as f32,
+                    ));
+                    snapshot.save();
+                    snapshot.translate(&graphene::Point::new(x as f32, y as f32));
+                    preview
+                        .paintable
+                        .snapshot(snapshot, preview.size.0, preview.size.1);
+                    snapshot.restore();
+                    snapshot.pop();
+                }
                 Ok(())
             }() {
                 error!("Snapshot canvas failed , Err: {e:?}");
@@ -797,6 +835,36 @@ impl RnCanvas {
 
     pub(crate) fn new() -> Self {
         glib::Object::new()
+    }
+
+    /// Start drawing `paintable` over the canvas at `position`, in canvas coordinates.
+    pub(crate) fn start_drag_preview(
+        &self,
+        paintable: gdk::Paintable,
+        size: (f64, f64),
+        position: (f64, f64),
+    ) {
+        self.imp().drag_preview.replace(Some(DragPreview {
+            paintable,
+            size,
+            position: Cell::new(position),
+        }));
+        self.queue_draw();
+    }
+
+    /// Move the drag preview to `position`, in canvas coordinates.
+    pub(crate) fn move_drag_preview(&self, position: (f64, f64)) {
+        if let Some(preview) = self.imp().drag_preview.borrow().as_ref() {
+            preview.position.set(position);
+            self.queue_draw();
+        }
+    }
+
+    /// Stop drawing the drag preview.
+    pub(crate) fn end_drag_preview(&self) {
+        if self.imp().drag_preview.take().is_some() {
+            self.queue_draw();
+        }
     }
 
     #[allow(unused)]
