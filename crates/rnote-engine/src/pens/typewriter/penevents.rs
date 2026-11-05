@@ -1510,6 +1510,37 @@ mod tests {
     }
 
     #[test]
+    fn alt_digit_leaves_the_textbox_to_the_pen_accelerator() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        press(&mut engine, 'h', &[], now);
+
+        // `Alt`+digit is the pen-style accelerator, and it must reach the window from inside the
+        // box instead of being typed as text.
+        assert_eq!(
+            press(&mut engine, '4', &[ModifierKey::KeyboardAlt], now),
+            EventPropagation::Proceed
+        );
+        assert_eq!(texts(&engine), vec!["h".to_string()]);
+    }
+
+    #[test]
+    fn cancel_ends_the_open_textbox() {
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        press(&mut engine, 'h', &[], now);
+
+        // The pen-style action ends the session with `PenEvent::Cancel` before it switches.
+        let (_, widget_flags) = engine.handle_pen_event(PenEvent::Cancel, None, now);
+
+        assert!(!engine.penholder.is_handling_text_input());
+        assert_eq!(widget_flags.enable_text_input, Some(false));
+        assert_eq!(texts(&engine), vec!["h".to_string()]);
+    }
+
+    #[test]
     fn escape_leaves_an_open_textbox_to_the_tool_keys() {
         let mut engine = Engine::default();
         let now = Instant::now();

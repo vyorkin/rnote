@@ -11,7 +11,7 @@ use gtk4::{
 use p2d::bounding_volume::BoundingVolume;
 use p2d::math::Vector2;
 use rnote_compose::SplitOrder;
-use rnote_compose::penevent::ShortcutKey;
+use rnote_compose::penevent::{PenEvent, ShortcutKey};
 use rnote_engine::document::format::MeasureUnit;
 use rnote_engine::engine::StrokeContent;
 use rnote_engine::ext::GraphenePointExt;
@@ -355,6 +355,18 @@ impl RnAppWindow {
                 let Some(canvas) = appwindow.active_tab_canvas() else {
                     return;
                 };
+                // A pen shortcut also leaves an open text box. The typewriter holds the keyboard
+                // while it is typing - the bare tool keys are gated out and its own keys go into
+                // the text - so `Alt`+number is the only one-stroke way out of it. It must land
+                // even when it names the pen already in hand, hence it runs before the style
+                // comparison below.
+                if canvas.engine_ref().penholder.is_handling_text_input() {
+                    let (_, widget_flags) =
+                        canvas
+                            .engine_mut()
+                            .handle_pen_event(PenEvent::Cancel, None, Instant::now());
+                    appwindow.handle_widget_flags(widget_flags, &canvas);
+                }
                 // don't change the style if the current style with override is already the same
                 // (e.g. when switched to from the pen button, not by clicking the pen page)
                 if pen_style != canvas.engine_ref().current_pen_style_w_override() {
@@ -1211,12 +1223,33 @@ impl RnAppWindow {
         app.set_accels_for_action("win.text-bold", &["<Ctrl>b"]);
         app.set_accels_for_action("win.text-italic", &["<Ctrl>i"]);
         app.set_accels_for_action("win.text-underline", &["<Ctrl>u"]);
-        app.set_accels_for_action("win.pen-style::brush", &["<Ctrl>1", "<Ctrl>KP_1"]);
-        app.set_accels_for_action("win.pen-style::shaper", &["<Ctrl>2", "<Ctrl>KP_2"]);
-        app.set_accels_for_action("win.pen-style::typewriter", &["<Ctrl>3", "<Ctrl>KP_3"]);
-        app.set_accels_for_action("win.pen-style::eraser", &["<Ctrl>4", "<Ctrl>KP_4"]);
-        app.set_accels_for_action("win.pen-style::selector", &["<Ctrl>5", "<Ctrl>KP_5"]);
-        app.set_accels_for_action("win.pen-style::tools", &["<Ctrl>6", "<Ctrl>KP_6"]);
+        // `Alt`+number alongside `Ctrl`+number: the typewriter lets modifier chords through to the
+        // window accelerators, so `Alt`+number is the one stroke that gets from an open text box
+        // straight to a pen. The bare keys stay text while the box is open.
+        app.set_accels_for_action(
+            "win.pen-style::brush",
+            &["<Ctrl>1", "<Ctrl>KP_1", "<Alt>1", "<Alt>KP_1"],
+        );
+        app.set_accels_for_action(
+            "win.pen-style::shaper",
+            &["<Ctrl>2", "<Ctrl>KP_2", "<Alt>2", "<Alt>KP_2"],
+        );
+        app.set_accels_for_action(
+            "win.pen-style::typewriter",
+            &["<Ctrl>3", "<Ctrl>KP_3", "<Alt>3", "<Alt>KP_3"],
+        );
+        app.set_accels_for_action(
+            "win.pen-style::eraser",
+            &["<Ctrl>4", "<Ctrl>KP_4", "<Alt>4", "<Alt>KP_4"],
+        );
+        app.set_accels_for_action(
+            "win.pen-style::selector",
+            &["<Ctrl>5", "<Ctrl>KP_5", "<Alt>5", "<Alt>KP_5"],
+        );
+        app.set_accels_for_action(
+            "win.pen-style::tools",
+            &["<Ctrl>6", "<Ctrl>KP_6", "<Alt>6", "<Alt>KP_6"],
+        );
         (1..=9).for_each(|i| {
             app.set_accels_for_action(
                 &format!("win.set-color-{i}"),

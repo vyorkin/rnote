@@ -71,37 +71,37 @@
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Brush'</property>
-                <property name="accelerator">b 1 &lt;ctrl&gt;1</property>
+                <property name="accelerator">b 1 &lt;ctrl&gt;1 &lt;alt&gt;1</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Shaper'</property>
-                <property name="accelerator">s 2 &lt;ctrl&gt;2</property>
+                <property name="accelerator">s 2 &lt;ctrl&gt;2 &lt;alt&gt;2</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Typewriter'</property>
-                <property name="accelerator">t 3 &lt;ctrl&gt;3</property>
+                <property name="accelerator">t 3 &lt;ctrl&gt;3 &lt;alt&gt;3</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Eraser'</property>
-                <property name="accelerator">e 4 &lt;ctrl&gt;4</property>
+                <property name="accelerator">e 4 &lt;ctrl&gt;4 &lt;alt&gt;4</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Selector'</property>
-                <property name="accelerator">v 5 &lt;ctrl&gt;5</property>
+                <property name="accelerator">v 5 &lt;ctrl&gt;5 &lt;alt&gt;5</property>
               </object>
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Tools'</property>
-                <property name="accelerator">x 6 &lt;ctrl&gt;6</property>
+                <property name="accelerator">x 6 &lt;ctrl&gt;6 &lt;alt&gt;6</property>
               </object>
             </child>
             <child>
