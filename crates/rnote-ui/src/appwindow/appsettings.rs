@@ -5,6 +5,26 @@ use adw::{prelude::*, subclass::prelude::*};
 use gtk4::{gdk, glib, glib::clone};
 use tracing::error;
 
+/// How one toolbar panel was left: its dock, and for a floating panel its position.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ToolbarLayoutEntry {
+    dock: String,
+    /// Fractions of the distance the panel can travel inside the overlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position: Option<(f64, f64)>,
+}
+
+/// The toolbar layout of one window, keyed by `ToolbarPanel::name`.
+type ToolbarLayout = std::collections::HashMap<String, ToolbarLayoutEntry>;
+
+/// Parse a stored toolbar layout. An empty or malformed value is the same as none stored.
+fn parse_toolbar_layout(raw: &str) -> Option<ToolbarLayout> {
+    if raw.is_empty() {
+        return None;
+    }
+    serde_json::from_str(raw).ok()
+}
+
 impl RnAppWindow {
     /// Setup settings binds.
     pub(crate) fn setup_settings_binds(&self) -> anyhow::Result<()> {
@@ -476,18 +496,34 @@ impl RnAppWindow {
         {
             // Toolbar docking
             let overlays = self.overlays();
-            overlays.set_panel_dock(
-                ToolbarPanel::PenPicker,
-                ToolbarDock::from_name(&app_settings.string("penpicker-dock")),
-            );
-            overlays.set_panel_dock(
-                ToolbarPanel::ColorPicker,
-                ToolbarDock::from_name(&app_settings.string("colorpicker-dock")),
-            );
-            overlays.set_panel_dock(
-                ToolbarPanel::PensSideBar,
-                ToolbarDock::from_name(&app_settings.string("penssidebar-dock")),
-            );
+            match parse_toolbar_layout(&app_settings.string("toolbars-layout")) {
+                Some(layout) => {
+                    for panel in ToolbarPanel::ALL {
+                        let Some(entry) = layout.get(panel.name()) else {
+                            continue;
+                        };
+                        overlays.set_panel_dock(panel, ToolbarDock::from_name(&entry.dock));
+                        if let Some(position) = entry.position {
+                            overlays.set_panel_position(panel, position);
+                        }
+                    }
+                }
+                None => {
+                    // Older versions stored one dock key per panel and no position.
+                    overlays.set_panel_dock(
+                        ToolbarPanel::PenPicker,
+                        ToolbarDock::from_name(&app_settings.string("penpicker-dock")),
+                    );
+                    overlays.set_panel_dock(
+                        ToolbarPanel::ColorPicker,
+                        ToolbarDock::from_name(&app_settings.string("colorpicker-dock")),
+                    );
+                    overlays.set_panel_dock(
+                        ToolbarPanel::PensSideBar,
+                        ToolbarDock::from_name(&app_settings.string("penssidebar-dock")),
+                    );
+                }
+            }
             overlays.set_toolbars_locked(app_settings.boolean("toolbars-lock-to-top"));
             overlays.set_dock_on_drop(app_settings.boolean("toolbars-dock-on-drop"));
         }
@@ -537,6 +573,12 @@ impl RnAppWindow {
             app_settings.set_boolean("toolbars-dock-on-drop", overlays.dock_on_drop())?;
         }
 
+        // Only the layout of the last active window is stored, so a window that is closed
+        // without ever getting focus must not overwrite it.
+        if self.is_active() {
+            self.save_toolbar_layout();
+        }
+
         {
             // Workspaces list
             self.sidebar()
@@ -546,6 +588,31 @@ impl RnAppWindow {
         }
 
         Ok(())
+    }
+
+    /// Save this window's toolbar layout as the one to restore on the next start.
+    pub(crate) fn save_toolbar_layout(&self) {
+        let Some(app_settings) = self.app().app_settings() else {
+            return;
+        };
+        let mut layout = ToolbarLayout::new();
+        for panel in ToolbarPanel::ALL {
+            layout.insert(
+                panel.name().to_string(),
+                ToolbarLayoutEntry {
+                    dock: self.overlays().panel_dock(panel).name().to_string(),
+                    position: self.overlays().panel_position(panel),
+                },
+            );
+        }
+        match serde_json::to_string(&layout) {
+            Ok(raw) => {
+                if let Err(err) = app_settings.set_string("toolbars-layout", &raw) {
+                    error!("Failed to save the toolbar layout. Err: {err:?}");
+                }
+            }
+            Err(err) => error!("Failed to serialize the toolbar layout. Err: {err:?}"),
+        }
     }
 
     pub(crate) fn setup_periodic_save(&self) -> anyhow::Result<()> {
@@ -583,5 +650,39 @@ impl RnAppWindow {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_layout_keeps_the_dock_and_the_position() {
+        let raw = r#"{"penpicker":{"dock":"left"},"colorpicker":{"dock":"floating","position":[0.25,0.5]}}"#;
+        let layout = parse_toolbar_layout(raw).expect("layout should parse");
+
+        assert_eq!(layout["penpicker"].dock, "left");
+        assert_eq!(layout["penpicker"].position, None);
+        assert_eq!(layout["colorpicker"].dock, "floating");
+        assert_eq!(layout["colorpicker"].position, Some((0.25, 0.5)));
+    }
+
+    #[test]
+    fn an_empty_or_malformed_layout_is_none() {
+        assert!(parse_toolbar_layout("").is_none());
+        assert!(parse_toolbar_layout("{not json").is_none());
+    }
+
+    #[test]
+    fn a_panel_without_a_position_does_not_serialize_one() {
+        let entry = ToolbarLayoutEntry {
+            dock: "floating".to_string(),
+            position: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&entry).expect("entry should serialize"),
+            r#"{"dock":"floating"}"#
+        );
     }
 }

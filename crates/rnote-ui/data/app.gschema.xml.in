@@ -215,5 +215,15 @@
         when this is disabled.
       </description>
     </key>
+
+    <key name="toolbars-layout" type="s">
+      <default>''</default>
+      <summary>the toolbar layout of the last active window</summary>
+      <description>
+        A JSON object keyed by panel name. Each entry holds the panel's dock and, for a floating
+        panel, its position as fractions of the distance it can travel inside the window, so the
+        position survives a window resize.
+      </description>
+    </key>
   </schema>
 </schemalist>

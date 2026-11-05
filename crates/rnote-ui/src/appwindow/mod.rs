@@ -292,6 +292,14 @@ impl RnAppWindow {
             self.add_initial_tab();
         }
 
+        // Remember this window's toolbar layout whenever it stops being the active one, so the
+        // layout that is restored on the next start is the last active window's.
+        self.connect_is_active_notify(|window| {
+            if !window.is_active() {
+                window.save_toolbar_layout();
+            }
+        });
+
         // Anything that needs to be done right before showing the appwindow
 
         self.refresh_ui();
