@@ -79,6 +79,12 @@ const DOCK_SNAP_DISTANCE: f64 = 24.0;
 /// Thickness of the strip that marks the edge a release would dock the dragged panel to.
 const DOCK_INDICATOR_THICKNESS: i32 = DOCK_SNAP_DISTANCE as i32;
 
+/// How often a deferred placement is retried while a panel still has no allocation.
+///
+/// The panels are allocated within a frame or two of the window being mapped, so the retries
+/// are a guard against a panel that never is, not a timer.
+const FLOAT_APPLY_TRIES: u32 = 50;
+
 /// Whether a release docks the dragged panel, given the preference and the Shift key.
 ///
 /// Shift inverts the preference: with docking-on-drop off, holding Shift is the only way to dock;
@@ -135,6 +141,8 @@ mod imp {
         pub(crate) float_apply_size: Cell<(i32, i32)>,
         /// The pending application of the remembered positions, if one is queued.
         pub(crate) float_apply_source: RefCell<Option<glib::SourceId>>,
+        /// How many times the pending application was deferred for an unallocated panel.
+        pub(crate) float_apply_tries: Cell<u32>,
         /// Whether the window surface's "layout" signal is connected.
         pub(crate) float_layout_connected: Cell<bool>,
 
@@ -565,8 +573,11 @@ impl RnOverlays {
     }
 
     /// Float a panel at the given position of the overlay, in overlay coordinates.
-    fn float_panel_at(&self, panel: ToolbarPanel, x: f64, y: f64) {
-        self.remember_float_position(panel, (x, y));
+    ///
+    /// `size` is the size the panel has when it floats; it is the one the position was clamped
+    /// against, and the one the range of its travel range is computed from.
+    fn float_panel_at(&self, panel: ToolbarPanel, x: f64, y: f64, size: (f64, f64)) {
+        self.remember_float_position(panel, (x, y), size);
         self.imp()
             .docks
             .borrow_mut()
@@ -593,8 +604,19 @@ impl RnOverlays {
     /// Remember the position of a floating panel given in overlay pixels.
     ///
     /// The pixels are not applied here: the drag that produced them moved the panel itself.
-    pub(crate) fn remember_float_position(&self, panel: ToolbarPanel, at: (f64, f64)) {
-        let range = self.float_travel_range(panel);
+    ///
+    /// `size` is the panel's size for that position, supplied by the caller instead of read off
+    /// the widget: a drag hides the panel while it moves a picture of it, and a panel that is
+    /// hidden, just reparented or stretched by a stale alignment reports a size it does not have
+    /// on screen. A range collapsed to zero would clamp the fraction to 0 or 1 and lose the
+    /// position the user chose.
+    pub(crate) fn remember_float_position(
+        &self,
+        panel: ToolbarPanel,
+        at: (f64, f64),
+        size: (f64, f64),
+    ) {
+        let range = self.travel_range(size);
         self.imp().float_positions.borrow_mut().insert(
             panel,
             (
@@ -612,37 +634,42 @@ impl RnOverlays {
         self.panel_dock(panel) == ToolbarDock::Floating && self.panel_position(panel).is_none()
     }
 
-    /// The distance `panel` can travel inside the overlay, in pixels.
-    ///
-    /// The panel's allocated size is what the overlay actually gives it. Once the overlay is
-    /// narrower than the panel's content, the content is shrunk, and the panel's measured
-    /// minimum stays its unshrunk size — a range computed from that would push the panel off
-    /// the far edge. Only a panel that has not been allocated yet is measured.
-    fn float_travel_range(&self, panel: ToolbarPanel) -> (f64, f64) {
+    /// The distance a panel of `size` can travel inside the overlay, in pixels.
+    fn travel_range(&self, size: (f64, f64)) -> (f64, f64) {
         let overlay = self.imp().toolbar_overlay.get();
-        let widget = self.panel_widget(panel);
-        let (width, height) = if widget.width() > 0 && widget.height() > 0 {
-            (widget.width(), widget.height())
-        } else {
-            let (_, width, _, _) = widget.measure(gtk4::Orientation::Horizontal, -1);
-            let (_, height, _, _) = widget.measure(gtk4::Orientation::Vertical, -1);
-            (width, height)
-        };
         (
-            (f64::from(overlay.width()) - f64::from(width)).max(0.0),
-            (f64::from(overlay.height()) - f64::from(height)).max(0.0),
+            (f64::from(overlay.width()) - size.0).max(0.0),
+            (f64::from(overlay.height()) - size.1).max(0.0),
         )
     }
 
+    /// The size the overlay has given `panel`, once it has one.
+    fn allocated_size(&self, panel: ToolbarPanel) -> Option<(f64, f64)> {
+        let widget = self.panel_widget(panel);
+        (widget.width() > 0 && widget.height() > 0)
+            .then(|| (f64::from(widget.width()), f64::from(widget.height())))
+    }
+
     /// Move a floating panel to its remembered position.
-    fn apply_float_position(&self, panel: ToolbarPanel) {
+    ///
+    /// Returns `false` while the panel has no allocation, and moves nothing. A remembered
+    /// position is a fraction of the travel range, and the range only exists once the overlay
+    /// has given the panel its size: measured instead of allocated, the panel is as wide as
+    /// whatever content happens to be built at that moment — a color picker before its swatches
+    /// exist is as wide as the overlay, a pens sidebar before its pages is shorter than it ends
+    /// up — and the fraction lands the panel at the wrong edge. Placing it then would also
+    /// record the window size as done, so the same size is never placed again.
+    fn apply_float_position(&self, panel: ToolbarPanel) -> bool {
         if self.panel_dock(panel) != ToolbarDock::Floating {
-            return;
+            return true;
         }
         let Some(fraction) = self.panel_position(panel) else {
-            return;
+            return true;
         };
-        let range = self.float_travel_range(panel);
+        let Some(size) = self.allocated_size(panel) else {
+            return false;
+        };
+        let range = self.travel_range(size);
         let widget = self.panel_widget(panel);
         widget.set_halign(Align::Start);
         widget.set_valign(Align::Start);
@@ -650,13 +677,18 @@ impl RnOverlays {
         widget.set_margin_top(fraction_position(fraction.1, range.1) as i32);
         widget.set_margin_end(0);
         widget.set_margin_bottom(0);
+        true
     }
 
     /// Move every floating panel that has a remembered position to it.
-    fn apply_float_positions(&self) {
+    ///
+    /// Returns whether every panel that has a position could be placed.
+    fn apply_float_positions(&self) -> bool {
+        let mut all_placed = true;
         for panel in ToolbarPanel::ALL {
-            self.apply_float_position(panel);
+            all_placed &= self.apply_float_position(panel);
         }
+        all_placed
     }
 
     /// Reapply the remembered positions whenever the window surface is laid out.
@@ -714,8 +746,19 @@ impl RnOverlays {
                 && overlay.height() > 0
                 && size != overlays.imp().float_apply_size.get()
             {
-                overlays.imp().float_apply_size.set(size);
-                overlays.apply_float_positions();
+                if overlays.apply_float_positions() {
+                    overlays.imp().float_apply_size.set(size);
+                    overlays.imp().float_apply_tries.set(0);
+                } else if overlays.imp().float_apply_tries.get() < FLOAT_APPLY_TRIES {
+                    // A panel is not allocated yet: it has no size to take its range from, and
+                    // the surface may not resize again before it does. Try until it is, then
+                    // give up rather than spin on a panel that never gets one.
+                    overlays
+                        .imp()
+                        .float_apply_tries
+                        .set(overlays.imp().float_apply_tries.get() + 1);
+                    overlays.queue_float_positions();
+                }
             }
         });
         self.imp().float_apply_source.replace(Some(source));
@@ -1102,12 +1145,12 @@ impl RnOverlays {
                             let x = (start_x + offset_x).clamp(0.0, max_x);
                             let y = (start_y + offset_y).clamp(0.0, max_y);
                             if widget.is_ancestor(&overlay) {
-                                overlays.remember_float_position(panel, (x, y));
+                                overlays.remember_float_position(panel, (x, y), size);
                                 widget.set_margin_start(x as i32);
                                 widget.set_margin_top(y as i32);
                                 overlay.queue_draw();
                             } else {
-                                overlays.float_panel_at(panel, x, y);
+                                overlays.float_panel_at(panel, x, y, size);
                             }
                         }
 
@@ -1581,8 +1624,9 @@ mod tests {
         assert!(!overlays.dock_slot(ToolbarDock::Left).unwrap().is_visible());
         assert_eq!(panel_parent(&overlays, ToolbarPanel::PenPicker), overlay);
 
-        // Floating can place a panel at an exact overlay position.
-        overlays.float_panel_at(ToolbarPanel::PenPicker, 40.0, 50.0);
+        // Floating can place a panel at an exact overlay position. The overlay has no size in
+        // this test, so the position comes from the pixels alone.
+        overlays.float_panel_at(ToolbarPanel::PenPicker, 40.0, 50.0, (0.0, 0.0));
         let penpicker = overlays.panel_widget(ToolbarPanel::PenPicker);
         assert_eq!((penpicker.margin_start(), penpicker.margin_top()), (40, 50));
         assert_eq!(penpicker.halign(), Align::Start);

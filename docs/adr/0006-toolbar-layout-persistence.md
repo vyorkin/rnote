@@ -19,6 +19,15 @@ session runs, but the settings they share are global.
 - `position` is a pair of fractions of the distance the panel can travel inside the overlay:
   `fx = x / (overlay_width - panel_width)`. On a resize the fractions are applied again, so a panel
   keeps its relative place and can never leave the window.
+- The `panel_width` in that range is the size the overlay *allocated* the panel, never a measured
+  one. A panel measured instead of allocated is as wide as whatever content happens to be built at
+  that moment — a color picker before its swatches exist is as wide as the overlay, a pens sidebar
+  before its pages is shorter than it ends up — and a fraction of such a range lands the panel at
+  the wrong edge; a collapsed range loses the position altogether (the fraction clamps to 0 or 1).
+  A placement therefore waits until every floating panel reports an allocation, retrying for a few
+  frames, and only then records the size it was applied for. A drag stores the size the panel had
+  when it was picked up: while it moves, the panel is hidden under a picture of itself, so the
+  widget reports a size it does not have on screen.
 - Positions are applied from the window surface's "layout" signal, once the panels have been
   allocated for that size. This is the only hook that fires for every size: `size_allocate` on the
   overlays widget is bypassed once the template's box layout manages it, and `GtkWidget`'s
@@ -53,6 +62,6 @@ session runs, but the settings they share are global.
   because a single window is created at startup.
 - A panel in its default corner stores no position; its margins still come from the show-scrollbars
   setting. A stored position replaces those default margins.
-- Positions are fractions of a measured travel range, so they are only meaningful once the panel
+- Positions are fractions of an allocated travel range, so they are only meaningful once the panel
   and the overlay have been allocated a size. Until then the panels keep the position the layout
   gave them.
