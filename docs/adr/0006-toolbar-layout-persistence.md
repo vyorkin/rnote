@@ -37,8 +37,11 @@ session runs, but the settings they share are global.
   overlay by that margin: the overlay grows by the panel's position, the travel range grows with
   it, and the next apply places the panel further out. The overlay takes its size from the canvas
   alone.
-- The layout is written when a window stops being active, and when an active window saves its
-  settings. Only the last active window's layout is restored on the next start.
+- The layout is written when a panel drag is released, when a window stops being active, and when
+  an active window saves its settings. A release writes it directly, because a window that is
+  closed without ever reporting itself as inactive — killed, or closed by the compositor — would
+  otherwise keep the layout from before the drag. Only the last active window's layout is restored
+  on the next start.
 - On start, a stored layout restores docks and positions. If `toolbars-layout` is empty or
   malformed, the per-panel `*-dock` keys are read as before.
 - The `*-dock` keys are still written, as the fallback for an older version reading the same

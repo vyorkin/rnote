@@ -1110,6 +1110,15 @@ impl RnOverlays {
                                 overlays.float_panel_at(panel, x, y);
                             }
                         }
+
+                        // A released drag is a layout the user means to keep: write it now, so a
+                        // quit that never reports the window as inactive still keeps it.
+                        if let Some(appwindow) = overlays
+                            .root()
+                            .and_then(|root| root.downcast::<RnAppWindow>().ok())
+                        {
+                            appwindow.save_toolbar_layout();
+                        }
                     }
                     _ => {}
                 }
