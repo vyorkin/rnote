@@ -1351,7 +1351,6 @@ mod preview_draw {
     /// The bounds on the surface that the preview of a dragged stroke is drawn into, with the
     /// document scrolled to `center`, and the bounds the camera transform puts the stroke at.
     fn preview_bounds_on_surface(center: Vector2) -> (Aabb, Aabb) {
-        let _ = gtk4::init();
         let mut engine = Engine::default();
         engine.document.width = 6000.;
         engine.document.height = 6000.;
@@ -1403,7 +1402,7 @@ mod preview_draw {
     /// A stroke being dragged is drawn from its geometry into the camera-transformed snapshot, so
     /// it has to land where the camera puts the stroke, also when the document is scrolled far
     /// from its origin.
-    #[test]
+    #[gtk4::test]
     fn a_preview_is_drawn_where_the_stroke_is_in_a_panned_document() {
         let within_a_pixel = |a: &Aabb, b: &Aabb| {
             (a.mins - b.mins).abs().max_element() < 1.0
@@ -1425,6 +1424,69 @@ mod preview_draw {
         assert!(
             drawn.maxs.x <= 800. && drawn.maxs.y <= 600.,
             "the panned preview lands on the surface: {drawn:?}"
+        );
+    }
+
+    /// An inserted image being resized is drawn from its pixels through the same snapshot, so the
+    /// content of a dragged image has to stay on screen while the drag goes on.
+    #[gtk4::test]
+    fn a_resized_image_preview_is_drawn_on_the_surface() {
+        let mut engine = Engine::default();
+        engine.document.width = 6000.;
+        engine.document.height = 6000.;
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+
+        let size = Vector2::new(400., 160.);
+        let center = Vector2::new(2340., 5120.);
+        let _ = engine
+            .camera
+            .set_offset(center - Vector2::new(400., 300.), &engine.document);
+
+        let mut png_bytes: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            20,
+            8,
+            image::Rgba([255, 0, 0, 255]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let image = crate::strokes::BitmapImage::from_image_bytes(
+            &png_bytes,
+            center - size * 0.5,
+            crate::strokes::resize::ImageSizeOption::ImposeSize(size),
+        )
+        .unwrap();
+        let key = engine.store.insert_stroke(Stroke::BitmapImage(image), None);
+        engine.store.set_previewing(&[key], true);
+
+        let snapshot = gtk4::Snapshot::new();
+        snapshot.save();
+        snapshot.transform(Some(&engine.camera.transform_for_gtk_snapshot()));
+        engine.with_view_mut(|view| {
+            let engine_view = view.as_im();
+            engine_view
+                .store
+                .draw_stroke_key_to_gtk_snapshot(&snapshot, key, &engine_view)
+        });
+        snapshot.restore();
+
+        let node = snapshot.to_node().expect("the snapshot holds the preview");
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        renderer.realize(None).expect("the cairo renderer realizes");
+        let viewport = gtk4::graphene::Rect::new(0., 0., 800., 600.);
+        let texture = renderer.render_texture(&node, Some(&viewport));
+        renderer.unrealize();
+        let decoded = image::load_from_memory(&texture.save_to_png_bytes())
+            .expect("the rendered texture decodes")
+            .to_rgba8();
+
+        let center_pixel = decoded.get_pixel(400, 300);
+        assert!(
+            center_pixel.0[3] > 0 && center_pixel.0[..3] == [255, 0, 0],
+            "the image is drawn where the camera puts it while it is resized, got {center_pixel:?}"
         );
     }
 }
