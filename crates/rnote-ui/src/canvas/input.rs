@@ -17,7 +17,7 @@ use tracing::{debug, trace};
 /// Maps the bare tool keys to a pen style. Cyrillic keysyms are listed because a physical key
 /// reports a different keysym while the `ru` layout is active; the digits keep their keysyms in
 /// both layouts.
-fn tool_shortcut_pen_style(gdk_key: gdk::Key) -> Option<PenStyle> {
+pub(crate) fn tool_shortcut_pen_style(gdk_key: gdk::Key) -> Option<PenStyle> {
     match gdk_key {
         gdk::Key::b | gdk::Key::Cyrillic_i | gdk::Key::_1 | gdk::Key::KP_1 => Some(PenStyle::Brush),
         gdk::Key::s | gdk::Key::Cyrillic_yeru | gdk::Key::_2 | gdk::Key::KP_2 => {
@@ -37,6 +37,51 @@ fn tool_shortcut_pen_style(gdk_key: gdk::Key) -> Option<PenStyle> {
         }
         _ => None,
     }
+}
+
+/// Bare tool keys, so the left hand can switch tools while the right one holds the pen.
+/// `Ctrl`+number stays an accelerator, but the left Ctrl is keyd's Hyper layer on this
+/// machine and the right hand is busy.
+const TOOL_SHORTCUT_BLOCKED_MODIFIERS: gdk::ModifierType = gdk::ModifierType::CONTROL_MASK
+    .union(gdk::ModifierType::ALT_MASK)
+    .union(gdk::ModifierType::SHIFT_MASK)
+    .union(gdk::ModifierType::SUPER_MASK)
+    .union(gdk::ModifierType::HYPER_MASK)
+    .union(gdk::ModifierType::META_MASK);
+
+/// Handles a bare tool key for the whole window.
+///
+/// The keys are letters and digits, so a widget that holds the keyboard focus (a property
+/// popover, the stroke width spin button, the toolbar panels) would otherwise swallow them and
+/// the shortcuts would stop working until the canvas was clicked again. Deferring to an editable
+/// text input keeps typing into an entry working.
+///
+/// Returns whether the key was consumed.
+pub(crate) fn handle_tool_shortcut_key(
+    appwindow: &RnAppWindow,
+    gdk_key: gdk::Key,
+    gdk_modifiers: gdk::ModifierType,
+    text_input_focused: bool,
+) -> bool {
+    if text_input_focused || gdk_modifiers.intersects(TOOL_SHORTCUT_BLOCKED_MODIFIERS) {
+        return false;
+    }
+    let Some(canvas) = appwindow.active_tab_canvas() else {
+        return false;
+    };
+    if canvas.engine_ref().penholder.is_handling_text_input() {
+        return false;
+    }
+    let Some(pen_style) = tool_shortcut_pen_style(gdk_key.to_lower()) else {
+        return false;
+    };
+
+    debug!("Tool shortcut: switching to '{pen_style}'");
+    appwindow.set_pen_style_with_lock(pen_style);
+    // Give the focus back to the canvas the key was meant for, so the next pen event and the
+    // next key go there too.
+    canvas.grab_focus();
+    true
 }
 
 /// Handles a pointer controller event.
@@ -381,27 +426,6 @@ pub(crate) fn handle_key_controller_key_pressed(
 ) -> glib::Propagation {
     trace!("canvas event key pressed - gdk_key: {gdk_key:?}, gdk_modifiers: {gdk_modifiers:?}");
     canvas.grab_focus();
-
-    // Bare tool keys, so the left hand can switch tools while the right one holds the pen.
-    // `Ctrl`+number stays an accelerator, but the left Ctrl is keyd's Hyper layer on this
-    // machine and the right hand is busy.
-    let blocked_modifiers = gdk::ModifierType::CONTROL_MASK
-        | gdk::ModifierType::ALT_MASK
-        | gdk::ModifierType::SHIFT_MASK
-        | gdk::ModifierType::SUPER_MASK
-        | gdk::ModifierType::HYPER_MASK
-        | gdk::ModifierType::META_MASK;
-    if !gdk_modifiers.intersects(blocked_modifiers)
-        && !canvas.engine_ref().penholder.is_handling_text_input()
-        && let Some(pen_style) = tool_shortcut_pen_style(gdk_key.to_lower())
-        && let Some(appwindow) = canvas
-            .root()
-            .and_then(|root| root.downcast::<RnAppWindow>().ok())
-    {
-        debug!("Tool shortcut: switching to '{pen_style}'");
-        appwindow.set_pen_style_with_lock(pen_style);
-        return glib::Propagation::Stop;
-    }
 
     // `Ctrl`+`V` is matched here instead of by the `"<Ctrl>v"` accelerator, because an input
     // remapping layer that adds modifiers to the chord (keyd's Hyper: left Ctrl held, every key

@@ -11,7 +11,7 @@ use crate::{
 use adw::{prelude::*, subclass::prelude::*};
 use core::cell::{Ref, RefMut};
 use gettextrs::gettext;
-use gtk4::{Application, IconTheme, Widget, gdk, gio, glib, glib::clone};
+use gtk4::{Application, EventControllerKey, IconTheme, Widget, gdk, gio, glib, glib::clone};
 use p2d::math::Vector2;
 use rnote_compose::Color;
 use rnote_engine::document::DocumentConfig;
@@ -264,6 +264,7 @@ impl RnAppWindow {
         imp.overlays.get().init(self);
         imp.sidebar.get().init(self);
         imp.main_header.get().init(self);
+        self.setup_tool_shortcut_keys();
 
         // Keep every popover inside the window: a pen tablet mapped onto the
         // window cannot reach one that hangs over its edge.
@@ -307,6 +308,46 @@ impl RnAppWindow {
         // Anything that needs to be done right before showing the appwindow
 
         self.refresh_ui();
+    }
+
+    /// Bare tool keys switch the pen style from anywhere in this window, not only while the
+    /// canvas holds the keyboard focus.
+    ///
+    /// The canvas's own key controller only sees the keys when the canvas is focused, and the
+    /// toolbars, their popovers and their configuration rows take the keyboard focus away from
+    /// it: after adjusting a shape property the tool shortcuts would stay dead until the canvas
+    /// was clicked again. Handling the keys at the window level, where they are seen before the
+    /// focused widget, keeps them working (and gives the focus back to the canvas).
+    fn setup_tool_shortcut_keys(&self) {
+        let key_controller = EventControllerKey::builder()
+            .name("tool_shortcut_keys")
+            .propagation_phase(gtk4::PropagationPhase::Capture)
+            .build();
+        key_controller.connect_key_pressed(clone!(
+            #[weak(rename_to = appwindow)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_key_controller, key, _keycode, modifier| {
+                let focus = gtk4::prelude::RootExt::focus(&appwindow);
+                let text_input_focused = focus_is_text_editable(focus.clone());
+                tracing::trace!(
+                    "window key pressed - key: {key:?}, modifier: {modifier:?}, focus: {:?}",
+                    focus.as_ref().map(|widget| widget.type_().name())
+                );
+                if crate::canvas::input::handle_tool_shortcut_key(
+                    &appwindow,
+                    key,
+                    modifier,
+                    text_input_focused,
+                ) {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            }
+        ));
+        self.add_controller(key_controller);
     }
 
     fn setup_icon_theme(&self) {
@@ -1079,4 +1120,21 @@ impl RnAppWindow {
 
         Ok(())
     }
+}
+
+/// Whether `focus` is an editable text input or a widget inside one.
+///
+/// The bare tool keys are also letters and digits, so a key typed into an entry, a spin button
+/// or a search field belongs to that widget and must not switch the pen style.
+fn focus_is_text_editable(focus: Option<Widget>) -> bool {
+    let mut widget = focus;
+    while let Some(current) = widget {
+        if let Some(text) = current.downcast_ref::<gtk4::Text>()
+            && text.is_editable()
+        {
+            return true;
+        }
+        widget = current.parent();
+    }
+    false
 }

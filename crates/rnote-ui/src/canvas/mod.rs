@@ -1,7 +1,7 @@
 // Modules
 mod canvaslayout;
 pub(crate) mod imexport;
-mod input;
+pub(crate) mod input;
 
 // Re-exports
 pub(crate) use canvaslayout::RnCanvasLayout;
