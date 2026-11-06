@@ -432,7 +432,7 @@ impl Selector {
                         if path.len() >= 3 {
                             engine_view
                                 .store
-                                .strokes_hitboxes_contained_in_path_polygon(
+                                .strokes_hitboxes_intersecting_path_polygon(
                                     path,
                                     engine_view.camera.viewport(),
                                 )
@@ -445,7 +445,7 @@ impl Selector {
                             && let Some(last) = path.last()
                         {
                             let aabb = Aabb::new_positive(first.pos, last.pos);
-                            engine_view.store.strokes_hitboxes_contained_in_aabb(
+                            engine_view.store.strokes_hitboxes_intersecting_aabb(
                                 aabb,
                                 engine_view.camera.viewport(),
                             )

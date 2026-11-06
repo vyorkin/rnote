@@ -6,7 +6,6 @@ use crate::engine::{LayeredStroke, StrokeContent};
 use crate::strokes::{Content, Stroke};
 use crate::{StrokeStore, WidgetFlags};
 use geo::intersects::Intersects;
-use geo::prelude::Contains;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
 use p2d::math::Vector2;
 use rnote_compose::Color;
@@ -479,8 +478,9 @@ impl StrokeStore {
         self.translate_strokes_images(strokes, pivot);
     }
 
-    /// Return the keys for stroke whose hitboxes are contained in the given polygon path.
-    pub(crate) fn strokes_hitboxes_contained_in_path_polygon(
+    /// Return the keys for strokes whose hitboxes are inside or only partly inside the given
+    /// polygon path.
+    pub(crate) fn strokes_hitboxes_intersecting_path_polygon(
         &mut self,
         path: &[Element],
         viewport: Aabb,
@@ -511,21 +511,11 @@ impl StrokeStore {
                 }
 
                 let stroke = self.stroke_components.get(key)?;
-                let stroke_bounds = stroke.bounds();
 
-                if path_polygon.contains(&crate::utils::p2d_aabb_to_geo_polygon(stroke_bounds)) {
-                    return Some(key);
-                } else if path_polygon
-                    .intersects(&crate::utils::p2d_aabb_to_geo_polygon(stroke_bounds))
-                {
-                    for &hitbox_elem in stroke.hitboxes().iter() {
-                        if !path_polygon
-                            .contains(&crate::utils::p2d_aabb_to_geo_polygon(hitbox_elem))
-                        {
-                            return None;
-                        }
-                    }
-
+                // A stroke that only reaches into the selection by a part of it is selected too.
+                if stroke.hitboxes().iter().any(|hitbox| {
+                    path_polygon.intersects(&crate::utils::p2d_aabb_to_geo_polygon(*hitbox))
+                }) {
                     return Some(key);
                 }
 
@@ -584,8 +574,8 @@ impl StrokeStore {
             .collect()
     }
 
-    /// Return the keys for strokes whose hitboxes are contained in the given Aabb.
-    pub(crate) fn strokes_hitboxes_contained_in_aabb(
+    /// Return the keys for strokes whose hitboxes are inside or only partly inside the given Aabb.
+    pub(crate) fn strokes_hitboxes_intersecting_aabb(
         &mut self,
         aabb: Aabb,
         viewport: Aabb,
@@ -599,17 +589,9 @@ impl StrokeStore {
                 }
 
                 let stroke = self.stroke_components.get(key)?;
-                let stroke_bounds = stroke.bounds();
 
-                if aabb.contains(&stroke_bounds) {
-                    return Some(key);
-                } else if aabb.intersects(&stroke_bounds) {
-                    for &hitbox_elem in stroke.hitboxes().iter() {
-                        if !aabb.contains(&hitbox_elem) {
-                            return None;
-                        }
-                    }
-
+                // A stroke that only reaches into the selection by a part of it is selected too.
+                if stroke.hitboxes().iter().any(|hitbox| aabb.intersects(hitbox)) {
                     return Some(key);
                 }
 
@@ -784,5 +766,91 @@ impl StrokeStore {
                 key
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strokes::BrushStroke;
+    use rnote_compose::PenPath;
+    use rnote_compose::ext::AabbExt;
+    use rnote_compose::Style;
+    use rnote_compose::style::smooth::SmoothOptions;
+
+    /// Insert a horizontal stroke at the given height, reaching from `x_start` to `x_end`.
+    fn insert_line(store: &mut StrokeStore, y: f64, x_start: f64, x_end: f64) -> StrokeKey {
+        insert_path(
+            store,
+            [[x_start, y], [x_end, y]]
+                .into_iter()
+                .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5)),
+        )
+    }
+
+    fn insert_path(store: &mut StrokeStore, elements: impl Iterator<Item = Element>) -> StrokeKey {
+        let path = PenPath::try_from_elements(elements).unwrap();
+        let key = store.insert_stroke(
+            Stroke::BrushStroke(BrushStroke::from_penpath(
+                path,
+                Style::Smooth(SmoothOptions::default()),
+            )),
+            None,
+        );
+        store.update_geometry_for_stroke(key);
+
+        key
+    }
+
+    fn viewport() -> Aabb {
+        Aabb::new(
+            Vector2::new(-1000.0, -1000.0),
+            Vector2::new(1000.0, 1000.0),
+        )
+    }
+
+    #[test]
+    fn rectangle_selects_a_stroke_that_only_partly_falls_inside() {
+        let mut store = StrokeStore::default();
+        let fully_inside = insert_line(&mut store, 200.0, 170.0, 230.0);
+        let crossing = insert_line(&mut store, 150.0, 100.0, 400.0);
+        let outside = insert_line(&mut store, 150.0, 300.0, 400.0);
+        // Its bounds span the selection, but none of its ink is in it.
+        let ink_outside = insert_path(
+            &mut store,
+            [[0.0, 0.0], [900.0, 0.0], [900.0, 900.0]]
+                .into_iter()
+                .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5)),
+        );
+        let selection =
+            Aabb::new_positive(Vector2::new(150.0, 100.0), Vector2::new(250.0, 300.0));
+
+        let selected = store.strokes_hitboxes_intersecting_aabb(selection, viewport());
+
+        assert_eq!(selected, vec![fully_inside, crossing]);
+        assert!(!selected.contains(&outside));
+        assert!(!selected.contains(&ink_outside));
+    }
+
+    #[test]
+    fn polygon_lasso_selects_a_stroke_that_only_partly_falls_inside() {
+        let mut store = StrokeStore::default();
+        let fully_inside = insert_line(&mut store, 200.0, 170.0, 230.0);
+        let crossing = insert_line(&mut store, 150.0, 100.0, 400.0);
+        let outside = insert_line(&mut store, 150.0, 300.0, 400.0);
+        let path = [
+            [150.0, 100.0],
+            [250.0, 100.0],
+            [250.0, 300.0],
+            [150.0, 300.0],
+        ]
+            .into_iter()
+            .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5))
+            .collect::<Vec<Element>>();
+
+        let selected = store.strokes_hitboxes_intersecting_path_polygon(&path, viewport());
+
+        assert_eq!(selected, vec![fully_inside, crossing]);
+        assert!(!selected.contains(&outside));
     }
 }
