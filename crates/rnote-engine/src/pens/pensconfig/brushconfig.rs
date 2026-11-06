@@ -5,7 +5,7 @@ use rand::{RngExt, SeedableRng};
 use rnote_compose::Style;
 use rnote_compose::builders::PenPathBuilderType;
 use rnote_compose::style::PressureCurve;
-use rnote_compose::style::smooth::{LineCap, SmoothOptions};
+use rnote_compose::style::smooth::{LineCap, LineStyle, SmoothOptions};
 use rnote_compose::style::textured::TexturedOptions;
 use serde::{Deserialize, Serialize};
 
@@ -261,6 +261,32 @@ impl BrushConfig {
         }
     }
 
+    /// The line style of the current brush style, if it has one.
+    ///
+    /// Textured strokes have none: they are drawn as a texture, not as a line.
+    /// A line style only shows on the shape a stroke is recognized into, because a freehand
+    /// stroke is drawn as a filled outline of varying width, which has no dashes.
+    pub fn line_style(&self) -> Option<LineStyle> {
+        match &self.style {
+            BrushStyle::Marker => Some(self.marker_options.line_style),
+            BrushStyle::Solid => Some(self.solid_options.line_style),
+            BrushStyle::Textured => None,
+            BrushStyle::Fountain => Some(self.fountain_options.smooth_options.line_style),
+        }
+    }
+
+    /// Sets the line style of the current brush style.
+    ///
+    /// It takes effect when a stroke is recognized into a shape, see [`Self::line_style`].
+    pub fn update_line_style(&mut self, line_style: LineStyle) {
+        match &mut self.style {
+            BrushStyle::Marker => self.marker_options.update_line_style(line_style),
+            BrushStyle::Solid => self.solid_options.update_line_style(line_style),
+            BrushStyle::Textured => (),
+            BrushStyle::Fountain => self.fountain_options.update_line_style(line_style),
+        }
+    }
+
     /// The width a stroke of the current brush style is drawn with at the given pen pressure.
     ///
     /// This is what the stroke is made of: it is as wide as this at every point, for the pressure
@@ -427,6 +453,46 @@ mod tests {
         };
 
         assert_eq!(options.line_cap, LineCap::Rounded);
+    }
+
+    #[test]
+    fn a_recognized_shape_takes_the_line_style_of_the_brush() {
+        let mut config = solid_config(PressureCurve::Const);
+        config.update_line_style(LineStyle::Dotted);
+
+        let Style::Smooth(options) = config.style_for_recognized_shape(2.0) else {
+            panic!("expected smooth options");
+        };
+
+        assert_eq!(options.line_style, LineStyle::Dotted);
+    }
+
+    #[test]
+    fn a_line_style_belongs_to_the_brush_style_that_is_current() {
+        let mut config = solid_config(PressureCurve::Const);
+        config.update_line_style(LineStyle::DashedEquidistant);
+
+        assert_eq!(config.line_style(), Some(LineStyle::DashedEquidistant));
+        assert_eq!(
+            config.marker_options.line_style,
+            LineStyle::Solid,
+            "setting the line style of the solid brush must leave the marker alone"
+        );
+
+        config.style = BrushStyle::Fountain;
+        config.update_line_style(LineStyle::Dotted);
+
+        assert_eq!(
+            config.fountain_options.smooth_options.line_style,
+            LineStyle::Dotted
+        );
+        assert_eq!(config.solid_options.line_style, LineStyle::DashedEquidistant);
+
+        // A textured stroke is a texture, not a line, so it has no line style to set.
+        config.style = BrushStyle::Textured;
+        config.update_line_style(LineStyle::DashedWide);
+
+        assert_eq!(config.line_style(), None);
     }
 
     fn fountain_config() -> BrushConfig {

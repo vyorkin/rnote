@@ -92,6 +92,50 @@
       </object>
     </child>
     <child>
+      <object class="GtkBox" id="brush_line_style_togglebox">
+        <property name="orientation">vertical</property>
+        <property name="homogeneous">true</property>
+        <property name="vexpand">false</property>
+        <style>
+          <class name="linked" />
+        </style>
+        <child>
+          <object class="GtkToggleButton" id="brush_line_style_solid_toggle">
+            <property name="tooltip_text" translatable="yes">Solid line</property>
+            <property name="icon-name">line-style-solid-symbolic</property>
+            <style>
+              <class name="sidebar_action_button" />
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="brush_line_style_dashed_toggle">
+            <property name="group">brush_line_style_solid_toggle</property>
+            <property name="tooltip_text" translatable="yes">Dashed line</property>
+            <property name="icon-name">line-style-dashed-symbolic</property>
+            <style>
+              <class name="sidebar_action_button" />
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="brush_line_style_dotted_toggle">
+            <property name="group">brush_line_style_solid_toggle</property>
+            <property name="tooltip_text" translatable="yes">Dotted line</property>
+            <property name="icon-name">line-style-dotted-symbolic</property>
+            <style>
+              <class name="sidebar_action_button" />
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
+    <child>
+      <object class="GtkSeparator">
+        <property name="orientation">vertical</property>
+      </object>
+    </child>
+    <child>
       <object class="GtkBox">
         <property name="orientation">vertical</property>
         <child>
@@ -409,6 +453,29 @@
                       <property name="title" translatable="yes">Modeled</property>
                       <property name="subtitle" translatable="yes">Produces a modeled path with physics based algorithms.
     Results in the best looking handwriting.</property>
+                    </object>
+                  </child>
+                </object>
+              </child>
+              <child>
+                <!-- Line options -->
+                <object class="AdwPreferencesGroup" id="brush_line_style_group">
+                  <property name="title" translatable="yes">Line</property>
+                  <child>
+                    <object class="AdwComboRow" id="brush_line_style_row">
+                      <property name="title" translatable="yes">Line Style</property>
+                      <property name="subtitle" translatable="yes">The line style of the shape a stroke is recognized into. Draw a line and hold it still to turn the stroke into a shape.</property>
+                      <property name="model">
+                        <object class="GtkStringList">
+                          <items>
+                            <item translatable="yes">Solid</item>
+                            <item translatable="yes">Dotted</item>
+                            <item translatable="yes">Dashed (narrow)</item>
+                            <item translatable="yes">Dashed (equidistant)</item>
+                            <item translatable="yes">Dashed (wide)</item>
+                          </items>
+                        </object>
+                      </property>
                     </object>
                   </child>
                 </object>

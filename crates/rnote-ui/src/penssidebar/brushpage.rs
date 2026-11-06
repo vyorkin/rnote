@@ -8,6 +8,7 @@ use gtk4::{
 use num_traits::cast::ToPrimitive;
 use rnote_compose::builders::PenPathBuilderType;
 use rnote_compose::style::PressureCurve;
+use rnote_compose::style::smooth::LineStyle;
 use rnote_compose::style::textured::{TexturedDotsDistribution, TexturedOptions};
 use rnote_engine::pens::pensconfig::BrushConfig;
 use rnote_engine::pens::pensconfig::brushconfig::{BrushStyle, FountainOptions, SolidOptions};
@@ -42,6 +43,19 @@ mod imp {
         pub(crate) brush_buildertype_modeled: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub(crate) solidstyle_pressure_curves_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) brush_line_style_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child]
+        pub(crate) brush_line_style_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) brush_line_style_solid_toggle: TemplateChild<ToggleButton>,
+        #[template_child]
+        pub(crate) brush_line_style_dashed_toggle: TemplateChild<ToggleButton>,
+        #[template_child]
+        pub(crate) brush_line_style_dotted_toggle: TemplateChild<ToggleButton>,
+        /// Set while the line style controls are written from the brush config, so that the
+        /// handlers they fire do not write the very same line style back into the config.
+        pub(crate) line_style_syncing: std::cell::Cell<bool>,
         #[template_child]
         pub(crate) texturedstyle_density_row: TemplateChild<adw::SpinRow>,
         #[template_child]
@@ -171,6 +185,7 @@ impl RnBrushPage {
         self.imp()
             .stroke_width_picker
             .set_stroke_width(stroke_width);
+        self.sync_line_style(appwindow);
     }
 
     pub(crate) fn buildertype(&self) -> Option<PenPathBuilderType> {
@@ -231,6 +246,82 @@ impl RnBrushPage {
 
     pub(crate) fn stroke_width_picker(&self) -> RnStrokeWidthPicker {
         self.imp().stroke_width_picker.get()
+    }
+
+    pub(crate) fn line_style(&self) -> LineStyle {
+        LineStyle::try_from(self.imp().brush_line_style_row.get().selected()).unwrap_or_default()
+    }
+
+    /// Shows the given line style on both controls, the combo row and the quick toggles.
+    ///
+    /// The three quick toggles stand for the line styles they can draw as an icon, so every
+    /// dashed style shows as the dashed one: the variants are chosen in the combo row.
+    fn set_line_style(&self, line_style: LineStyle) {
+        let imp = self.imp();
+        imp.line_style_syncing.set(true);
+
+        imp.brush_line_style_row
+            .get()
+            .set_selected(line_style.to_u32().unwrap());
+        imp.brush_line_style_solid_toggle
+            .set_active(line_style == LineStyle::Solid);
+        imp.brush_line_style_dotted_toggle
+            .set_active(line_style.is_dotted());
+        imp.brush_line_style_dashed_toggle
+            .set_active(line_style != LineStyle::Solid && !line_style.is_dotted());
+
+        imp.line_style_syncing.set(false);
+    }
+
+    fn apply_line_style(&self, appwindow: &RnAppWindow, line_style: LineStyle) {
+        appwindow
+            .engine_config()
+            .write()
+            .pens_config
+            .brush_config
+            .update_line_style(line_style);
+        self.set_line_style(line_style);
+    }
+
+    /// Shows the line style of the current brush style, and enables the controls only when that
+    /// style has one: a textured stroke is a texture, not a line.
+    fn sync_line_style(&self, appwindow: &RnAppWindow) {
+        let line_style = appwindow
+            .engine_config()
+            .read()
+            .pens_config
+            .brush_config
+            .line_style();
+        let has_line_style = line_style.is_some();
+        let imp = self.imp();
+
+        imp.brush_line_style_group.set_sensitive(has_line_style);
+        imp.brush_line_style_solid_toggle.set_sensitive(has_line_style);
+        imp.brush_line_style_dashed_toggle.set_sensitive(has_line_style);
+        imp.brush_line_style_dotted_toggle.set_sensitive(has_line_style);
+
+        self.set_line_style(line_style.unwrap_or_default());
+    }
+
+    fn connect_line_style_toggle(
+        &self,
+        toggle: &ToggleButton,
+        line_style: LineStyle,
+        appwindow: &RnAppWindow,
+    ) {
+        toggle.connect_toggled(clone!(
+            #[weak(rename_to=brushpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |toggle| {
+                if !toggle.is_active() || brushpage.imp().line_style_syncing.get() {
+                    return;
+                }
+
+                brushpage.apply_line_style(&appwindow, line_style);
+            }
+        ));
     }
 
     pub(crate) fn init(&self, appwindow: &RnAppWindow) {
@@ -309,6 +400,40 @@ impl RnBrushPage {
                 }
             ),
         );
+
+        // Line style
+        imp.brush_line_style_row
+            .get()
+            .connect_selected_notify(clone!(
+                #[weak(rename_to=brushpage)]
+                self,
+                #[weak]
+                appwindow,
+                move |_| {
+                    if brushpage.imp().line_style_syncing.get() {
+                        return;
+                    }
+
+                    let line_style = brushpage.line_style();
+                    brushpage.apply_line_style(&appwindow, line_style);
+                }
+            ));
+        self.connect_line_style_toggle(
+            &imp.brush_line_style_solid_toggle.get(),
+            LineStyle::Solid,
+            appwindow,
+        );
+        self.connect_line_style_toggle(
+            &imp.brush_line_style_dashed_toggle.get(),
+            LineStyle::DashedEquidistant,
+            appwindow,
+        );
+        self.connect_line_style_toggle(
+            &imp.brush_line_style_dotted_toggle.get(),
+            LineStyle::Dotted,
+            appwindow,
+        );
+        self.sync_line_style(appwindow);
 
         // Style
         imp.brushstyle_marker_toggle.connect_toggled(clone!(
@@ -706,6 +831,7 @@ impl RnBrushPage {
 
         imp.stroke_width_picker
             .set_stroke_width(brush_config.stroke_width());
+        self.sync_line_style(appwindow);
 
         imp.ruler_toggle
             .set_active(brush_config.ruler_config.visible);
