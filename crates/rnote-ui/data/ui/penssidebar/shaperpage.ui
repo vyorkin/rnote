@@ -86,6 +86,50 @@
       <object class="RnStrokeWidthPicker" id="stroke_width_picker">
       </object>
     </child>
+    <child>
+      <object class="GtkSeparator">
+        <property name="orientation">vertical</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox" id="shaper_line_style_togglebox">
+        <property name="orientation">vertical</property>
+        <property name="homogeneous">true</property>
+        <property name="vexpand">false</property>
+        <style>
+          <class name="linked" />
+        </style>
+        <child>
+          <object class="GtkToggleButton" id="shaper_line_style_solid_toggle">
+            <property name="tooltip_text" translatable="yes">Solid line</property>
+            <property name="icon-name">line-style-solid-symbolic</property>
+            <style>
+              <class name="sidebar_action_button" />
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="shaper_line_style_dashed_toggle">
+            <property name="group">shaper_line_style_solid_toggle</property>
+            <property name="tooltip_text" translatable="yes">Dashed line</property>
+            <property name="icon-name">line-style-dashed-symbolic</property>
+            <style>
+              <class name="sidebar_action_button" />
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkToggleButton" id="shaper_line_style_dotted_toggle">
+            <property name="group">shaper_line_style_solid_toggle</property>
+            <property name="tooltip_text" translatable="yes">Dotted line</property>
+            <property name="icon-name">line-style-dotted-symbolic</property>
+            <style>
+              <class name="sidebar_action_button" />
+            </style>
+          </object>
+        </child>
+      </object>
+    </child>
 
     <!-- Shape config -->
     <object class="GtkPopover" id="shapeconfig_popover">
@@ -184,12 +228,30 @@
                       <items>
                         <item translatable="yes">Solid</item>
                         <item translatable="yes">Dotted</item>
-                        <item translatable="yes">Dashed (narrow)</item>
-                        <item translatable="yes">Dashed (equidistant)</item>
-                        <item translatable="yes">Dashed (wide)</item>
+                        <item translatable="yes">Dashed</item>
                       </items>
                     </object>
                   </property>
+                </object>
+              </child>
+              <child>
+                <object class="AdwSpinRow" id="smoothstyle_dash_length_row">
+                  <property name="title" translatable="yes">Dash Length</property>
+                  <property name="subtitle" translatable="yes">In line widths</property>
+                  <property name="adjustment">smoothstyle_dash_length_adj</property>
+                  <property name="numeric">true</property>
+                  <property name="digits">1</property>
+                  <property name="climb-rate">0.1</property>
+                </object>
+              </child>
+              <child>
+                <object class="AdwSpinRow" id="smoothstyle_dash_gap_row">
+                  <property name="title" translatable="yes">Space Between Dashes</property>
+                  <property name="subtitle" translatable="yes">In line widths</property>
+                  <property name="adjustment">smoothstyle_dash_gap_adj</property>
+                  <property name="numeric">true</property>
+                  <property name="digits">1</property>
+                  <property name="climb-rate">0.1</property>
                 </object>
               </child>
             </object>
@@ -473,6 +535,18 @@ constraints when this switch is off/on</property>
           </child>
         </object>
       </child>
+    </object>
+    <object class="GtkAdjustment" id="smoothstyle_dash_length_adj">
+      <property name="lower">0.1</property>
+      <property name="upper">20</property>
+      <property name="step-increment">0.1</property>
+      <property name="page-increment">1</property>
+    </object>
+    <object class="GtkAdjustment" id="smoothstyle_dash_gap_adj">
+      <property name="lower">0</property>
+      <property name="upper">20</property>
+      <property name="step-increment">0.1</property>
+      <property name="page-increment">1</property>
     </object>
   </template>
 </interface>

@@ -77,15 +77,6 @@ pub struct CoordSystemEdit {
     pub anchor: Aabb,
 }
 
-fn is_coord_system(builder_type: ShapeBuilderType) -> bool {
-    matches!(
-        builder_type,
-        ShapeBuilderType::CoordSystem2D
-            | ShapeBuilderType::QuadrantCoordSystem2D
-            | ShapeBuilderType::CoordSystem3D
-    )
-}
-
 /// Which axis a half-axis running from the origin in the given direction belongs to, as an index
 /// into the axis names (x, y, z), and whether it is the negative half.
 ///
@@ -403,7 +394,7 @@ impl PenBehaviour for Shaper {
                     BuilderProgress::Finished(shapes) => {
                         let shaper_config = &engine_view.config.pens_config.shaper_config;
                         let mut style = shaper_config.gen_style_with_pressure(pressure);
-                        let coord_system = is_coord_system(builder_type)
+                        let coord_system = builder_type.is_coord_system()
                             && shapes.iter().all(|shape| matches!(shape, Shape::Line(_)));
                         let tick_spacing = shaper_config.axis_tick_spacing;
                         // The default count gives the shortest half-axis about the default spacing

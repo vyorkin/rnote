@@ -17,6 +17,7 @@ use rnote_compose::style::smooth::{LineCap, LineStyle, SmoothOptions};
 use rnote_engine::pens::pensconfig::ShaperConfig;
 use rnote_engine::pens::pensconfig::shaperconfig::ShaperStyle;
 use rnote_engine::strokes::{AxisEnd, AxisTicks};
+use std::cell::Cell;
 
 mod imp {
     use super::*;
@@ -85,6 +86,19 @@ mod imp {
         pub(crate) smoothstyle_line_cap_row: TemplateChild<adw::ComboRow>,
         #[template_child]
         pub(crate) smoothstyle_line_style_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) smoothstyle_dash_length_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) smoothstyle_dash_gap_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) shaper_line_style_solid_toggle: TemplateChild<ToggleButton>,
+        #[template_child]
+        pub(crate) shaper_line_style_dashed_toggle: TemplateChild<ToggleButton>,
+        #[template_child]
+        pub(crate) shaper_line_style_dotted_toggle: TemplateChild<ToggleButton>,
+        /// Set while the line style controls are written from the shaper config, so that the
+        /// handlers they fire do not write the very same line style back into the config.
+        pub(crate) line_style_syncing: Cell<bool>,
         #[template_child]
         pub(crate) roughstyle_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child]
@@ -214,6 +228,7 @@ impl RnShaperPage {
                 page.stroke_width_picker.set_stroke_width(stroke_width);
             }
         }
+        self.sync_line_style(appwindow);
     }
 
     pub(crate) fn shapebuildertype(&self) -> Option<ShapeBuilderType> {
@@ -232,7 +247,115 @@ impl RnShaperPage {
     }
 
     pub(crate) fn smoothstyle_line_style(&self) -> LineStyle {
-        LineStyle::try_from(self.imp().smoothstyle_line_style_row.get().selected()).unwrap()
+        LineStyle::try_from(self.imp().smoothstyle_line_style_row.get().selected())
+            .unwrap_or_default()
+    }
+
+    /// Shows the given line style on both controls, the combo row and the quick toggles, and the
+    /// lengths that go with it.
+    fn set_line_style(&self, line_style: LineStyle, dash_length: f64, dash_gap: f64) {
+        let imp = self.imp();
+        imp.line_style_syncing.set(true);
+
+        imp.smoothstyle_line_style_row
+            .set_selected(line_style.to_u32().unwrap());
+        imp.shaper_line_style_solid_toggle
+            .set_active(line_style == LineStyle::Solid);
+        imp.shaper_line_style_dotted_toggle
+            .set_active(line_style.is_dotted());
+        imp.shaper_line_style_dashed_toggle
+            .set_active(line_style == LineStyle::Dashed);
+
+        // A dashed line is the only one with dashes to measure, and a solid one has no spaces.
+        imp.smoothstyle_dash_length_row
+            .set_visible(line_style == LineStyle::Dashed);
+        imp.smoothstyle_dash_gap_row
+            .set_visible(line_style != LineStyle::Solid);
+        imp.smoothstyle_dash_gap_row
+            .set_title(&gettext(if line_style.is_dotted() {
+                "Space Between Dots"
+            } else {
+                "Space Between Dashes"
+            }));
+
+        imp.smoothstyle_dash_length_row.set_value(dash_length);
+        imp.smoothstyle_dash_gap_row.set_value(dash_gap);
+
+        imp.line_style_syncing.set(false);
+    }
+
+    fn apply_line_style(&self, appwindow: &RnAppWindow, line_style: LineStyle) {
+        appwindow
+            .engine_config()
+            .write()
+            .pens_config
+            .shaper_config
+            .update_line_style(line_style);
+        self.sync_line_style(appwindow);
+    }
+
+    /// Shows the line style of the current shape style, the cap it implies, and enables the line
+    /// controls only when the style has a line at all: a rough shape and a coordinate system have
+    /// none.
+    fn sync_line_style(&self, appwindow: &RnAppWindow) {
+        let (line_style, dash_length, dash_gap, line_cap) = {
+            let config = appwindow.engine_config();
+            let config = config.read();
+            let smooth_options = &config.pens_config.shaper_config.smooth_options;
+
+            (
+                config.pens_config.shaper_config.line_style(),
+                config.pens_config.shaper_config.dash_length(),
+                config.pens_config.shaper_config.dash_gap(),
+                smooth_options.line_cap,
+            )
+        };
+        let has_line_style = line_style.is_some();
+        let imp = self.imp();
+
+        imp.line_style_syncing.set(true);
+        imp.smoothstyle_line_cap_row
+            .set_selected(line_cap.to_u32().unwrap());
+        imp.line_style_syncing.set(false);
+
+        imp.smoothstyle_line_cap_row.set_sensitive(has_line_style);
+        imp.smoothstyle_line_style_row.set_sensitive(has_line_style);
+        imp.smoothstyle_dash_length_row
+            .set_sensitive(has_line_style);
+        imp.smoothstyle_dash_gap_row.set_sensitive(has_line_style);
+        imp.shaper_line_style_solid_toggle
+            .set_sensitive(has_line_style);
+        imp.shaper_line_style_dashed_toggle
+            .set_sensitive(has_line_style);
+        imp.shaper_line_style_dotted_toggle
+            .set_sensitive(has_line_style);
+
+        self.set_line_style(
+            line_style.unwrap_or_default(),
+            dash_length.unwrap_or(SmoothOptions::DEFAULT_DASH_LENGTH),
+            dash_gap.unwrap_or(SmoothOptions::DEFAULT_DASH_GAP),
+        );
+    }
+
+    fn connect_line_style_toggle(
+        &self,
+        toggle: &ToggleButton,
+        line_style: LineStyle,
+        appwindow: &RnAppWindow,
+    ) {
+        toggle.connect_toggled(clone!(
+            #[weak(rename_to=shaperpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |toggle| {
+                if !toggle.is_active() || shaperpage.imp().line_style_syncing.get() {
+                    return;
+                }
+
+                shaperpage.apply_line_style(&appwindow, line_style);
+            }
+        ));
     }
 
     pub(crate) fn roughstyle_fillstyle(&self) -> FillStyle {
@@ -606,17 +729,13 @@ impl RnShaperPage {
                 #[weak]
                 appwindow,
                 move |_| {
+                    if shaperpage.imp().line_style_syncing.get() {
+                        return;
+                    }
+
                     let line_cap = shaperpage.smoothstyle_line_cap();
 
-                    // If the user has selected a straight line cap while the line style was dotted, then we update the line style to be straight
-                    if line_cap == LineCap::Straight
-                        && shaperpage.smoothstyle_line_style().is_dotted()
-                    {
-                        shaperpage
-                            .imp()
-                            .smoothstyle_line_style_row
-                            .set_selected(LineStyle::Solid.to_u32().unwrap())
-                    }
+                    // A straight cap cannot end in dots, which turns a dotted style back to solid.
                     appwindow
                         .engine_config()
                         .write()
@@ -624,6 +743,7 @@ impl RnShaperPage {
                         .shaper_config
                         .smooth_options
                         .update_line_cap(line_cap);
+                    shaperpage.sync_line_style(&appwindow);
                 }
             ));
 
@@ -636,24 +756,69 @@ impl RnShaperPage {
                 #[weak]
                 appwindow,
                 move |_| {
+                    if shaperpage.imp().line_style_syncing.get() {
+                        return;
+                    }
+
                     let line_style = shaperpage.smoothstyle_line_style();
 
-                    // If the user has selected a dotted line style, then we update the line cap to be rounded
-                    if line_style.is_dotted() {
-                        shaperpage
-                            .imp()
-                            .smoothstyle_line_cap_row
-                            .set_selected(LineCap::Rounded.to_u32().unwrap());
-                    }
-                    appwindow
-                        .engine_config()
-                        .write()
-                        .pens_config
-                        .shaper_config
-                        .smooth_options
-                        .update_line_style(line_style);
+                    shaperpage.apply_line_style(&appwindow, line_style);
                 }
             ));
+        // The quick toggles next to the tool, so that the line style can be chosen without opening
+        // the popover.
+        self.connect_line_style_toggle(
+            &imp.shaper_line_style_solid_toggle.get(),
+            LineStyle::Solid,
+            appwindow,
+        );
+        self.connect_line_style_toggle(
+            &imp.shaper_line_style_dashed_toggle.get(),
+            LineStyle::Dashed,
+            appwindow,
+        );
+        self.connect_line_style_toggle(
+            &imp.shaper_line_style_dotted_toggle.get(),
+            LineStyle::Dotted,
+            appwindow,
+        );
+        imp.smoothstyle_dash_length_row.connect_changed(clone!(
+            #[weak(rename_to=shaperpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |row| {
+                if shaperpage.imp().line_style_syncing.get() {
+                    return;
+                }
+
+                appwindow
+                    .engine_config()
+                    .write()
+                    .pens_config
+                    .shaper_config
+                    .update_dash_length(row.value());
+            }
+        ));
+        imp.smoothstyle_dash_gap_row.connect_changed(clone!(
+            #[weak(rename_to=shaperpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |row| {
+                if shaperpage.imp().line_style_syncing.get() {
+                    return;
+                }
+
+                appwindow
+                    .engine_config()
+                    .write()
+                    .pens_config
+                    .shaper_config
+                    .update_dash_gap(row.value());
+            }
+        ));
+        self.sync_line_style(appwindow);
 
         // Rough style
         // Fill style
@@ -723,6 +888,8 @@ impl RnShaperPage {
                             .imp()
                             .shapebuildertype_menubutton
                             .set_icon_name(&icon_name);
+                        // A coordinate system draws solid axes, so its line controls go away.
+                        shaperpage.sync_line_style(&appwindow);
                     }
                 }
             ),
@@ -857,10 +1024,7 @@ impl RnShaperPage {
         self.set_shapebuildertype(shaper_config.builder_type);
 
         // Smooth style
-        imp.smoothstyle_line_cap_row
-            .set_selected(shaper_config.smooth_options.line_cap.to_u32().unwrap());
-        imp.smoothstyle_line_style_row
-            .set_selected(shaper_config.smooth_options.line_style.to_u32().unwrap());
+        self.sync_line_style(appwindow);
 
         // Rough style
         self.set_roughstyle_fillstyle(shaper_config.rough_options.fill_style);

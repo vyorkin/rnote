@@ -1,6 +1,7 @@
 // Imports
 use crate::{RnAppWindow, RnStrokeWidthPicker};
 use adw::prelude::*;
+use gettextrs::gettext;
 use gtk4::{
     Button, CompositeTemplate, ListBox, MenuButton, Popover, ToggleButton, Widget, glib,
     glib::clone, subclass::prelude::*,
@@ -8,7 +9,7 @@ use gtk4::{
 use num_traits::cast::ToPrimitive;
 use rnote_compose::builders::PenPathBuilderType;
 use rnote_compose::style::PressureCurve;
-use rnote_compose::style::smooth::LineStyle;
+use rnote_compose::style::smooth::{LineStyle, SmoothOptions};
 use rnote_compose::style::textured::{TexturedDotsDistribution, TexturedOptions};
 use rnote_engine::pens::pensconfig::BrushConfig;
 use rnote_engine::pens::pensconfig::brushconfig::{BrushStyle, FountainOptions, SolidOptions};
@@ -47,6 +48,10 @@ mod imp {
         pub(crate) brush_line_style_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child]
         pub(crate) brush_line_style_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) brush_dash_length_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) brush_dash_gap_row: TemplateChild<adw::SpinRow>,
         #[template_child]
         pub(crate) brush_line_style_solid_toggle: TemplateChild<ToggleButton>,
         #[template_child]
@@ -252,11 +257,9 @@ impl RnBrushPage {
         LineStyle::try_from(self.imp().brush_line_style_row.get().selected()).unwrap_or_default()
     }
 
-    /// Shows the given line style on both controls, the combo row and the quick toggles.
-    ///
-    /// The three quick toggles stand for the line styles they can draw as an icon, so every
-    /// dashed style shows as the dashed one: the variants are chosen in the combo row.
-    fn set_line_style(&self, line_style: LineStyle) {
+    /// Shows the given line style on both controls, the combo row and the quick toggles, and the
+    /// lengths that go with it.
+    fn set_line_style(&self, line_style: LineStyle, dash_length: f64, dash_gap: f64) {
         let imp = self.imp();
         imp.line_style_syncing.set(true);
 
@@ -268,7 +271,22 @@ impl RnBrushPage {
         imp.brush_line_style_dotted_toggle
             .set_active(line_style.is_dotted());
         imp.brush_line_style_dashed_toggle
-            .set_active(line_style != LineStyle::Solid && !line_style.is_dotted());
+            .set_active(line_style == LineStyle::Dashed);
+
+        // A dashed line is the only one with dashes to measure, and a solid one has no spaces.
+        imp.brush_dash_length_row
+            .set_visible(line_style == LineStyle::Dashed);
+        imp.brush_dash_gap_row
+            .set_visible(line_style != LineStyle::Solid);
+        imp.brush_dash_gap_row
+            .set_title(&gettext(if line_style.is_dotted() {
+                "Space Between Dots"
+            } else {
+                "Space Between Dashes"
+            }));
+
+        imp.brush_dash_length_row.set_value(dash_length);
+        imp.brush_dash_gap_row.set_value(dash_gap);
 
         imp.line_style_syncing.set(false);
     }
@@ -280,27 +298,39 @@ impl RnBrushPage {
             .pens_config
             .brush_config
             .update_line_style(line_style);
-        self.set_line_style(line_style);
+        self.sync_line_style(appwindow);
     }
 
     /// Shows the line style of the current brush style, and enables the controls only when that
     /// style has one: a textured stroke is a texture, not a line.
     fn sync_line_style(&self, appwindow: &RnAppWindow) {
-        let line_style = appwindow
-            .engine_config()
-            .read()
-            .pens_config
-            .brush_config
-            .line_style();
+        let (line_style, dash_length, dash_gap) = {
+            let config = appwindow.engine_config();
+            let config = config.read();
+            let brush_config = &config.pens_config.brush_config;
+
+            (
+                brush_config.line_style(),
+                brush_config.dash_length(),
+                brush_config.dash_gap(),
+            )
+        };
         let has_line_style = line_style.is_some();
         let imp = self.imp();
 
         imp.brush_line_style_group.set_sensitive(has_line_style);
-        imp.brush_line_style_solid_toggle.set_sensitive(has_line_style);
-        imp.brush_line_style_dashed_toggle.set_sensitive(has_line_style);
-        imp.brush_line_style_dotted_toggle.set_sensitive(has_line_style);
+        imp.brush_line_style_solid_toggle
+            .set_sensitive(has_line_style);
+        imp.brush_line_style_dashed_toggle
+            .set_sensitive(has_line_style);
+        imp.brush_line_style_dotted_toggle
+            .set_sensitive(has_line_style);
 
-        self.set_line_style(line_style.unwrap_or_default());
+        self.set_line_style(
+            line_style.unwrap_or_default(),
+            dash_length.unwrap_or(SmoothOptions::DEFAULT_DASH_LENGTH),
+            dash_gap.unwrap_or(SmoothOptions::DEFAULT_DASH_GAP),
+        );
     }
 
     fn connect_line_style_toggle(
@@ -425,7 +455,7 @@ impl RnBrushPage {
         );
         self.connect_line_style_toggle(
             &imp.brush_line_style_dashed_toggle.get(),
-            LineStyle::DashedEquidistant,
+            LineStyle::Dashed,
             appwindow,
         );
         self.connect_line_style_toggle(
@@ -433,6 +463,42 @@ impl RnBrushPage {
             LineStyle::Dotted,
             appwindow,
         );
+        imp.brush_dash_length_row.connect_changed(clone!(
+            #[weak(rename_to=brushpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |row| {
+                if brushpage.imp().line_style_syncing.get() {
+                    return;
+                }
+
+                appwindow
+                    .engine_config()
+                    .write()
+                    .pens_config
+                    .brush_config
+                    .update_dash_length(row.value());
+            }
+        ));
+        imp.brush_dash_gap_row.connect_changed(clone!(
+            #[weak(rename_to=brushpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |row| {
+                if brushpage.imp().line_style_syncing.get() {
+                    return;
+                }
+
+                appwindow
+                    .engine_config()
+                    .write()
+                    .pens_config
+                    .brush_config
+                    .update_dash_gap(row.value());
+            }
+        ));
         self.sync_line_style(appwindow);
 
         // Style

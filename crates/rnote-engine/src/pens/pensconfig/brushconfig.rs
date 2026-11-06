@@ -287,6 +287,49 @@ impl BrushConfig {
         }
     }
 
+    /// The length of a dash of the current brush style's line, if it has one.
+    ///
+    /// Only a dashed line draws dashes of this length, see [`Self::line_style`].
+    pub fn dash_length(&self) -> Option<f64> {
+        match &self.style {
+            BrushStyle::Marker => Some(self.marker_options.dash_length),
+            BrushStyle::Solid => Some(self.solid_options.dash_length),
+            BrushStyle::Textured => None,
+            BrushStyle::Fountain => Some(self.fountain_options.smooth_options.dash_length),
+        }
+    }
+
+    /// The space between two dashes or two dots of the current brush style's line, if it has one.
+    pub fn dash_gap(&self) -> Option<f64> {
+        match &self.style {
+            BrushStyle::Marker => Some(self.marker_options.dash_gap),
+            BrushStyle::Solid => Some(self.solid_options.dash_gap),
+            BrushStyle::Textured => None,
+            BrushStyle::Fountain => Some(self.fountain_options.smooth_options.dash_gap),
+        }
+    }
+
+    /// Sets the length of a dash of the current brush style's line, in stroke widths.
+    pub fn update_dash_length(&mut self, dash_length: f64) {
+        match &mut self.style {
+            BrushStyle::Marker => self.marker_options.update_dash_length(dash_length),
+            BrushStyle::Solid => self.solid_options.update_dash_length(dash_length),
+            BrushStyle::Textured => (),
+            BrushStyle::Fountain => self.fountain_options.update_dash_length(dash_length),
+        }
+    }
+
+    /// Sets the space between two dashes or two dots of the current brush style's line, in stroke
+    /// widths.
+    pub fn update_dash_gap(&mut self, dash_gap: f64) {
+        match &mut self.style {
+            BrushStyle::Marker => self.marker_options.update_dash_gap(dash_gap),
+            BrushStyle::Solid => self.solid_options.update_dash_gap(dash_gap),
+            BrushStyle::Textured => (),
+            BrushStyle::Fountain => self.fountain_options.update_dash_gap(dash_gap),
+        }
+    }
+
     /// The width a stroke of the current brush style is drawn with at the given pen pressure.
     ///
     /// This is what the stroke is made of: it is as wide as this at every point, for the pressure
@@ -470,9 +513,9 @@ mod tests {
     #[test]
     fn a_line_style_belongs_to_the_brush_style_that_is_current() {
         let mut config = solid_config(PressureCurve::Const);
-        config.update_line_style(LineStyle::DashedEquidistant);
+        config.update_line_style(LineStyle::Dashed);
 
-        assert_eq!(config.line_style(), Some(LineStyle::DashedEquidistant));
+        assert_eq!(config.line_style(), Some(LineStyle::Dashed));
         assert_eq!(
             config.marker_options.line_style,
             LineStyle::Solid,
@@ -486,11 +529,11 @@ mod tests {
             config.fountain_options.smooth_options.line_style,
             LineStyle::Dotted
         );
-        assert_eq!(config.solid_options.line_style, LineStyle::DashedEquidistant);
+        assert_eq!(config.solid_options.line_style, LineStyle::Dashed);
 
         // A textured stroke is a texture, not a line, so it has no line style to set.
         config.style = BrushStyle::Textured;
-        config.update_line_style(LineStyle::DashedWide);
+        config.update_line_style(LineStyle::Dotted);
 
         assert_eq!(config.line_style(), None);
     }

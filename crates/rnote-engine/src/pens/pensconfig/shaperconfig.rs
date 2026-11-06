@@ -7,7 +7,7 @@ use rnote_compose::Style;
 use rnote_compose::builders::ShapeBuilderType;
 use rnote_compose::constraints::ConstraintRatio;
 use rnote_compose::style::rough::RoughOptions;
-use rnote_compose::style::smooth::SmoothOptions;
+use rnote_compose::style::smooth::{LineStyle, SmoothOptions};
 use serde::{Deserialize, Serialize};
 
 #[derive(
@@ -155,6 +155,52 @@ impl ShaperConfig {
     pub const AXIS_TICK_FONT_SIZE_DEFAULT: f64 = 12.0;
     pub const AXIS_ARROW_SIZE_DEFAULT: f64 = 5.0;
 
+    /// Whether the current shaper style has a line style at all.
+    ///
+    /// A rough style is a sketch, not a line, and the axes of a graph are always solid.
+    pub fn has_line_style(&self) -> bool {
+        matches!(self.style, ShaperStyle::Smooth) && !self.builder_type.is_coord_system()
+    }
+
+    /// The line style of the current shaper style, if it has one.
+    pub fn line_style(&self) -> Option<LineStyle> {
+        self.has_line_style()
+            .then_some(self.smooth_options.line_style)
+    }
+
+    /// Sets the line style of new shapes.
+    pub fn update_line_style(&mut self, line_style: LineStyle) {
+        if self.has_line_style() {
+            self.smooth_options.update_line_style(line_style);
+        }
+    }
+
+    /// The length of a dash of the current shaper style's line, if it has one.
+    pub fn dash_length(&self) -> Option<f64> {
+        self.has_line_style()
+            .then_some(self.smooth_options.dash_length)
+    }
+
+    /// The space between two dashes or two dots of the current shaper style's line, if it has one.
+    pub fn dash_gap(&self) -> Option<f64> {
+        self.has_line_style()
+            .then_some(self.smooth_options.dash_gap)
+    }
+
+    /// Sets the length of a dash of new shapes, in stroke widths.
+    pub fn update_dash_length(&mut self, dash_length: f64) {
+        if self.has_line_style() {
+            self.smooth_options.update_dash_length(dash_length);
+        }
+    }
+
+    /// Sets the space between two dashes or two dots of new shapes, in stroke widths.
+    pub fn update_dash_gap(&mut self, dash_gap: f64) {
+        if self.has_line_style() {
+            self.smooth_options.update_dash_gap(dash_gap);
+        }
+    }
+
     /// The look of the unit markings of new coordinate systems.
     pub fn axis_ticks_style(&self) -> AxisTicksStyle {
         AxisTicksStyle {
@@ -232,6 +278,10 @@ impl ShaperConfig {
         match &self.style {
             ShaperStyle::Smooth => {
                 let mut options = self.smooth_options.clone();
+                // The axes of a graph are solid, whatever the line style for the other shapes is.
+                if self.builder_type.is_coord_system() {
+                    options.update_line_style(LineStyle::Solid);
+                }
                 if self.highlight_mode {
                     if let Some(ref mut color) = options.stroke_color {
                         color.a = self.highlight_opacity;

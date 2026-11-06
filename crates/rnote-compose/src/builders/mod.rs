@@ -116,6 +116,14 @@ impl ShapeBuilderType {
         }
     }
 
+    /// Whether the builder draws the axes of a coordinate system, a graph.
+    pub fn is_coord_system(self) -> bool {
+        matches!(
+            self,
+            Self::CoordSystem2D | Self::CoordSystem3D | Self::QuadrantCoordSystem2D
+        )
+    }
+
     /// Converts a shape builder type into the icon name that represents it.
     pub fn to_icon_name(self) -> String {
         match self {
