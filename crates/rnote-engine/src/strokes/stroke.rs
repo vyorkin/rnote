@@ -111,6 +111,20 @@ impl Drawable for Stroke {
     }
 }
 
+impl crate::drawable::DrawableOnDoc for Stroke {
+    fn bounds_on_doc(&self, _engine_view: &crate::engine::EngineView) -> Option<Aabb> {
+        Some(self.bounds())
+    }
+
+    fn draw_on_doc(
+        &self,
+        cx: &mut piet_cairo::CairoRenderContext,
+        engine_view: &crate::engine::EngineView,
+    ) -> anyhow::Result<()> {
+        self.draw(cx, engine_view.camera.image_scale())
+    }
+}
+
 impl Shapeable for Stroke {
     fn bounds(&self) -> Aabb {
         match self {

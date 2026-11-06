@@ -487,12 +487,54 @@ impl StrokeStore {
         }
     }
 
-    /// Draw all strokes on the gtk snapshot.
+    /// Draw the geometry of the given strokes as a vector preview and drop their images until the
+    /// transform ends.
+    ///
+    /// While a stroke is dragged, every step would otherwise need a full rasterization of its
+    /// images. The geometry is drawn directly instead, which follows the pen exactly, and the
+    /// images are regenerated once when the drag ends (their state is marked dirty here, so the
+    /// next regeneration in viewport picks them up).
+    pub(crate) fn set_previewing(&mut self, keys: &[StrokeKey], previewing: bool) {
+        for &key in keys {
+            if previewing {
+                self.preview_keys.insert(key);
+            } else if self.preview_keys.remove(&key) {
+                if let Some(render_comp) = self.render_components.get_mut(key) {
+                    render_comp.state = RenderCompState::Dirty;
+                }
+            }
+        }
+    }
+
+    /// End all vector previews, e.g. when the pen that started one is left mid-drag.
+    ///
+    /// The images of the affected strokes are marked dirty, so the next regeneration picks them up.
+    pub(crate) fn end_all_previews(&mut self) {
+        for key in std::mem::take(&mut self.preview_keys) {
+            if let Some(render_comp) = self.render_components.get_mut(key) {
+                render_comp.state = RenderCompState::Dirty;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_is_previewing(&self, key: StrokeKey) -> bool {
+        self.preview_keys.contains(&key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_image_pixels(&self, key: StrokeKey) -> Option<(u32, u32)> {
+        self.render_components
+            .get(key)
+            .and_then(|rc| rc.images.first().map(|i| (i.pixel_width, i.pixel_height)))
+    }
+
     #[cfg(feature = "ui")]
     pub(crate) fn draw_stroke_key_to_gtk_snapshot(
         &self,
         snapshot: &gtk4::Snapshot,
         key: StrokeKey,
+        engine_view: &crate::engine::EngineView,
     ) {
         use crate::ext::{GdkRGBAExt, GrapheneRectExt};
         use gtk4::{gdk, graphene, prelude::*};
@@ -501,6 +543,17 @@ impl StrokeStore {
         if let Some(stroke) = self.stroke_components.get(key)
             && let Some(render_comp) = self.render_components.get(key)
         {
+            // A stroke being dragged is drawn from its geometry: it follows the pen exactly, and
+            // it avoids rasterizing its images for every step of the drag.
+            if self.preview_keys.contains(&key) {
+                use crate::drawable::DrawableOnDoc;
+
+                if let Err(e) = stroke.draw_on_doc_to_gtk_snapshot(snapshot, engine_view) {
+                    error!("Drawing stroke preview to gtk snapshot failed, Err: {e:?}");
+                }
+                return;
+            }
+
             // if the stroke currently does not have a rendering and is will create one,
             // draw a placeholder filled rect
             if render_comp.rendernodes.is_empty()

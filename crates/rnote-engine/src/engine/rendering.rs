@@ -195,7 +195,8 @@ impl Engine {
 
         // bottom image in blend (regular content)
         for &key in non_highlighter_keys.iter() {
-            self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
+            self.store
+                .draw_stroke_key_to_gtk_snapshot(snapshot, key, &engine_view!(self));
         }
 
         // top image in blend (highlighter layer). The whole layer is blended once,
@@ -204,7 +205,8 @@ impl Engine {
             snapshot.push_blend(gtk4::gsk::BlendMode::Multiply);
 
             for &key in highlighter_keys.iter() {
-                self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
+                self.store
+                    .draw_stroke_key_to_gtk_snapshot(snapshot, key, &engine_view!(self));
             }
 
             snapshot.pop();

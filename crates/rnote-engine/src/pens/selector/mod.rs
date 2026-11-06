@@ -51,7 +51,6 @@ pub(super) enum ModifyState {
         from_corner: ResizeCorner,
         start_bounds: Aabb,
         start_pos: Vector2,
-        last_rendered_bounds: Aabb,
     },
 }
 
@@ -110,6 +109,9 @@ impl PenBehaviour for Selector {
 
     fn update_state(&mut self, engine_view: &mut EngineViewMut) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
+
+        // a drag that was left without an Up event must not keep its strokes in vector preview
+        engine_view.store.end_all_previews();
 
         let selection = engine_view.store.selection_keys_as_rendered();
 
@@ -830,4 +832,125 @@ fn cancel_selection(selection: &[StrokeKey], engine_view: &mut EngineViewMut) ->
     widget_flags.store_modified = true;
     widget_flags.resize = true;
     widget_flags
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Engine;
+    use crate::pens::{PenMode, PenStyle};
+    use crate::strokes::{ShapeStroke, Stroke};
+    use p2d::glamx::DAffine2;
+    use p2d::math::Vector2;
+    use rnote_compose::penevent::PenEvent;
+    use rnote_compose::penpath::Element;
+    use rnote_compose::shapes::{Ellipse, Shape};
+    use rnote_compose::style::Style;
+    use rnote_compose::style::smooth::SmoothOptions;
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    /// The resize nodes sit just outside the selection bounds, hence the offset.
+    fn resize_node(corner: Vector2) -> Vector2 {
+        corner + Vector2::splat(6.)
+    }
+
+    fn pen_event_down(pos: Vector2) -> PenEvent {
+        PenEvent::Down {
+            element: Element::new(pos, Element::PRESSURE_DEFAULT),
+            modifier_keys: HashSet::new(),
+        }
+    }
+
+    fn pen_event_up(pos: Vector2) -> PenEvent {
+        PenEvent::Up {
+            element: Element::new(pos, Element::PRESSURE_DEFAULT),
+            modifier_keys: HashSet::new(),
+        }
+    }
+
+    /// A resized stroke follows the pen from its geometry: its images are rasterized once, when the
+    /// drag ends, not on every step of it - a stroke of a few hundred doc units would otherwise
+    /// rasterize a surface of its size for each step, which is what made resizing large shapes lag.
+    #[test]
+    fn a_resize_drag_keeps_the_stroke_images_until_it_ends() {
+        let mut engine = Engine::default();
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+        let _ = engine.change_pen_style(PenStyle::Selector);
+
+        let stroke = ShapeStroke::new(
+            Shape::Ellipse(Ellipse {
+                radii: Vector2::splat(225.),
+                affine: DAffine2::from_translation(Vector2::new(400., 300.)),
+            }),
+            Style::Smooth(SmoothOptions::default()),
+        );
+        let key = engine.store.insert_stroke(Stroke::ShapeStroke(stroke), None);
+        engine.store.regenerate_rendering_for_strokes(
+            &[key],
+            engine.camera.viewport(),
+            engine.camera.image_scale(),
+        );
+        engine.store.set_selected(key, true);
+        let _ = engine.current_pen_update_state();
+
+        let bounds = engine
+            .store
+            .bounds_for_strokes(&[key])
+            .expect("the stroke has bounds");
+        let images_before = engine.store.debug_image_pixels(key);
+        assert!(
+            images_before.is_some(),
+            "the stroke is rendered before the drag"
+        );
+
+        let now = Instant::now();
+        let corner = resize_node(bounds.maxs);
+        let _ = engine.handle_pen_event(pen_event_down(corner), Some(PenMode::Pen), now);
+        // the drag grows the stroke well past the 1.5x extents at which the images used to be
+        // rasterized mid-drag
+        for step in 1..=20 {
+            let pos = corner + Vector2::splat(20. * step as f64);
+            let _ = engine.handle_pen_event(
+                pen_event_down(pos),
+                Some(PenMode::Pen),
+                now + Duration::from_millis(16 * step),
+            );
+        }
+
+        assert_eq!(
+            engine.store.debug_image_pixels(key),
+            images_before,
+            "no step of the drag rasterizes the stroke"
+        );
+        assert!(
+            engine.store.debug_is_previewing(key),
+            "the dragged stroke is drawn from its geometry"
+        );
+        assert!(
+            engine
+                .store
+                .bounds_for_strokes(&[key])
+                .expect("the stroke has bounds")
+                .extents()[0]
+                > bounds.extents()[0],
+            "the stroke follows the pen while its images stay as they were"
+        );
+
+        let last = corner + Vector2::splat(400.);
+        let _ = engine.handle_pen_event(
+            pen_event_up(last),
+            Some(PenMode::Pen),
+            now + Duration::from_millis(200),
+        );
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends with the drag"
+        );
+        assert_ne!(
+            engine.store.render_comp_state(key),
+            Some(crate::store::render_comp::RenderCompState::Complete),
+            "the images are regenerated when the drag ends"
+        );
+    }
 }

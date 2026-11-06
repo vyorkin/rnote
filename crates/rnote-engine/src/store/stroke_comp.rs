@@ -433,6 +433,13 @@ impl StrokeStore {
             if let Some(render_comp) = self.render_components.get_mut(key) {
                 render_comp.state = RenderCompState::Dirty;
 
+                // while previewing, the stroke is drawn from its geometry and its images are
+                // regenerated once the transform ended - recreating the textures here would cost
+                // an image upload per step of the drag
+                if self.preview_keys.contains(&key) {
+                    return;
+                }
+
                 for image in render_comp.images.iter_mut() {
                     image.scale(scale);
                 }
@@ -668,19 +675,6 @@ impl StrokeStore {
                 },
             ),
         ))
-    }
-
-    pub(crate) fn filter_keys_intersecting_bounds<'a, I: IntoIterator<Item = &'a StrokeKey>>(
-        &'a self,
-        keys: I,
-        bounds: Aabb,
-    ) -> impl Iterator<Item = &'a StrokeKey> {
-        keys.into_iter().filter(move |key| {
-            self.stroke_components
-                .get(**key)
-                .map(|s| s.bounds().intersects(&bounds))
-                .unwrap_or(false)
-        })
     }
 
     pub(crate) fn fetch_stroke_content(&self, keys: &[StrokeKey]) -> StrokeContent {

@@ -132,7 +132,6 @@ impl Selector {
                                 from_corner: ResizeCorner::TopLeft,
                                 start_bounds: *selection_bounds,
                                 start_pos: element.pos,
-                                last_rendered_bounds: *selection_bounds,
                             }
                         } else if Self::resize_node_bounds(
                             ResizeCorner::TopRight,
@@ -145,7 +144,6 @@ impl Selector {
                                 from_corner: ResizeCorner::TopRight,
                                 start_bounds: *selection_bounds,
                                 start_pos: element.pos,
-                                last_rendered_bounds: *selection_bounds,
                             }
                         } else if Self::resize_node_bounds(
                             ResizeCorner::BottomLeft,
@@ -158,7 +156,6 @@ impl Selector {
                                 from_corner: ResizeCorner::BottomLeft,
                                 start_bounds: *selection_bounds,
                                 start_pos: element.pos,
-                                last_rendered_bounds: *selection_bounds,
                             }
                         } else if Self::resize_node_bounds(
                             ResizeCorner::BottomRight,
@@ -171,7 +168,6 @@ impl Selector {
                                 from_corner: ResizeCorner::BottomRight,
                                 start_bounds: *selection_bounds,
                                 start_pos: element.pos,
-                                last_rendered_bounds: *selection_bounds,
                             }
                         } else if engine_view.config.pens_config.selector_config.style
                             == SelectorStyle::Single
@@ -292,8 +288,11 @@ impl Selector {
                         from_corner,
                         start_bounds,
                         start_pos,
-                        last_rendered_bounds,
                     } => {
+                        // The selection follows the pen as a vector preview; its images are
+                        // regenerated once, when the resize ends.
+                        engine_view.store.set_previewing(selection, true);
+
                         let lock_aspectratio = engine_view
                             .config
                             .pens_config
@@ -366,32 +365,6 @@ impl Selector {
                         widget_flags |= engine_view
                             .document
                             .expand_autoexpand(engine_view.camera, engine_view.store);
-
-                        // Rerender but based on some conditions
-                        const RERENDER_BOUNDS_FACTOR: f64 = 1.5;
-                        let last_rendered_bounds_scale =
-                            selection_bounds.extents() / last_rendered_bounds.extents();
-
-                        if last_rendered_bounds_scale[0] < 1. / RERENDER_BOUNDS_FACTOR
-                            || last_rendered_bounds_scale[0] > RERENDER_BOUNDS_FACTOR
-                            || last_rendered_bounds_scale[1] < 1. / RERENDER_BOUNDS_FACTOR
-                            || last_rendered_bounds_scale[1] > RERENDER_BOUNDS_FACTOR
-                        {
-                            let selection_in_viewport: Vec<StrokeKey> = engine_view
-                                .store
-                                .filter_keys_intersecting_bounds::<&Vec<StrokeKey>>(
-                                    selection,
-                                    engine_view.camera.viewport(),
-                                )
-                                .copied()
-                                .collect();
-                            engine_view.store.regenerate_rendering_for_strokes(
-                                &selection_in_viewport,
-                                engine_view.camera.viewport(),
-                                engine_view.camera.image_scale(),
-                            );
-                            *last_rendered_bounds = *selection_bounds;
-                        }
                     }
                 }
 
@@ -506,6 +479,9 @@ impl Selector {
                     ModifyState::Translate { .. }
                     | ModifyState::Rotate { .. }
                     | ModifyState::Resize { .. } => {
+                        // the drag is over: the strokes are drawn from their images again,
+                        // which are regenerated below
+                        engine_view.store.set_previewing(selection, false);
                         engine_view.store.update_geometry_for_strokes(selection);
                         widget_flags |= engine_view
                             .document
@@ -770,6 +746,7 @@ impl Selector {
                 }
             }
             SelectorState::ModifySelection { selection, .. } => {
+                engine_view.store.set_previewing(selection, false);
                 widget_flags |= super::cancel_selection(selection, engine_view);
                 self.state = SelectorState::Idle;
                 EventResult {

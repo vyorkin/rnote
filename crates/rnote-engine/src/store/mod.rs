@@ -21,7 +21,7 @@ use crate::strokes::Stroke;
 use rnote_compose::shapes::Shapeable;
 use serde::{Deserialize, Serialize};
 use slotmap::{SecondaryMap, SlotMap};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::debug;
@@ -86,6 +86,13 @@ pub struct StrokeStore {
     chrono_counter: u32,
     #[serde(skip)]
     render_components: SecondaryMap<StrokeKey, RenderComponent>,
+    /// Strokes that are being transformed and are drawn as a vector preview instead of their
+    /// cached images until the transform ends.
+    ///
+    /// Reserving their images costs a full rasterization per step, so during a drag the geometry is
+    /// drawn directly and the images are only regenerated once, when the drag ends.
+    #[serde(skip)]
+    preview_keys: HashSet<StrokeKey>,
     #[serde(skip)]
     history: VecDeque<HistoryEntry>,
     /// The index of the current live document in the history stack.
@@ -106,6 +113,7 @@ impl Default for StrokeStore {
             selection_components: Arc::new(SecondaryMap::new()),
             chrono_components: Arc::new(SecondaryMap::new()),
             render_components: SecondaryMap::new(),
+            preview_keys: HashSet::new(),
 
             // Start off with state in the history
             history: VecDeque::from(vec![HistoryEntry::default()]),
@@ -364,6 +372,7 @@ impl StrokeStore {
         let widget_flags = self.clear_history(HistoryEntry::default());
 
         self.render_components.clear();
+        self.preview_keys.clear();
         self.key_tree.clear();
 
         widget_flags
