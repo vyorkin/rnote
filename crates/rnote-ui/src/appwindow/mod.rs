@@ -265,6 +265,10 @@ impl RnAppWindow {
         imp.sidebar.get().init(self);
         imp.main_header.get().init(self);
 
+        // Keep every popover inside the window: a pen tablet mapped onto the
+        // window cannot reach one that hangs over its edge.
+        crate::popover_confine::confine_tree(self);
+
         // actions and settings AFTER widget inits
         self.setup_icon_theme();
         self.setup_actions();

@@ -1320,6 +1320,8 @@ impl RnOverlays {
                 let canvaswrapper = page.child().downcast::<RnCanvasWrapper>().unwrap();
                 canvaswrapper.init_reconnect(&appwindow);
                 canvaswrapper.connect_to_tab_page(page);
+                // A tab carries its own popovers (the canvas context menu).
+                crate::popover_confine::confine_tree(&canvaswrapper);
                 let widget_flags = canvaswrapper.canvas().engine_mut().set_active(true);
                 appwindow.handle_widget_flags(widget_flags, &canvaswrapper.canvas());
             }

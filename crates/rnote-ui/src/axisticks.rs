@@ -199,6 +199,7 @@ pub(crate) fn show_axis_ticks_popover(appwindow: &RnAppWindow, canvas: &RnCanvas
         .autohide(true)
         .build();
     popover.set_parent(canvas);
+    crate::popover_confine::confine(&popover);
 
     // Every control applies all of them, so the coordinate system always shows what they say
     let controls = Rc::new(Controls {

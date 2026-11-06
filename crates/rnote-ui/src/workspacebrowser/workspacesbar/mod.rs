@@ -344,6 +344,7 @@ impl RnWorkspacesBar {
                     let entry = obj.to_owned().downcast::<RnWorkspaceListEntry>().unwrap();
                     let workspacerow = RnWorkspaceRow::new(&entry);
                     workspacerow.init(&appwindow);
+                    crate::popover_confine::confine_tree(&workspacerow);
 
                     let entry_expr = ConstantExpression::new(&entry);
                     entry_expr.bind(&workspacerow, "entry", None::<&glib::Object>);

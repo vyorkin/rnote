@@ -427,6 +427,7 @@ pub(crate) async fn dialog_edit_selected_workspace(appwindow: &RnAppWindow) {
         (String::from(config::APP_IDPATH) + "ui/dialogs/dialogs.ui").as_str(),
     );
     let dialog: adw::Dialog = builder.object("dialog_edit_selected_workspace").unwrap();
+    crate::popover_confine::confine_tree(&dialog);
     let preview_row: RnWorkspaceRow = builder
         .object("edit_selected_workspace_preview_row")
         .unwrap();

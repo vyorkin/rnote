@@ -376,6 +376,7 @@ fn create_files_list_row_factory(appwindow: &RnAppWindow) -> SignalListItemFacto
 
             let filerow = RnFileRow::new();
             filerow.init(&appwindow);
+            crate::popover_confine::confine_tree(&filerow);
             list_item.set_child(Some(&filerow));
 
             let list_item_expr = ConstantExpression::new(list_item);
