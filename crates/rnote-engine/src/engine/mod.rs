@@ -528,7 +528,17 @@ impl Engine {
             .change_style_override(new_style_override, &mut engine_view_mut!(self))
     }
 
-    /// Temporarily change the pen style while a key is held (e.g. Shift for the lasso).
+    /// Whether the store holds a selection, whichever pen made it.
+    pub fn has_selection(&self) -> bool {
+        !self.store.selection_keys_as_rendered().is_empty()
+    }
+
+    /// Whether a stroke is down, i.e. its selection comes only once it is finished.
+    pub fn pen_state_down(&self) -> bool {
+        self.penholder.pen_state_down()
+    }
+
+    /// Temporarily change the pen style while a key is held (e.g. `Ctrl`+`C` for the lasso).
     ///
     /// A change that arrives while the pen is down waits for the stroke to finish, so
     /// the stroke is neither cancelled nor drawn with the wrong pen.

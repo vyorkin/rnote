@@ -1069,32 +1069,7 @@ impl RnAppWindow {
         // Clipboard copy
         action_clipboard_copy.connect_activate(clone!(#[weak(rename_to=appwindow)] self, move |_, _| {
             glib::spawn_future_local(clone!(#[weak] appwindow, async move {
-                let Some(canvas) = appwindow.active_tab_canvas()
-                else {
-                    return;
-                };
-                let receiver = canvas.engine_ref().fetch_clipboard_content();
-                let (content, widget_flags) = match receiver.await {
-                    Ok(Ok((content, widget_flags))) => (content,widget_flags),
-                    Ok(Err(e)) => {
-                        error!("Fetching clipboard content failed in clipboard-copy action, Err: {e:?}");
-                        return;
-                    }
-                    Err(e) => {
-                        error!("Awaiting fetched clipboard content failed in clipboard-copy action, Err: {e:?}");
-                        return;
-                    }
-                };
-
-                let gdk_content_provider = gdk::ContentProvider::new_union(content.into_iter().map(|(data, mime_type)| {
-                    gdk::ContentProvider::for_bytes(mime_type.as_str(), &glib::Bytes::from_owned(data))
-                }).collect::<Vec<gdk::ContentProvider>>().as_slice());
-
-                if let Err(e) = appwindow.clipboard().set_content(Some(&gdk_content_provider)) {
-                    error!("Set appwindow clipboard content failed in clipboard-copy action, Err: {e:?}");
-                }
-
-                appwindow.handle_widget_flags(widget_flags, &canvas);
+                appwindow.copy_clipboard_content().await;
             }));
         }));
 
@@ -1261,6 +1236,47 @@ impl RnAppWindow {
         if config::PROFILE.to_lowercase().as_str() == "devel" {
             app.set_accels_for_action("win.visual-debug", &["<Ctrl><Shift>v"]);
         }
+    }
+
+    /// Put what the active pen can copy into the clipboard.
+    ///
+    /// The content is read before anything else happens, so a caller may release a
+    /// held key (and the selection with it) once this returns.
+    pub(crate) async fn copy_clipboard_content(&self) {
+        let Some(canvas) = self.active_tab_canvas() else {
+            return;
+        };
+        let receiver = canvas.engine_ref().fetch_clipboard_content();
+        let (content, widget_flags) = match receiver.await {
+            Ok(Ok((content, widget_flags))) => (content, widget_flags),
+            Ok(Err(e)) => {
+                error!("Fetching clipboard content failed in clipboard-copy action, Err: {e:?}");
+                return;
+            }
+            Err(e) => {
+                error!("Awaiting fetched clipboard content failed in clipboard-copy action, Err: {e:?}");
+                return;
+            }
+        };
+
+        let gdk_content_provider = gdk::ContentProvider::new_union(
+            content
+                .into_iter()
+                .map(|(data, mime_type)| {
+                    gdk::ContentProvider::for_bytes(
+                        mime_type.as_str(),
+                        &glib::Bytes::from_owned(data),
+                    )
+                })
+                .collect::<Vec<gdk::ContentProvider>>()
+                .as_slice(),
+        );
+
+        if let Err(e) = self.clipboard().set_content(Some(&gdk_content_provider)) {
+            error!("Set appwindow clipboard content failed in clipboard-copy action, Err: {e:?}");
+        }
+
+        self.handle_widget_flags(widget_flags, &canvas);
     }
 
     fn clipboard_paste(&self, target_pos: Option<Vector2>) {

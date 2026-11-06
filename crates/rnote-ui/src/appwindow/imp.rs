@@ -557,10 +557,14 @@ impl RnAppWindow {
         ));
         obj.add_controller(space_pan_controller);
 
-        // Shift held gives the lasso (the selector) without switching the tool for
-        // good: the style is a hold layer that disappears on the release. A change
-        // that arrives in the middle of a stroke waits for the stroke to end, so the
-        // stroke is neither cancelled nor drawn with the wrong pen.
+        // `Ctrl`+`C` held gives the lasso (the selector) without switching the tool for
+        // good: the style is a hold layer that disappears when `Ctrl` is released. A
+        // change that arrives in the middle of a stroke waits for the stroke to end, so
+        // the stroke is neither cancelled nor drawn with the wrong pen. What the lasso
+        // selected is copied when the hold ends, so the clipboard still gets the
+        // selection this key is known for; `Ctrl`+`C` pressed on an already selected
+        // selector copies at once, as it always did.
+        let lasso_hold = Rc::new(Cell::new(false));
         let lasso_hold_controller = EventControllerKey::builder()
             .name("lasso_hold_controller")
             .propagation_phase(PropagationPhase::Capture)
@@ -568,25 +572,40 @@ impl RnAppWindow {
         lasso_hold_controller.connect_key_pressed(clone!(
             #[weak(rename_to=appwindow)]
             obj,
+            #[strong]
+            lasso_hold,
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |_, key, _, modifiers| {
-                let blocking_modifiers = gdk::ModifierType::CONTROL_MASK
-                    | gdk::ModifierType::ALT_MASK
-                    | gdk::ModifierType::SUPER_MASK
-                    | gdk::ModifierType::HYPER_MASK
-                    | gdk::ModifierType::META_MASK;
-
-                if !matches!(key, gdk::Key::Shift_L | gdk::Key::Shift_R)
-                    || !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
-                    || modifiers.intersects(blocking_modifiers)
+                if !modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+                    || !matches!(key.to_unicode(), Some('c' | 'C'))
                 {
                     return glib::Propagation::Proceed;
                 }
 
-                // Shift selects text there. The typewriter's text box keeps focus on
+                // A text entry copies its text. The typewriter's text box keeps focus on
                 // the canvas, so its state is checked separately.
                 if focus_is_text_input(&appwindow) {
+                    return glib::Propagation::Proceed;
+                }
+
+                // The selector is already the current pen and holds a selection: this is
+                // the ordinary copy, not a request for the lasso.
+                let copies_selection = appwindow.active_tab_canvas().is_some_and(|canvas| {
+                    let engine = canvas.engine_ref();
+                    engine.current_pen_style_w_override() == PenStyle::Selector
+                        && engine.has_selection()
+                });
+                if copies_selection {
+                    if gtk4::prelude::WidgetExt::activate_action(
+                        &appwindow,
+                        "win.clipboard-copy",
+                        None,
+                    )
+                    .is_ok()
+                    {
+                        return glib::Propagation::Stop;
+                    }
                     return glib::Propagation::Proceed;
                 }
 
@@ -597,17 +616,41 @@ impl RnAppWindow {
                         .change_pen_style_hold(Some(PenStyle::Selector));
                     appwindow.handle_widget_flags(widget_flags, &canvas);
                 }
-                glib::Propagation::Proceed
+                lasso_hold.set(true);
+                glib::Propagation::Stop
             }
         ));
         lasso_hold_controller.connect_key_released(clone!(
             #[weak(rename_to=appwindow)]
             obj,
-            move |_, key, _, modifiers| {
-                // Releasing one Shift while the other is still held keeps the lasso.
-                if !matches!(key, gdk::Key::Shift_L | gdk::Key::Shift_R)
-                    || modifiers.contains(gdk::ModifierType::SHIFT_MASK)
-                {
+            #[strong]
+            lasso_hold,
+            move |_, key, _, _| {
+                if !matches!(key, gdk::Key::Control_L | gdk::Key::Control_R) || !lasso_hold.get() {
+                    return;
+                }
+                lasso_hold.set(false);
+
+                // The lasso is copied as the hold ends, because this very chord no longer
+                // reaches the copy action. A stroke still down copies nothing: its
+                // selection only exists once it is finished.
+                let lasso_selection = appwindow.active_tab_canvas().is_some_and(|canvas| {
+                    let engine = canvas.engine_ref();
+                    !engine.pen_state_down() && engine.has_selection()
+                });
+                if lasso_selection {
+                    // The copy reads the selection from the pen, so the hold is released
+                    // only once it is in the clipboard. Dropping it first reinstalls the
+                    // pen and drops the selection.
+                    glib::spawn_future_local(clone!(#[weak] appwindow, async move {
+                        appwindow.copy_clipboard_content().await;
+
+                        for wrapper in appwindow.get_all_tabs() {
+                            let canvas = wrapper.canvas();
+                            let widget_flags = canvas.engine_mut().change_pen_style_hold(None);
+                            appwindow.handle_widget_flags(widget_flags, &canvas);
+                        }
+                    }));
                     return;
                 }
 
@@ -621,15 +664,18 @@ impl RnAppWindow {
         obj.add_controller(lasso_hold_controller);
 
         // A Space held while the window is left has no release delivered here, so the
-        // flag would stay set and the next drag would pan unexpectedly. A held Shift
+        // flag would stay set and the next drag would pan unexpectedly. A held `Ctrl`+`C`
         // has the same problem: its release goes to the newly focused window.
         obj.connect_notify_local(
             Some("is-active"),
             clone!(
                 #[weak(rename_to=appwindow)]
                 obj,
+                #[strong]
+                lasso_hold,
                 move |obj, _| {
                     if !obj.is_active() {
+                        lasso_hold.set(false);
                         for wrapper in appwindow.get_all_tabs() {
                             let canvas = wrapper.canvas();
                             canvas.set_space_pan_held(false);

@@ -125,6 +125,11 @@ impl PenHolder {
         self.progress
     }
 
+    /// Whether a stroke is down, i.e. its selection comes only once it is finished.
+    pub fn pen_state_down(&self) -> bool {
+        self.pen_state_down
+    }
+
     /// Whether the currently selected pen is handling text input.
     pub fn is_handling_text_input(&self) -> bool {
         match &self.current_pen {
@@ -187,7 +192,7 @@ impl PenHolder {
         widget_flags
     }
 
-    /// Temporarily change the pen style while a key is held (e.g. Shift for the lasso).
+    /// Temporarily change the pen style while a key is held (e.g. `Ctrl`+`C` for the lasso).
     ///
     /// A change that arrives while the pen is down waits for the stroke to finish,
     /// so the stroke is neither cancelled nor drawn with the wrong pen.
@@ -802,6 +807,10 @@ mod tests {
             None,
             "the held-key style is pending until the stroke ends"
         );
+        assert!(
+            engine.pen_state_down(),
+            "the stroke is down until its `Up` arrives"
+        );
 
         let _ = engine.handle_pen_event(
             PenEvent::Up {
@@ -816,6 +825,10 @@ mod tests {
             engine.current_pen_style_w_override(),
             PenStyle::Selector,
             "the held-key style applies when the stroke ends"
+        );
+        assert!(
+            !engine.pen_state_down(),
+            "the stroke is finished once its `Up` arrived"
         );
     }
 
