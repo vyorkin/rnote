@@ -86,6 +86,14 @@ impl StrokeStore {
         }
     }
 
+    /// Returns the layer of the stroke, in which it is drawn.
+    pub(crate) fn stroke_layer(&self, key: StrokeKey) -> StrokeLayer {
+        self.chrono_components
+            .get(key)
+            .map(|chrono_comp| chrono_comp.layer)
+            .unwrap_or_default()
+    }
+
     /// Returns the keys in chronological order, as in first: gets drawn first, last: gets drawn last.
     pub(crate) fn keys_sorted_chrono(&self) -> Vec<StrokeKey> {
         let mut keys = self.stroke_components.keys().collect::<Vec<StrokeKey>>();

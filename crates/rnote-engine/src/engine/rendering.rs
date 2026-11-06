@@ -195,8 +195,7 @@ impl Engine {
 
         // bottom image in blend (regular content)
         for &key in non_highlighter_keys.iter() {
-            self.store
-                .draw_stroke_key_to_gtk_snapshot(snapshot, key, &engine_view!(self));
+            self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
         }
 
         // top image in blend (highlighter layer). The whole layer is blended once,
@@ -205,8 +204,7 @@ impl Engine {
             snapshot.push_blend(gtk4::gsk::BlendMode::Multiply);
 
             for &key in highlighter_keys.iter() {
-                self.store
-                    .draw_stroke_key_to_gtk_snapshot(snapshot, key, &engine_view!(self));
+                self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
             }
 
             snapshot.pop();
@@ -218,8 +216,12 @@ impl Engine {
         self.draw_origin_indicator_to_gtk_snapshot(snapshot)?;
 
         snapshot.restore();
+
+        self.store
+            .draw_previews_to_gtk_snapshot(snapshot, &engine_view!(self))?;
+
         /*
-               let cairo_cx = snapshot.append_cairo(&graphene::Rect::from_p2d_aabb(surface_bounds));
+           let cairo_cx = snapshot.append_cairo(&graphene::Rect::from_p2d_aabb(surface_bounds));
                let mut piet_cx = piet_cairo::CairoRenderContext::new(&cairo_cx);
                piet_cx.transform(self.camera.transform().to_kurbo());
                self.store.draw_strokes_immediate(

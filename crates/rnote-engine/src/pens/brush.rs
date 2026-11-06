@@ -1343,105 +1343,48 @@ mod preview_draw {
     use gtk4::prelude::*;
     use p2d::bounding_volume::Aabb;
     use p2d::glamx::{DAffine2, DVec2};
-    use rnote_compose::ext::AabbExt;
     use rnote_compose::shapes::{Ellipse, Shape};
     use rnote_compose::style::Style;
     use rnote_compose::style::smooth::SmoothOptions;
 
-    /// The bounds on the surface that the preview of a dragged stroke is drawn into, with the
-    /// document scrolled to `center`, and the bounds the camera transform puts the stroke at.
-    fn preview_bounds_on_surface(center: Vector2) -> (Aabb, Aabb) {
+    const CANVAS_SIZE: Vector2 = Vector2::new(800., 600.);
+
+    /// An engine with the document scrolled to put `center` on the middle of the canvas, at `zoom`.
+    fn engine_with_view_of(center: Vector2, zoom: f64) -> Engine {
         let mut engine = Engine::default();
-        engine.document.width = 6000.;
-        engine.document.height = 6000.;
-        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+        engine.document.width = 12000.;
+        engine.document.height = 12000.;
+        let _ = engine.camera.set_size(CANVAS_SIZE);
+        let _ = engine.camera.zoom_to(zoom);
         let _ = engine
             .camera
-            .set_offset(center - Vector2::new(400., 300.), &engine.document);
-
-        let key = engine.store.insert_stroke(
-            Stroke::ShapeStroke(ShapeStroke::new(
-                Shape::Ellipse(Ellipse {
-                    radii: Vector2::splat(100.),
-                    affine: DAffine2::from_translation(center),
-                }),
-                Style::Smooth(SmoothOptions::default()),
-            )),
-            None,
-        );
-        engine.store.set_previewing(&[key], true);
-        let stroke = engine.store.get_stroke_arc(key).unwrap();
-
-        let expected = stroke
-            .bounds()
-            .clamp(None, Some(engine.camera.viewport()))
-            .scale(engine.camera.total_zoom())
-            .translate(-engine.camera.offset());
-
-        let snapshot = gtk4::Snapshot::new();
-        snapshot.save();
-        snapshot.transform(Some(&engine.camera.transform_for_gtk_snapshot()));
+            .set_offset(center * zoom - CANVAS_SIZE * 0.5, &engine.document);
         engine
-            .with_view_mut(|view| {
-                stroke.draw_on_doc_to_gtk_snapshot_in_camera_space(&snapshot, &view.as_im())
-            })
+    }
+
+    /// Renders the whole canvas, as the canvas widget does.
+    fn render_canvas(engine: &Engine) -> image::RgbaImage {
+        let bounds = Aabb::new(
+            DVec2::new(0., 0.),
+            DVec2::new(CANVAS_SIZE[0], CANVAS_SIZE[1]),
+        );
+        let snapshot = gtk4::Snapshot::new();
+        engine
+            .draw_to_gtk_snapshot(&snapshot, bounds, bounds)
             .unwrap();
-        snapshot.restore();
-        let drawn = snapshot.to_node().unwrap().bounds();
-        let drawn = Aabb::new(
-            DVec2::new(drawn.x() as f64, drawn.y() as f64),
-            DVec2::new(
-                (drawn.x() + drawn.width()) as f64,
-                (drawn.y() + drawn.height()) as f64,
-            ),
-        );
-
-        (drawn, expected)
+        let node = snapshot.to_node().expect("the canvas draws to a node");
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        renderer.realize(None).expect("the cairo renderer realizes");
+        let viewport = gtk4::graphene::Rect::new(0., 0., CANVAS_SIZE[0] as f32, CANVAS_SIZE[1] as f32);
+        let texture = renderer.render_texture(&node, Some(&viewport));
+        renderer.unrealize();
+        image::load_from_memory(&texture.save_to_png_bytes())
+            .expect("the rendered texture decodes")
+            .to_rgba8()
     }
 
-    /// A stroke being dragged is drawn from its geometry into the camera-transformed snapshot, so
-    /// it has to land where the camera puts the stroke, also when the document is scrolled far
-    /// from its origin.
-    #[gtk4::test]
-    fn a_preview_is_drawn_where_the_stroke_is_in_a_panned_document() {
-        let within_a_pixel = |a: &Aabb, b: &Aabb| {
-            (a.mins - b.mins).abs().max_element() < 1.0
-                && (a.maxs - b.maxs).abs().max_element() < 1.0
-        };
-
-        let (drawn, expected) = preview_bounds_on_surface(Vector2::new(400., 300.));
-        assert!(
-            within_a_pixel(&drawn, &expected),
-            "the preview is drawn where the camera puts the stroke: {drawn:?} != {expected:?}"
-        );
-
-        let (drawn, expected) = preview_bounds_on_surface(Vector2::new(2300., 5100.));
-        assert!(
-            within_a_pixel(&drawn, &expected),
-            "the preview follows the document instead of staying at its origin: \
-             {drawn:?} != {expected:?}"
-        );
-        assert!(
-            drawn.maxs.x <= 800. && drawn.maxs.y <= 600.,
-            "the panned preview lands on the surface: {drawn:?}"
-        );
-    }
-
-    /// An inserted image being resized is drawn from its pixels through the same snapshot, so the
-    /// content of a dragged image has to stay on screen while the drag goes on.
-    #[gtk4::test]
-    fn a_resized_image_preview_is_drawn_on_the_surface() {
-        let mut engine = Engine::default();
-        engine.document.width = 6000.;
-        engine.document.height = 6000.;
-        let _ = engine.camera.set_size(Vector2::new(800., 600.));
-
+    fn red_image_stroke(center: Vector2) -> Stroke {
         let size = Vector2::new(400., 160.);
-        let center = Vector2::new(2340., 5120.);
-        let _ = engine
-            .camera
-            .set_offset(center - Vector2::new(400., 300.), &engine.document);
-
         let mut png_bytes: Vec<u8> = Vec::new();
         image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
             20,
@@ -1453,40 +1396,81 @@ mod preview_draw {
             image::ImageFormat::Png,
         )
         .unwrap();
-        let image = crate::strokes::BitmapImage::from_image_bytes(
-            &png_bytes,
-            center - size * 0.5,
-            crate::strokes::resize::ImageSizeOption::ImposeSize(size),
+        Stroke::BitmapImage(
+            crate::strokes::BitmapImage::from_image_bytes(
+                &png_bytes,
+                center - size * 0.5,
+                crate::strokes::resize::ImageSizeOption::ImposeSize(size),
+            )
+            .unwrap(),
         )
-        .unwrap();
-        let key = engine.store.insert_stroke(Stroke::BitmapImage(image), None);
+    }
+
+    /// An inserted image being dragged is drawn from its own pixels, while the images of the
+    /// stroke itself are stale, so its content has to stay on screen where the camera puts it -
+    /// also when the view is zoomed and the document is scrolled away from its origin.
+    #[gtk4::test]
+    fn a_dragged_image_is_drawn_where_the_camera_puts_it() {
+        let center = Vector2::new(2340., 5120.);
+
+        for zoom in [1., 2., 0.5] {
+            let mut engine = engine_with_view_of(center, zoom);
+            let key = engine
+                .store
+                .insert_stroke(red_image_stroke(center), None);
+            engine.store.set_previewing(&[key], true);
+
+            let frame = render_canvas(&engine);
+            let pixel = frame.get_pixel(400, 300);
+            assert!(
+                pixel.0[0] == 255 && pixel.0[1] == 0 && pixel.0[2] == 0,
+                "the dragged image is drawn at zoom {zoom}, got {pixel:?}"
+            );
+        }
+    }
+
+    /// The preview of a dragged stroke follows the pen, so it is drawn at the geometry of the
+    /// stroke and not at the images of a previous size.
+    #[gtk4::test]
+    fn a_dragged_shape_is_drawn_at_its_geometry() {
+        let center = Vector2::new(2340., 5120.);
+        let zoom = 2.;
+        let radii = Vector2::splat(150.);
+
+        let mut engine = engine_with_view_of(center, zoom);
+        let key = engine.store.insert_stroke(
+            Stroke::ShapeStroke(ShapeStroke::new(
+                Shape::Ellipse(Ellipse {
+                    radii,
+                    affine: DAffine2::from_translation(center),
+                }),
+                Style::Smooth(SmoothOptions::default()),
+            )),
+            None,
+        );
         engine.store.set_previewing(&[key], true);
 
-        let snapshot = gtk4::Snapshot::new();
-        snapshot.save();
-        snapshot.transform(Some(&engine.camera.transform_for_gtk_snapshot()));
-        engine.with_view_mut(|view| {
-            let engine_view = view.as_im();
-            engine_view
-                .store
-                .draw_stroke_key_to_gtk_snapshot(&snapshot, key, &engine_view)
-        });
-        snapshot.restore();
+        let frame = render_canvas(&engine);
+        // the right extremum of the ellipse, where the camera puts it
+        let right = center + Vector2::new(radii[0], 0.);
+        let on_surface = (right * zoom
+            - (center * zoom - CANVAS_SIZE * 0.5))
+            .round();
+        let mut darkest = 255;
+        for dx in -2..=2 {
+            for dy in -2..=2 {
+                let px = frame.get_pixel(
+                    (on_surface[0] as i32 + dx) as u32,
+                    (on_surface[1] as i32 + dy) as u32,
+                );
+                darkest = darkest.min(px.0[0]).min(px.0[1]).min(px.0[2]);
+            }
+        }
 
-        let node = snapshot.to_node().expect("the snapshot holds the preview");
-        let renderer = gtk4::gsk::CairoRenderer::new();
-        renderer.realize(None).expect("the cairo renderer realizes");
-        let viewport = gtk4::graphene::Rect::new(0., 0., 800., 600.);
-        let texture = renderer.render_texture(&node, Some(&viewport));
-        renderer.unrealize();
-        let decoded = image::load_from_memory(&texture.save_to_png_bytes())
-            .expect("the rendered texture decodes")
-            .to_rgba8();
-
-        let center_pixel = decoded.get_pixel(400, 300);
         assert!(
-            center_pixel.0[3] > 0 && center_pixel.0[..3] == [255, 0, 0],
-            "the image is drawn where the camera puts it while it is resized, got {center_pixel:?}"
+            darkest < 64,
+            "the outline of the dragged shape is drawn at its geometry, \
+             the darkest pixel around {on_surface:?} is {darkest}"
         );
     }
 }

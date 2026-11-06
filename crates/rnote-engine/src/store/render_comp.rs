@@ -1,4 +1,5 @@
 // Imports
+use super::chrono_comp::StrokeLayer;
 use super::{Stroke, StrokeKey, StrokeStore};
 use crate::Drawable;
 use crate::Image;
@@ -529,12 +530,67 @@ impl StrokeStore {
             .and_then(|rc| rc.images.first().map(|i| (i.pixel_width, i.pixel_height)))
     }
 
+    /// Draws the geometry of the strokes being dragged, in surface coordinates.
+    ///
+    /// The snapshot must be untransformed: a cairo node draws its content in the coordinate space
+    /// of the snapshot it is appended to, while gsk places the node with the transform in effect,
+    /// so inside the camera transform the geometry is displaced and clipped away.
+    ///
+    /// The images of a dragged stroke are not regenerated while it is dragged (see
+    /// [Self::set_previewing]), this is what keeps the stroke, and e.g. an inserted image, on
+    /// screen during the drag.
+    #[cfg(feature = "ui")]
+    pub(crate) fn draw_previews_to_gtk_snapshot(
+        &self,
+        snapshot: &gtk4::Snapshot,
+        engine_view: &crate::engine::EngineView,
+    ) -> anyhow::Result<()> {
+        use crate::drawable::DrawableOnDoc;
+        use gtk4::prelude::*;
+
+        if self.preview_keys.is_empty() {
+            return Ok(());
+        }
+
+        let mut keys = self.preview_keys.iter().copied().collect::<Vec<StrokeKey>>();
+        self.sort_keys_chrono(&mut keys);
+
+        let highlighter_keys = keys
+            .iter()
+            .copied()
+            .filter(|&key| self.stroke_layer(key) == StrokeLayer::Highlighter)
+            .collect::<Vec<StrokeKey>>();
+
+        if !highlighter_keys.is_empty() {
+            // The preview stands in for the stroke in the highlighter layer, which is blended once.
+            snapshot.push_blend(gtk4::gsk::BlendMode::Multiply);
+        }
+
+        // the regular layer first, then the highlighter layer, as in the render pass of the
+        // strokes themselves
+        for key in keys
+            .iter()
+            .copied()
+            .filter(|key| !highlighter_keys.contains(key))
+            .chain(highlighter_keys.iter().copied())
+        {
+            if let Some(stroke) = self.stroke_components.get(key) {
+                stroke.draw_on_doc_to_gtk_snapshot(snapshot, engine_view)?;
+            }
+        }
+
+        if !highlighter_keys.is_empty() {
+            snapshot.pop();
+        }
+
+        Ok(())
+    }
+
     #[cfg(feature = "ui")]
     pub(crate) fn draw_stroke_key_to_gtk_snapshot(
         &self,
         snapshot: &gtk4::Snapshot,
         key: StrokeKey,
-        engine_view: &crate::engine::EngineView,
     ) {
         use crate::ext::{GdkRGBAExt, GrapheneRectExt};
         use gtk4::{gdk, graphene, prelude::*};
@@ -543,16 +599,9 @@ impl StrokeStore {
         if let Some(stroke) = self.stroke_components.get(key)
             && let Some(render_comp) = self.render_components.get(key)
         {
-            // A stroke being dragged is drawn from its geometry: it follows the pen exactly, and
-            // it avoids rasterizing its images for every step of the drag.
+            // A stroke being dragged is drawn from its geometry by
+            // [Self::draw_previews_to_gtk_snapshot], its own images are stale.
             if self.preview_keys.contains(&key) {
-                use crate::drawable::DrawableOnDoc;
-
-                if let Err(e) =
-                    stroke.draw_on_doc_to_gtk_snapshot_in_camera_space(snapshot, engine_view)
-                {
-                    error!("Drawing stroke preview to gtk snapshot failed, Err: {e:?}");
-                }
                 return;
             }
 
