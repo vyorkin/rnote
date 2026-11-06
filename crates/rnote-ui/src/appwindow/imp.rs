@@ -3,8 +3,8 @@ use crate::{RnMainHeader, RnOverlays, RnSidebar, config, dialogs};
 use adw::{prelude::*, subclass::prelude::*};
 use gettextrs::gettext;
 use gtk4::{
-    Align, ArrowType, CompositeTemplate, CornerType, CssProvider, PackType, PadActionType,
-    PadController, PositionType, gdk, gio, glib, glib::clone,
+    Align, ArrowType, CompositeTemplate, CornerType, CssProvider, EventControllerKey, PackType,
+    PadActionType, PadController, PositionType, PropagationPhase, gdk, gio, glib, glib::clone,
 };
 use once_cell::sync::Lazy;
 use rnote_engine::document::DocumentConfig;
@@ -504,6 +504,85 @@ impl RnAppWindow {
         obj.add_controller(drawing_pad_controller.clone());
         self.drawing_pad_controller
             .replace(Some(drawing_pad_controller));
+
+        // Space held turns a pen or mouse drag on the canvas into a view pan. It is
+        // tracked at the window, because key events go to the focused widget and after
+        // clicking a toolbar button that is not the canvas. A text entry keeps its
+        // space: only the canvas treats the held key as a pan modifier.
+        let space_pan_controller = EventControllerKey::builder()
+            .name("space_pan_controller")
+            .propagation_phase(PropagationPhase::Capture)
+            .build();
+        space_pan_controller.connect_key_pressed(clone!(
+            #[weak(rename_to=appwindow)]
+            obj,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, modifiers| {
+                let blocking_modifiers = gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SHIFT_MASK
+                    | gdk::ModifierType::SUPER_MASK
+                    | gdk::ModifierType::HYPER_MASK
+                    | gdk::ModifierType::META_MASK;
+
+                if key != gdk::Key::space || modifiers.intersects(blocking_modifiers) {
+                    return glib::Propagation::Proceed;
+                }
+
+                // A text entry types a space. The typewriter's text box keeps focus on
+                // the canvas, so its state is checked separately.
+                let focus = gtk4::prelude::RootExt::focus(&appwindow);
+                if focus
+                    .as_ref()
+                    .is_some_and(|focus| focus.is::<gtk4::Editable>())
+                {
+                    return glib::Propagation::Proceed;
+                }
+                if focus
+                    .and_then(|focus| focus.downcast::<crate::RnCanvas>().ok())
+                    .is_some_and(|canvas| canvas.engine_ref().penholder.is_handling_text_input())
+                {
+                    return glib::Propagation::Proceed;
+                }
+
+                // Every canvas is armed: a split view has more than one, and the drag
+                // may be started in either of them.
+                for wrapper in appwindow.get_all_tabs() {
+                    wrapper.canvas().set_space_pan_held(true);
+                }
+                glib::Propagation::Stop
+            }
+        ));
+        space_pan_controller.connect_key_released(clone!(
+            #[weak(rename_to=appwindow)]
+            obj,
+            move |_, key, _, _| {
+                if key == gdk::Key::space {
+                    for wrapper in appwindow.get_all_tabs() {
+                        wrapper.canvas().set_space_pan_held(false);
+                    }
+                }
+            }
+        ));
+        obj.add_controller(space_pan_controller);
+
+        // A Space held while the window is left has no release delivered here, so the
+        // flag would stay set and the next drag would pan unexpectedly.
+        obj.connect_notify_local(
+            Some("is-active"),
+            clone!(
+                #[weak(rename_to=appwindow)]
+                obj,
+                move |obj, _| {
+                    if !obj.is_active() {
+                        for wrapper in appwindow.get_all_tabs() {
+                            wrapper.canvas().set_space_pan_held(false);
+                        }
+                    }
+                }
+            ),
+        );
     }
 
     fn setup_overview(&self) {

@@ -49,6 +49,15 @@ pub(crate) struct DragPreview {
     pub(crate) position: Cell<(f64, f64)>,
 }
 
+/// A Space-held drag that pans the view instead of drawing.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SpacePan {
+    /// The camera offset when the drag began.
+    pub(crate) camera_offset_begin: Vector2,
+    /// Where the pointer was pressed, in canvas coordinates.
+    pub(crate) press_pos: Vector2,
+}
+
 #[derive(Debug, Default)]
 struct Connections {
     hadjustment: Option<glib::SignalHandlerId>,
@@ -99,6 +108,10 @@ mod imp {
         pub(crate) last_pen_position: Cell<Option<(f64, f64)>>,
         /// Where the mouse last was, to tell it moving from GTK repeating where it is.
         pub(crate) last_mouse_position: Cell<Option<(f64, f64)>>,
+        /// Whether Space is held, which turns a pen or mouse drag into a view pan.
+        pub(crate) space_pan_held: Cell<bool>,
+        /// The Space-held drag in progress, if any.
+        pub(crate) space_pan: Cell<Option<SpacePan>>,
         /// Shows the cursor again a moment after the pen has gone, unless it is back by then.
         pub(crate) pen_gone_timeout: RefCell<Option<glib::SourceId>>,
 
@@ -206,6 +219,8 @@ mod imp {
                 pen_in_use: Cell::new(false),
                 last_pen_position: Cell::new(None),
                 last_mouse_position: Cell::new(None),
+                space_pan_held: Cell::new(false),
+                space_pan: Cell::new(None),
                 pen_gone_timeout: RefCell::new(None),
 
                 engine: RefCell::new(engine),
@@ -850,6 +865,11 @@ impl RnCanvas {
             position: Cell::new(position),
         }));
         self.queue_draw();
+    }
+
+    /// Set whether Space is held, which turns a pen or mouse drag into a view pan.
+    pub(crate) fn set_space_pan_held(&self, held: bool) {
+        self.imp().space_pan_held.set(held);
     }
 
     /// Move the drag preview to `position`, in canvas coordinates.

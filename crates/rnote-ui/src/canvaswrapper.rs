@@ -1296,9 +1296,11 @@ mod imp {
                     move |gesture, _, _| {
                         let modifiers = gesture.current_event_state();
 
-                        // At the start BUTTON1_MASK is not included
+                        // At the start BUTTON1_MASK is not included. A Space-held drag is
+                        // handled by the canvas as a pan, so this gesture must stay out of it.
                         if modifiers.contains(gdk::ModifierType::ALT_MASK)
                             && !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+                            && !canvaswrapper.canvas().imp().space_pan_held.get()
                         {
                             gesture.set_state(EventSequenceState::Claimed);
                             offset_start.set(canvaswrapper.canvas().engine_ref().camera.offset());
@@ -1342,6 +1344,12 @@ mod imp {
                     #[weak(rename_to=canvaswrapper)]
                     obj,
                     move |signal, n_press, _, _| {
+                        // While Space is held the press pans the view; it must not also
+                        // select a word or a line.
+                        if canvaswrapper.canvas().imp().space_pan_held.get() {
+                            return;
+                        }
+
                         // cycle through 0, 1, 2 - single, double, triple press
                         let action = (n_press - 1) % 3;
 
@@ -1389,6 +1397,7 @@ mod imp {
                             // At the start BUTTON1_MASK is not included
                             if modifiers.contains(gdk::ModifierType::ALT_MASK)
                                 && modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+                                && !canvaswrapper.canvas().imp().space_pan_held.get()
                             {
                                 gesture.set_state(EventSequenceState::Claimed);
 

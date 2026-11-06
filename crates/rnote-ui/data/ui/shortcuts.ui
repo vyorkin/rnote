@@ -123,6 +123,12 @@
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Move View</property>
+                <property name="subtitle" translatable="yes">Space + Drag</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Zoom in</property>
                 <property name="accelerator">&lt;ctrl&gt;ScrollUp</property>
               </object>

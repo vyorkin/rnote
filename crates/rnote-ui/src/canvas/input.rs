@@ -1,5 +1,5 @@
 // Imports
-use super::RnCanvas;
+use super::{RnCanvas, SpacePan};
 use crate::RnAppWindow;
 use gtk4::{Native, gdk, glib, graphene, prelude::*, subclass::prelude::*};
 use p2d::math::Vector2;
@@ -66,6 +66,13 @@ pub(crate) fn handle_pointer_controller_event(
 
     if reject_pointer_input(event, touch_drawing) {
         return (glib::Propagation::Proceed, pen_state, stylus_active);
+    }
+
+    // Space held: a pen or mouse drag pans the view. Consuming the press here keeps the
+    // engine from starting a stroke, which a gesture claiming the sequence later would
+    // leave unfinished.
+    if handle_space_pan_event(canvas, event) {
+        return (glib::Propagation::Stop, pen_state, stylus_active);
     }
 
     // GTK can deliver mouse motion events while a stylus is hovering or drawing.
@@ -310,6 +317,52 @@ pub(crate) fn handle_pointer_controller_event(
     (propagation, pen_state, stylus_active)
 }
 
+/// Pans the view while Space is held and the primary button is down.
+///
+/// Returns true when the event was consumed and must not reach the pens.
+fn handle_space_pan_event(canvas: &RnCanvas, event: &gdk::Event) -> bool {
+    let event_type = event.event_type();
+
+    // Once a pan has begun it follows the pointer until the button is released (or the
+    // pen leaves), even if Space is let go mid-drag.
+    if let Some(pan) = canvas.imp().space_pan.get() {
+        match event_type {
+            gdk::EventType::MotionNotify => {
+                if let Some((x, y)) = event.position() {
+                    let delta = Vector2::new(x, y) - pan.press_pos;
+                    let widget_flags = canvas
+                        .engine_mut()
+                        .camera_set_offset_expand(pan.camera_offset_begin - delta);
+                    canvas.emit_handle_widget_flags(widget_flags);
+                }
+            }
+            gdk::EventType::ButtonRelease | gdk::EventType::ProximityOut => {
+                canvas.imp().space_pan.set(None);
+                let widget_flags = canvas.engine_mut().update_rendering_current_viewport();
+                canvas.emit_handle_widget_flags(widget_flags);
+            }
+            _ => {}
+        }
+        return true;
+    }
+
+    if event_type == gdk::EventType::ButtonPress
+        && canvas.imp().space_pan_held.get()
+        && event
+            .downcast_ref::<gdk::ButtonEvent>()
+            .is_some_and(|button_event| button_event.button() == gdk::BUTTON_PRIMARY)
+        && let Some((x, y)) = event.position()
+    {
+        canvas.imp().space_pan.set(Some(SpacePan {
+            camera_offset_begin: canvas.engine_ref().camera.offset(),
+            press_pos: Vector2::new(x, y),
+        }));
+        return true;
+    }
+
+    false
+}
+
 pub(crate) fn handle_key_controller_key_pressed(
     canvas: &RnCanvas,
     gdk_key: gdk::Key,
@@ -378,11 +431,15 @@ pub(crate) fn handle_key_controller_key_pressed(
 }
 
 pub(crate) fn handle_key_controller_key_released(
-    _canvas: &RnCanvas,
+    canvas: &RnCanvas,
     gdk_key: gdk::Key,
     gdk_modifiers: gdk::ModifierType,
 ) {
     trace!("canvas event key released - gdk_key: {gdk_key:?}, gdk_modifiers: {gdk_modifiers:?}");
+
+    if gdk_key == gdk::Key::space {
+        canvas.imp().space_pan_held.set(false);
+    }
 }
 
 pub(crate) fn handle_imcontext_text_commit(canvas: &RnCanvas, text: &str) {
