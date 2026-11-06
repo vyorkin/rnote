@@ -71,7 +71,7 @@ pub(crate) fn handle_pointer_controller_event(
     // Space held: a pen or mouse drag pans the view. Consuming the press here keeps the
     // engine from starting a stroke, which a gesture claiming the sequence later would
     // leave unfinished.
-    if handle_space_pan_event(canvas, event) {
+    if handle_space_pan_event(canvas, event, is_stylus) {
         return (glib::Propagation::Stop, pen_state, stylus_active);
     }
 
@@ -320,14 +320,19 @@ pub(crate) fn handle_pointer_controller_event(
 /// Pans the view while Space is held and the primary button is down.
 ///
 /// Returns true when the event was consumed and must not reach the pens.
-fn handle_space_pan_event(canvas: &RnCanvas, event: &gdk::Event) -> bool {
+fn handle_space_pan_event(canvas: &RnCanvas, event: &gdk::Event, is_stylus: bool) -> bool {
     let event_type = event.event_type();
 
     // Once a pan has begun it follows the pointer until the button is released (or the
     // pen leaves), even if Space is let go mid-drag.
     if let Some(pan) = canvas.imp().space_pan.get() {
+        // While the pen is in use GTK repeats its motion as an emulated mouse. Following
+        // both streams means alternating between their coordinates, which makes the
+        // canvas jitter, so the drag stays with the device that began it.
+        let same_device = pan.is_stylus == is_stylus;
+
         match event_type {
-            gdk::EventType::MotionNotify => {
+            gdk::EventType::MotionNotify if same_device => {
                 if let Some((x, y)) = event.position() {
                     let delta = Vector2::new(x, y) - pan.press_pos;
                     let widget_flags = canvas
@@ -336,7 +341,12 @@ fn handle_space_pan_event(canvas: &RnCanvas, event: &gdk::Event) -> bool {
                     canvas.emit_handle_widget_flags(widget_flags);
                 }
             }
-            gdk::EventType::ButtonRelease | gdk::EventType::ProximityOut => {
+            gdk::EventType::ButtonRelease if same_device => {
+                canvas.imp().space_pan.set(None);
+                let widget_flags = canvas.engine_mut().update_rendering_current_viewport();
+                canvas.emit_handle_widget_flags(widget_flags);
+            }
+            gdk::EventType::ProximityOut if pan.is_stylus && is_stylus => {
                 canvas.imp().space_pan.set(None);
                 let widget_flags = canvas.engine_mut().update_rendering_current_viewport();
                 canvas.emit_handle_widget_flags(widget_flags);
@@ -356,6 +366,7 @@ fn handle_space_pan_event(canvas: &RnCanvas, event: &gdk::Event) -> bool {
         canvas.imp().space_pan.set(Some(SpacePan {
             camera_offset_begin: canvas.engine_ref().camera.offset(),
             press_pos: Vector2::new(x, y),
+            is_stylus,
         }));
         return true;
     }

@@ -56,6 +56,9 @@ pub(crate) struct SpacePan {
     pub(crate) camera_offset_begin: Vector2,
     /// Where the pointer was pressed, in canvas coordinates.
     pub(crate) press_pos: Vector2,
+    /// Whether the stylus began the drag. GTK also repeats the motion as an emulated
+    /// mouse, and mixing the two event streams makes the view jitter.
+    pub(crate) is_stylus: bool,
 }
 
 #[derive(Debug, Default)]
