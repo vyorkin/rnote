@@ -808,6 +808,10 @@ fn smooth_loop(points: &[Vector2], iterations: usize) -> Vec<Vector2> {
 /// Recognize a closed stroke as an ellipse, rectangle or polygon.
 fn recognize_closed(points: &[Vector2], bounds_diag: f64) -> Option<Shape> {
     let resampled = resample(points, N_RESAMPLE, true);
+    // The ellipse is fitted to what was drawn and not to the segment that closes the loop: on a
+    // loop the pen did not close, that segment is a straight chord the pen never drew, and it
+    // pulls the fit off the shape the stroke actually has.
+    let drawn = resample(points, N_RESAMPLE, false);
     let smoothed = smooth_loop(&resampled, 2);
     let turns = loop_turn_angles(&smoothed);
 
@@ -823,7 +827,7 @@ fn recognize_closed(points: &[Vector2], bounds_diag: f64) -> Option<Shape> {
         turns.iter().filter(|&&t| t > 1.5 * mean_turn).sum::<f64>() / total_turning;
 
     if cornerness < CORNERNESS_POLYGON_THRESHOLD {
-        recognize_ellipse(&resampled)
+        recognize_ellipse(&drawn)
     } else {
         let corners = detect_corners(&resampled, &turns, mean_turn);
 
@@ -833,7 +837,7 @@ fn recognize_closed(points: &[Vector2], bounds_diag: f64) -> Option<Shape> {
             .flatten()
             // Flat ellipses concentrate their turning at the high-curvature ends of the
             // major axis and can end up here, so fall back to the ellipse fit.
-            .or_else(|| recognize_ellipse(&resampled))
+            .or_else(|| recognize_ellipse(&drawn))
     }
 }
 
@@ -890,9 +894,40 @@ fn detect_corners(points: &[Vector2], turns: &[f64], mean_turn: f64) -> Vec<Vect
     corners.into_iter().map(|i| points[i]).collect()
 }
 
-/// Recognize a closed smooth stroke as an ellipse (or circle) by fitting via its second moments.
-fn recognize_ellipse(points: &[Vector2]) -> Option<Shape> {
+/// An ellipse fitted to the points of a stroke.
+#[derive(Debug, Clone, Copy)]
+struct EllipseFit {
+    /// The center of the ellipse.
+    center: Vector2,
+    /// The tilt of the major axis.
+    angle: f64,
+    /// The semi-axes, along the major and the minor axis.
+    radii: Vector2,
+    /// How far the points stray from the outline, as a share of the radius at the point: the mean
+    /// of the strays, and the largest of them.
+    mean_residual: f64,
+    max_residual: f64,
+}
+
+/// How many Gauss-Newton steps an ellipse fit is refined with.
+const ELLIPSE_FIT_STEPS: usize = 32;
+/// The largest change a single refinement step may make to any of its parameters, whether it is a
+/// coordinate, a logarithm of a radius or an angle.
+const ELLIPSE_FIT_MAX_STEP: f64 = 4.0;
+
+/// Fit an ellipse to the points of a stroke.
+///
+/// The starting point is the fit by the second moments, which is exact for points spread evenly
+/// around a whole ellipse. On a loop the pen did not close it is not: the missing part pulls the
+/// center into the drawn arc, and the radii with it, so that a stroke drawn round reads as far
+/// less round than it is. A few Gauss-Newton steps then move the center, the radii and the tilt to
+/// where the points sit closest to the outline, which is where a hand-drawn circle belongs
+/// whatever share of it was drawn.
+fn fit_ellipse(points: &[Vector2]) -> Option<EllipseFit> {
     let n = points.len() as f64;
+    if n < 3.0 {
+        return None;
+    }
     let center = points.iter().copied().sum::<Vector2>() / n;
 
     // Covariance matrix of the centered points.
@@ -923,30 +958,118 @@ fn recognize_ellipse(points: &[Vector2]) -> Option<Shape> {
     } else {
         Vector2::Y
     };
-    let minor_axis = Vector2::new(-major_axis.y, major_axis.x);
 
     // For points distributed on an ellipse outline, the variance along an axis is ~half the
-    // squared semi-axis.
-    let mut a = (2.0 * lambda1).sqrt();
-    let mut b = (2.0 * lambda2).sqrt();
+    // squared semi-axis. The radii are refined in log, so that a step can never cross zero.
+    let mut params = [
+        center.x,
+        center.y,
+        (2.0 * lambda1).sqrt().max(f64::MIN_POSITIVE).ln(),
+        (2.0 * lambda2).sqrt().max(f64::MIN_POSITIVE).ln(),
+        Vector2::X.angle_to(major_axis),
+    ];
+
+    let mut sse = ellipse_fit_sse(points, &params);
+    for _ in 0..ELLIPSE_FIT_STEPS {
+        let (a, b) = (params[2].exp(), params[3].exp());
+        let (sin, cos) = params[4].sin_cos();
+        let (major, minor) = (Vector2::new(cos, sin), Vector2::new(-sin, cos));
+        let center = Vector2::new(params[0], params[1]);
+        let (mut normal, mut gradient) = ([[0.0f64; 5]; 5], [0.0f64; 5]);
+
+        for p in points {
+            let d = *p - center;
+            let u = d.dot(major) / a;
+            let v = d.dot(minor) / b;
+            let r = (u * u + v * v).sqrt();
+            if r < f64::EPSILON {
+                continue;
+            }
+            let residual = r - 1.0;
+            let jacobian = [
+                -(u * major.x + v * minor.x) / (r * a),
+                -(u * major.y + v * minor.y) / (r * b),
+                -u * u / r,
+                -v * v / r,
+                u * v * (b / a - a / b) / r,
+            ];
+            for i in 0..5 {
+                gradient[i] += jacobian[i] * residual;
+                for k in 0..5 {
+                    normal[i][k] += jacobian[i] * jacobian[k];
+                }
+            }
+        }
+
+        // A stroke that is not a curve at all can point the fit far away in a single step, so the
+        // diagonal is damped and the step is limited.
+        let damping = 1e-9 * (0..5).map(|i| normal[i][i]).sum::<f64>();
+        for (i, row) in normal.iter_mut().enumerate() {
+            row[i] += damping;
+        }
+        let step = solve_linear(
+            normal,
+            [
+                -gradient[0],
+                -gradient[1],
+                -gradient[2],
+                -gradient[3],
+                -gradient[4],
+            ],
+        )?;
+        let largest = step.iter().fold(0.0f64, |largest, s| largest.max(s.abs()));
+        let scale = if largest > ELLIPSE_FIT_MAX_STEP {
+            ELLIPSE_FIT_MAX_STEP / largest
+        } else {
+            1.0
+        };
+        let mut stepped = params;
+        for (param, s) in stepped.iter_mut().zip(step) {
+            *param += s * scale;
+        }
+        // A step that does not bring the points closer to the outline is the end of the
+        // refinement; keeping the fit that was there is always better than taking it.
+        let stepped_sse = ellipse_fit_sse(points, &stepped);
+        if stepped_sse >= sse {
+            break;
+        }
+        params = stepped;
+        let converged = largest * scale < 1e-9;
+        sse = stepped_sse;
+        if converged {
+            break;
+        }
+    }
+
+    let (mut a, mut b) = (params[2].exp(), params[3].exp());
+    let mut angle = params[4];
+    // Keep the semi-axis along the major direction first, as the fit starts out with it: the
+    // refinement can turn the axes by a quarter turn, and an ellipse that names its minor axis as
+    // the major one would read as a circle.
+    if b > a {
+        std::mem::swap(&mut a, &mut b);
+        angle += std::f64::consts::FRAC_PI_2;
+    }
+    let (sin, cos) = angle.sin_cos();
+    let (major, minor) = (Vector2::new(cos, sin), Vector2::new(-sin, cos));
+    let center = Vector2::new(params[0], params[1]);
 
     let normalized_radii = points
         .iter()
         .map(|p| {
             let d = *p - center;
-            let u = d.dot(major_axis) / a;
-            let v = d.dot(minor_axis) / b;
+            let u = d.dot(major) / a;
+            let v = d.dot(minor) / b;
             (u * u + v * v).sqrt()
         })
         .collect::<Vec<f64>>();
 
-    // Correct the radii so that the mean normalized radius is 1.
+    // The residuals are measured against the radius the points actually have, so that a fit that
+    // sits a little small reads as a shape that is as round as it was drawn.
     let scale = normalized_radii.iter().sum::<f64>() / n;
     if scale < f64::EPSILON {
         return None;
     }
-    a *= scale;
-    b *= scale;
 
     let mean_residual = normalized_radii
         .iter()
@@ -958,22 +1081,85 @@ fn recognize_ellipse(points: &[Vector2]) -> Option<Shape> {
         .map(|r| (r / scale - 1.0).abs())
         .fold(0.0, f64::max);
 
-    if mean_residual > ELLIPSE_MAX_MEAN_RESIDUAL || max_residual > ELLIPSE_MAX_RESIDUAL {
+    Some(EllipseFit {
+        center,
+        angle,
+        radii: Vector2::new(a * scale, b * scale),
+        mean_residual,
+        max_residual,
+    })
+}
+
+/// The sum of the squared deviations of the points from the ellipse the parameters describe.
+fn ellipse_fit_sse(points: &[Vector2], params: &[f64; 5]) -> f64 {
+    let (a, b) = (params[2].exp(), params[3].exp());
+    let (sin, cos) = params[4].sin_cos();
+    let (major, minor) = (Vector2::new(cos, sin), Vector2::new(-sin, cos));
+    let center = Vector2::new(params[0], params[1]);
+
+    points
+        .iter()
+        .map(|p| {
+            let d = *p - center;
+            let u = d.dot(major) / a;
+            let v = d.dot(minor) / b;
+            let r = (u * u + v * v).sqrt();
+            (r - 1.0) * (r - 1.0)
+        })
+        .sum()
+}
+
+/// Recognize a closed smooth stroke as an ellipse (or circle).
+fn recognize_ellipse(points: &[Vector2]) -> Option<Shape> {
+    let fit = fit_ellipse(points)?;
+
+    if fit.mean_residual > ELLIPSE_MAX_MEAN_RESIDUAL || fit.max_residual > ELLIPSE_MAX_RESIDUAL {
         return None;
     }
 
-    let (radii, angle) = if b / a > CIRCLE_RADII_RATIO {
+    let (radii, angle) = if fit.radii.y / fit.radii.x > CIRCLE_RADII_RATIO {
         // Close to a circle, snap to one.
-        let r = (a + b) * 0.5;
+        let r = (fit.radii.x + fit.radii.y) * 0.5;
         (Vector2::new(r, r), 0.0)
     } else {
-        (Vector2::new(a, b), Vector2::X.angle_to(major_axis))
+        (fit.radii, fit.angle)
     };
 
     Some(Shape::Ellipse(Ellipse {
         radii,
-        affine: DAffine2::from_angle_translation(angle, center),
+        affine: DAffine2::from_angle_translation(angle, fit.center),
     }))
+}
+
+/// Solve a small linear system with partial pivoting, `None` when it is singular.
+fn solve_linear(mut matrix: [[f64; 5]; 5], mut rhs: [f64; 5]) -> Option<[f64; 5]> {
+    for col in 0..5 {
+        let pivot =
+            (col..5).max_by(|&a, &b| matrix[a][col].abs().total_cmp(&matrix[b][col].abs()))?;
+        if matrix[pivot][col].abs() < f64::EPSILON {
+            return None;
+        }
+        matrix.swap(col, pivot);
+        rhs.swap(col, pivot);
+
+        for row in (col + 1)..5 {
+            let factor = matrix[row][col] / matrix[col][col];
+            for k in col..5 {
+                matrix[row][k] -= factor * matrix[col][k];
+            }
+            rhs[row] -= factor * rhs[col];
+        }
+    }
+
+    let mut solution = [0.0; 5];
+    for row in (0..5).rev() {
+        let mut sum = rhs[row];
+        for (k, s) in solution.iter().enumerate().skip(row + 1) {
+            sum -= matrix[row][k] * s;
+        }
+        solution[row] = sum / matrix[row][row];
+    }
+    Some(solution)
 }
 
 /// Recognize a closed stroke with detected corners as a rectangle or polygon.
@@ -1907,5 +2093,79 @@ mod tests {
         assert!(1.0 < between && between < HOLD_SHORT_FACTOR, "{between}");
         // What counts is how large it is on screen
         assert_eq!(hold_factor(&stroke(25.0), 8.0), 1.0);
+    }
+
+    /// A circle drawn in one loop the way a hand draws one: the pen lands a little inside the rim,
+    /// the hand shakes along the way, the loop ends where `covered` says, and the pen lifts
+    /// turning back inside the circle.
+    fn hand_drawn_circle(center: Vector2, r: f64, covered: f64, hook: f64) -> Vec<Vector2> {
+        let mut points = (0..4)
+            .map(|i| {
+                let inward = hook * (1.0 - i as f64 / 3.0);
+                center + Vector2::new(r * (1.0 - inward), 0.0) + jitter(i, 1.0)
+            })
+            .collect::<Vec<_>>();
+
+        let n = 100;
+        points.extend((1..=n).map(|i| {
+            let angle = covered * (i as f64 / n as f64);
+            center + Vector2::new(angle.cos(), angle.sin()) * r + jitter(i, 1.5)
+        }));
+
+        let last = *points.last().unwrap();
+        points.extend((1..=4).map(|i| {
+            let inward = hook * (i as f64 / 4.0);
+            last + (center - last) * inward
+        }));
+        points
+    }
+
+    fn assert_circle_at(shape: Option<Shape>, center: Vector2, r: f64) {
+        match shape {
+            Some(Shape::Ellipse(ellipse)) => {
+                assert!(
+                    (ellipse.radii.x - r).abs() < 0.08 * r,
+                    "radius {}, expected {r}",
+                    ellipse.radii.x
+                );
+                assert!(
+                    (ellipse.radii.y - r).abs() < 0.08 * r,
+                    "radius {}, expected {r}",
+                    ellipse.radii.y
+                );
+                let offset = ellipse.affine.translation - center;
+                assert!(
+                    offset.length() < 0.08 * r,
+                    "center off by {offset:?}, expected {center:?}"
+                );
+            }
+            other => panic!("expected a circle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recognize_a_circle_the_pen_did_not_close_exactly() {
+        // 340 of the 360 degrees, the pen landing and lifting 15% of the radius inside the rim.
+        // The segment that closes the loop cuts through the inside of the circle, so an ellipse
+        // fitted to the closed loop reads the stroke as far less round than it was drawn.
+        let points = hand_drawn_circle(Vector2::new(100.0, 100.0), 50.0, 340f64.to_radians(), 0.15);
+        assert_circle_at(
+            recognize_shape(&pen_path_from_points(points), 1.0),
+            Vector2::new(100.0, 100.0),
+            50.0,
+        );
+    }
+
+    #[test]
+    fn recognize_a_circle_drawn_past_its_start() {
+        // 380 degrees: the loop runs 20 degrees past where it began, so the stroke covers a
+        // stretch of the rim twice and still is a circle.
+        let points =
+            hand_drawn_circle(Vector2::new(100.0, 100.0), 100.0, 380f64.to_radians(), 0.12);
+        assert_circle_at(
+            recognize_shape(&pen_path_from_points(points), 1.0),
+            Vector2::new(100.0, 100.0),
+            100.0,
+        );
     }
 }
