@@ -45,6 +45,22 @@ impl KeyTree {
             .collect()
     }
 
+    /// Return true if any key that intersects with the given bounds satisfies the predicate.
+    ///
+    /// Stops at the first match and does not allocate.
+    pub(crate) fn any_key_intersecting_bounds(
+        &self,
+        bounds: Aabb,
+        mut predicate: impl FnMut(StrokeKey) -> bool,
+    ) -> bool {
+        self.0
+            .locate_in_envelope_intersecting(&rstar::AABB::from_corners(
+                [bounds.mins[0], bounds.mins[1]],
+                [bounds.maxs[0], bounds.maxs[1]],
+            ))
+            .any(|object| predicate(object.data))
+    }
+
     /// Return the keys that are completely contained in the given bounds.
     pub(crate) fn keys_in_bounds(&self, bounds: Aabb) -> Vec<StrokeKey> {
         self.0

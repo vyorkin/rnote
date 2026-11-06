@@ -103,6 +103,23 @@ impl StrokeStore {
             .unwrap_or(false)
     }
 
+    /// Returns true if any stroke intersecting the given bounds is waiting for its rendering to be
+    /// generated, i.e. it is flagged dirty and no render task is in flight for it.
+    ///
+    /// Such strokes are currently drawn as placeholder rects, so the content rendering has to be
+    /// retriggered when the viewport itself did not change.
+    pub(crate) fn any_rendering_dirty_in_bounds(&self, bounds: Aabb) -> bool {
+        // Queried on every canvas allocation, so it short-circuits and does not allocate.
+        // Trashed strokes are not drawn, their stale rendering is irrelevant.
+        self.key_tree.any_key_intersecting_bounds(bounds, |key| {
+            !self.trashed(key).unwrap_or(false)
+                && self
+                    .render_components
+                    .get(key)
+                    .is_some_and(|render_comp| render_comp.state == RenderCompState::Dirty)
+        })
+    }
+
     pub(crate) fn regenerate_rendering_for_stroke(
         &mut self,
         key: StrokeKey,
@@ -216,6 +233,9 @@ impl StrokeStore {
                         error!(
                             "Generating images of stroke failed while regenerating stroke rendering, stroke key {key:?} , Err: {e:?}"
                         );
+                        // The render component was flagged busy before spawning this task. Without
+                        // resetting it, the stroke would never be rendered again.
+                        tasks_tx.send(EngineTask::RenderingGenerationFailed { key });
                     }
                 },
             );
@@ -313,6 +333,9 @@ impl StrokeStore {
                             error!(
                                 "Generating stroke images failed stroke while regenerating rendering in viewport `{viewport:?}`, stroke key: {key:?}, Err: {e:?}"
                             );
+                            // The render component was flagged busy before spawning this task. Without
+                            // resetting it, the stroke would never be rendered again.
+                            tasks_tx.send(EngineTask::RenderingGenerationFailed { key });
                         }
                     },
                 );
@@ -652,5 +675,60 @@ impl StrokeStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strokes::BrushStroke;
+    use p2d::math::Vector2;
+    use rnote_compose::penpath::Element;
+    use rnote_compose::style::smooth::SmoothOptions;
+    use rnote_compose::{PenPath, Style};
+
+    fn insert_line(store: &mut StrokeStore, y: f64, x_start: f64, x_end: f64) -> StrokeKey {
+        let path = PenPath::try_from_elements(
+            [[x_start, y], [x_end, y]]
+                .into_iter()
+                .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5)),
+        )
+        .unwrap();
+        let key = store.insert_stroke(
+            Stroke::BrushStroke(BrushStroke::from_penpath(
+                path,
+                Style::Smooth(SmoothOptions::default()),
+            )),
+            None,
+        );
+        store.update_geometry_for_stroke(key);
+
+        key
+    }
+
+    fn bounds(min: (f64, f64), max: (f64, f64)) -> Aabb {
+        Aabb::new(Vector2::new(min.0, min.1), Vector2::new(max.0, max.1))
+    }
+
+    /// The canvas layout manager retriggers the content rendering when strokes inside the viewport
+    /// are drawn as placeholder rects, i.e. are dirty with no render task in flight.
+    #[test]
+    fn only_dirty_rendering_inside_the_bounds_is_reported() {
+        let mut store = StrokeStore::default();
+        let key = insert_line(&mut store, 100.0, 0.0, 200.0);
+        let stroke_bounds = bounds((-50.0, 50.0), (250.0, 150.0));
+
+        // A freshly inserted stroke waits for its rendering.
+        assert!(store.any_rendering_dirty_in_bounds(stroke_bounds));
+        // Bounds nothing intersects are not waiting for anything.
+        assert!(!store.any_rendering_dirty_in_bounds(bounds((2000.0, 2000.0), (3000.0, 3000.0))));
+
+        // A stroke that is being rendered already must not retrigger the rendering again.
+        store.render_components.get_mut(key).unwrap().state = RenderCompState::BusyRenderingInTask;
+        assert!(!store.any_rendering_dirty_in_bounds(stroke_bounds));
+
+        // Clearing the rendering (e.g. while the canvas is inactive) makes it wait again.
+        store.clear_rendering();
+        assert!(store.any_rendering_dirty_in_bounds(stroke_bounds));
     }
 }

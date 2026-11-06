@@ -109,6 +109,17 @@ impl Engine {
             | self.update_content_rendering_current_viewport()
     }
 
+    /// Returns true if any stroke in the current viewport is waiting for its content rendering to
+    /// be generated.
+    ///
+    /// Such strokes are drawn as placeholder rects. The caller uses this to retrigger the content
+    /// rendering when the viewport itself did not change, e.g. when the renderings were cleared
+    /// while the canvas was inactive.
+    pub fn any_content_rendering_dirty(&self) -> bool {
+        self.store
+            .any_rendering_dirty_in_bounds(self.camera.viewport())
+    }
+
     /// Clear the rendering of the entire engine (e.g. when it becomes off-screen).
     pub fn clear_rendering(&mut self) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();

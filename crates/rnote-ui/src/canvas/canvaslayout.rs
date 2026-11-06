@@ -97,8 +97,13 @@ mod imp {
                 .update_background_rendering_current_viewport();
 
             // On zoom outs or viewport translations this will evaluate true, so we render the strokes that are coming
-            // into view. But after zoom ins we need to update old_viewport with layout_manager.update_state()
-            if !old_viewport_extended.contains(&new_viewport) {
+            // into view. But after zoom ins we need to update old_viewport with layout_manager.update_state().
+            // The viewport not changing does not mean the content is rendered: the renderings may have been
+            // cleared in the meantime (e.g. while the canvas was inactive), in which case the strokes are
+            // drawn as placeholder rects until the content rendering is retriggered here.
+            if !old_viewport_extended.contains(&new_viewport)
+                || canvas.engine_ref().any_content_rendering_dirty()
+            {
                 self.old_viewport.set(new_viewport);
 
                 // Because we don't set the rendering of strokes that are already in the view dirty, we only rerender

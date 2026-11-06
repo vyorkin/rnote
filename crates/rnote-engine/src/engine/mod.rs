@@ -135,6 +135,14 @@ pub enum EngineTask {
         /// The image scale-factor the render task was using while generating the images.
         image_scale: f64,
     },
+    /// Indicates that generating the images for the rendering of a stroke failed.
+    ///
+    /// The render component is left in `BusyRenderingInTask` by the render task, so it has to be
+    /// flagged dirty again, otherwise the stroke is never rendered again.
+    RenderingGenerationFailed {
+        /// The stroke key.
+        key: StrokeKey,
+    },
     /// Appends the images to the rendering of the given stroke.
     ///
     /// The state of the render component should be set **before** spawning a thread, generating images and sending this task,
@@ -449,6 +457,12 @@ impl Engine {
                                 // Only when the image scale is roughly the same as when the render task was started,
                                 // the new images are considered valid and can replace the old.
                                 self.store.replace_rendering_with_images(key, images);
+                            } else {
+                                // The images were rendered with an image scale that the camera no longer
+                                // has, so they are discarded. The render component must not stay busy,
+                                // otherwise it is drawn as a placeholder rect and never rendered again.
+                                self.store.set_rendering_dirty(key);
+                                widget_flags |= self.update_content_rendering_current_viewport();
                             }
                             widget_flags.redraw = true;
                         }
@@ -457,6 +471,14 @@ impl Engine {
                             // it is expected that retriggering rendering will be handled elsewhere
                         }
                     }
+                }
+            }
+            EngineTask::RenderingGenerationFailed { key } => {
+                if self.store.render_comp_state(key) == Some(RenderCompState::BusyRenderingInTask) {
+                    // Deliberately not retriggering the rendering right away: the same failure
+                    // would repeat endlessly. The next viewport update renders the stroke again.
+                    self.store.set_rendering_dirty(key);
+                    widget_flags.redraw = true;
                 }
             }
             EngineTask::AppendImagesToStroke { key, images } => {
@@ -953,5 +975,99 @@ impl Engine {
     pub fn current_pen_style_w_override(&self) -> PenStyle {
         self.penholder
             .current_pen_style_w_override(&engine_view!(self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strokes::{BrushStroke, Stroke};
+    use futures::FutureExt;
+    use p2d::math::Vector2;
+    use rnote_compose::penpath::Element;
+    use rnote_compose::style::smooth::SmoothOptions;
+    use rnote_compose::{PenPath, Style};
+    use std::time::Duration;
+
+    /// Poll the engine task channel, waiting up to `timeout` for the next task.
+    fn recv_task(rx: &mut EngineTaskReceiver, timeout: Duration) -> Option<EngineTask> {
+        let mut waited = Duration::ZERO;
+
+        loop {
+            if let Some(task) = rx.recv().now_or_never().flatten() {
+                return Some(task);
+            }
+            if waited >= timeout {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            waited += Duration::from_millis(5);
+        }
+    }
+
+    fn insert_line(engine: &mut Engine) -> StrokeKey {
+        let path = PenPath::try_from_elements(
+            [[100.0, 100.0], [700.0, 100.0]]
+                .into_iter()
+                .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5)),
+        )
+        .unwrap();
+        let key = engine.store.insert_stroke(
+            Stroke::BrushStroke(BrushStroke::from_penpath(
+                path,
+                Style::Smooth(SmoothOptions::default()),
+            )),
+            None,
+        );
+        engine.store.update_geometry_for_stroke(key);
+
+        key
+    }
+
+    /// Images rendered for a zoom the camera no longer has are discarded. The stroke then has to
+    /// be rendered again, otherwise it keeps being drawn as a placeholder rect forever.
+    #[test]
+    fn discarded_images_are_rendered_again() {
+        let mut engine = Engine::default();
+        engine.camera.set_size(Vector2::new(800.0, 600.0));
+        let key = insert_line(&mut engine);
+
+        engine.store.regenerate_rendering_in_viewport_threaded(
+            engine.engine_tasks_tx(),
+            true,
+            engine.camera.viewport(),
+            engine.camera.image_scale(),
+        );
+        assert_eq!(
+            engine.store.render_comp_state(key),
+            Some(RenderCompState::BusyRenderingInTask)
+        );
+
+        let rx = &mut engine.tasks_rx.take().expect("engine task receiver");
+        let task = recv_task(rx, Duration::from_secs(10)).expect("render task");
+        let EngineTask::UpdateStrokeWithImages {
+            key: task_key,
+            images,
+            ..
+        } = task
+        else {
+            panic!("unexpected engine task: {task:?}");
+        };
+        assert_eq!(task_key, key);
+
+        // The camera zoomed in while the images were rendered, so they are not usable.
+        let (_, quit) = engine.handle_engine_task(EngineTask::UpdateStrokeWithImages {
+            key,
+            images,
+            image_scale: engine.camera.image_scale() * 2.0,
+        });
+        assert!(!quit);
+
+        // The stroke is rendered again, this time for the current zoom.
+        let task = recv_task(rx, Duration::from_secs(10)).expect("re-render task");
+        assert!(
+            matches!(task, EngineTask::UpdateStrokeWithImages { key: task_key, .. } if task_key == key),
+            "unexpected engine task: {task:?}"
+        );
     }
 }
