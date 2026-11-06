@@ -317,4 +317,48 @@ impl RnStrokeWidthPicker {
         imp.setter_2.set_active(false);
         imp.setter_3.set_active(false);
     }
+
+    /// Applies the next (`backwards == false`) or previous stroke width preset, like clicking the
+    /// width setters in order.
+    ///
+    /// A width that is on no setter (loaded from a document, or typed while no setter is
+    /// selected) starts the cycle at the first (last) one.
+    ///
+    /// Returns whether a width was applied.
+    pub(crate) fn cycle_stroke_width(&self, backwards: bool) -> bool {
+        let setters = [self.setter_1(), self.setter_2(), self.setter_3()];
+        let stroke_width = self.stroke_width();
+
+        // Anchor on the active setter when it carries the current width, so duplicated presets
+        // still advance one entry per press instead of sticking on the first copy.
+        let current_index = setters
+            .iter()
+            .position(|setter| setter.is_active() && setter.stroke_width() == stroke_width)
+            .or_else(|| {
+                setters
+                    .iter()
+                    .position(|setter| setter.stroke_width() == stroke_width)
+            });
+        let len = setters.len();
+        let next_index = current_index.map_or_else(
+            || if backwards { len - 1 } else { 0 },
+            |index| {
+                if backwards {
+                    (index + len - 1) % len
+                } else {
+                    (index + 1) % len
+                }
+            },
+        );
+
+        let setter = &setters[next_index];
+        if setter.is_active() {
+            // Re-activating the same setter emits nothing, so apply its width directly.
+            self.set_stroke_width(setter.stroke_width());
+        } else {
+            // The setter's "active" handler deselects the others and applies its width.
+            setter.set_active(true);
+        }
+        true
+    }
 }

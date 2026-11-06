@@ -20,9 +20,7 @@ use tracing::{debug, trace};
 pub(crate) fn tool_shortcut_pen_style(gdk_key: gdk::Key) -> Option<PenStyle> {
     match gdk_key {
         gdk::Key::b | gdk::Key::Cyrillic_i | gdk::Key::_1 | gdk::Key::KP_1 => Some(PenStyle::Brush),
-        gdk::Key::s | gdk::Key::Cyrillic_yeru | gdk::Key::_2 | gdk::Key::KP_2 => {
-            Some(PenStyle::Shaper)
-        }
+        gdk::Key::_2 | gdk::Key::KP_2 => Some(PenStyle::Shaper),
         gdk::Key::t | gdk::Key::Cyrillic_ie | gdk::Key::_3 | gdk::Key::KP_3 => {
             Some(PenStyle::Typewriter)
         }
@@ -45,12 +43,31 @@ pub(crate) fn is_palette_cycle_key(gdk_key: gdk::Key) -> bool {
     matches!(gdk_key.to_lower(), gdk::Key::c | gdk::Key::Cyrillic_es)
 }
 
+/// The bare `s` key cycles the line style of the active pen. Cyrillic `ы` (`Cyrillic_yeru`) is
+/// the same key on the `ru` layout.
+pub(crate) fn is_line_style_cycle_key(gdk_key: gdk::Key) -> bool {
+    matches!(gdk_key.to_lower(), gdk::Key::s | gdk::Key::Cyrillic_yeru)
+}
+
+/// The bare `w` key cycles the stroke width of the active pen. Cyrillic `ц` (`Cyrillic_tse`) is
+/// the same key on the `ru` layout.
+pub(crate) fn is_stroke_width_cycle_key(gdk_key: gdk::Key) -> bool {
+    matches!(gdk_key.to_lower(), gdk::Key::w | gdk::Key::Cyrillic_tse)
+}
+
 /// Bare tool keys, so the left hand can switch tools while the right one holds the pen.
 /// `Ctrl`+number stays an accelerator, but the left Ctrl is keyd's Hyper layer on this
 /// machine and the right hand is busy.
 const TOOL_SHORTCUT_BLOCKED_MODIFIERS: gdk::ModifierType = gdk::ModifierType::CONTROL_MASK
     .union(gdk::ModifierType::ALT_MASK)
     .union(gdk::ModifierType::SHIFT_MASK)
+    .union(gdk::ModifierType::SUPER_MASK)
+    .union(gdk::ModifierType::HYPER_MASK)
+    .union(gdk::ModifierType::META_MASK);
+
+/// The cycle shortcuts take `Shift` as "go back", so they block every other modifier instead.
+const CYCLE_SHORTCUT_BLOCKED_MODIFIERS: gdk::ModifierType = gdk::ModifierType::CONTROL_MASK
+    .union(gdk::ModifierType::ALT_MASK)
     .union(gdk::ModifierType::SUPER_MASK)
     .union(gdk::ModifierType::HYPER_MASK)
     .union(gdk::ModifierType::META_MASK);
@@ -62,6 +79,8 @@ const TOOL_SHORTCUT_BLOCKED_MODIFIERS: gdk::ModifierType = gdk::ModifierType::CO
 /// the shortcuts would stop working until the canvas was clicked again. Deferring to an editable
 /// text input keeps typing into an entry working.
 ///
+/// `Shift` reverses the cycle shortcuts (`c`, `s`, `w`); every other modifier blocks a shortcut.
+///
 /// Returns whether the key was consumed.
 pub(crate) fn handle_tool_shortcut_key(
     appwindow: &RnAppWindow,
@@ -69,7 +88,7 @@ pub(crate) fn handle_tool_shortcut_key(
     gdk_modifiers: gdk::ModifierType,
     text_input_focused: bool,
 ) -> bool {
-    if text_input_focused || gdk_modifiers.intersects(TOOL_SHORTCUT_BLOCKED_MODIFIERS) {
+    if text_input_focused {
         return false;
     }
     let Some(canvas) = appwindow.active_tab_canvas() else {
@@ -79,12 +98,40 @@ pub(crate) fn handle_tool_shortcut_key(
         return false;
     }
     let key = gdk_key.to_lower();
-    if is_palette_cycle_key(key) {
-        debug!("Palette shortcut: cycling the colorpicker palette");
-        if appwindow.overlays().colorpicker().cycle_palette_color() {
-            canvas.grab_focus();
-            return true;
+    let backwards = gdk_modifiers.contains(gdk::ModifierType::SHIFT_MASK);
+
+    if !gdk_modifiers.intersects(CYCLE_SHORTCUT_BLOCKED_MODIFIERS) {
+        if is_palette_cycle_key(key) {
+            debug!("Palette shortcut: cycling the colorpicker palette, backwards: {backwards}");
+            if appwindow
+                .overlays()
+                .colorpicker()
+                .cycle_palette_color(backwards)
+            {
+                canvas.grab_focus();
+                return true;
+            }
+            return false;
         }
+        if is_line_style_cycle_key(key) {
+            debug!("Tool shortcut: cycling the line style, backwards: {backwards}");
+            if appwindow.cycle_line_style(backwards) {
+                canvas.grab_focus();
+                return true;
+            }
+            return false;
+        }
+        if is_stroke_width_cycle_key(key) {
+            debug!("Tool shortcut: cycling the stroke width, backwards: {backwards}");
+            if appwindow.cycle_stroke_width(backwards) {
+                canvas.grab_focus();
+                return true;
+            }
+            return false;
+        }
+    }
+
+    if gdk_modifiers.intersects(TOOL_SHORTCUT_BLOCKED_MODIFIERS) {
         return false;
     }
     let Some(pen_style) = tool_shortcut_pen_style(key) else {
@@ -807,6 +854,46 @@ mod tests {
     }
 
     #[test]
+    fn line_style_cycle_key_is_bare_s() {
+        for key in [
+            gdk::Key::s,
+            gdk::Key::S,
+            gdk::Key::Cyrillic_yeru,
+            gdk::Key::Cyrillic_YERU,
+        ] {
+            assert!(is_line_style_cycle_key(key), "key {key:?}");
+        }
+        for key in [
+            gdk::Key::d,
+            gdk::Key::space,
+            gdk::Key::_2,
+            gdk::Key::Cyrillic_i,
+        ] {
+            assert!(!is_line_style_cycle_key(key), "key {key:?}");
+        }
+    }
+
+    #[test]
+    fn stroke_width_cycle_key_is_bare_w() {
+        for key in [
+            gdk::Key::w,
+            gdk::Key::W,
+            gdk::Key::Cyrillic_tse,
+            gdk::Key::Cyrillic_TSE,
+        ] {
+            assert!(is_stroke_width_cycle_key(key), "key {key:?}");
+        }
+        for key in [
+            gdk::Key::q,
+            gdk::Key::space,
+            gdk::Key::_3,
+            gdk::Key::Cyrillic_che,
+        ] {
+            assert!(!is_stroke_width_cycle_key(key), "key {key:?}");
+        }
+    }
+
+    #[test]
     fn tool_shortcut_keys_map_to_pen_styles() {
         assert_maps(
             &[
@@ -819,15 +906,12 @@ mod tests {
             ],
             PenStyle::Brush,
         );
-        assert_maps(
-            &[
-                gdk::Key::s,
-                gdk::Key::Cyrillic_yeru,
-                gdk::Key::_2,
-                gdk::Key::KP_2,
-            ],
-            PenStyle::Shaper,
-        );
+        assert_maps(&[gdk::Key::_2, gdk::Key::KP_2], PenStyle::Shaper);
+        // `s` and `w` are the line style and stroke width cycle keys now, not tool keys.
+        assert_eq!(tool_shortcut_pen_style(gdk::Key::s), None);
+        assert_eq!(tool_shortcut_pen_style(gdk::Key::Cyrillic_yeru), None);
+        assert_eq!(tool_shortcut_pen_style(gdk::Key::w), None);
+        assert_eq!(tool_shortcut_pen_style(gdk::Key::Cyrillic_tse), None);
         assert_maps(
             &[
                 gdk::Key::t,

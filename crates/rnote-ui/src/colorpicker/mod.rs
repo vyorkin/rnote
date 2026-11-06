@@ -505,14 +505,15 @@ impl RnColorPicker {
         ]
     }
 
-    /// Applies the next color of the palette to the active color pad, like clicking the palette
-    /// setters in order.
+    /// Applies the next (`backwards == false`) or previous color of the palette to the active
+    /// color pad, like clicking the palette setters in order.
     ///
     /// The search starts from the color currently on the active pad, so a color chosen outside
-    /// the palette (the color dialog, a loaded document) starts the cycle at the first setter.
+    /// the palette (the color dialog, a loaded document) starts the cycle at the first (last)
+    /// setter.
     ///
     /// Returns whether a color was applied.
-    pub(crate) fn cycle_palette_color(&self) -> bool {
+    pub(crate) fn cycle_palette_color(&self, backwards: bool) -> bool {
         let setters = self.setters();
         let active_color = if self.stroke_color_pad_active() {
             self.stroke_color()
@@ -532,7 +533,17 @@ impl RnColorPicker {
                     .iter()
                     .position(|setter| setter.color() == active_color)
             });
-        let next_index = current_index.map_or(0, |index| (index + 1) % setters.len());
+        let len = setters.len();
+        let next_index = current_index.map_or_else(
+            || if backwards { len - 1 } else { 0 },
+            |index| {
+                if backwards {
+                    (index + len - 1) % len
+                } else {
+                    (index + 1) % len
+                }
+            },
+        );
 
         let setter = &setters[next_index];
         if setter.is_active() {

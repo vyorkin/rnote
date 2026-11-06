@@ -14,6 +14,7 @@ use gettextrs::gettext;
 use gtk4::{Application, EventControllerKey, IconTheme, Widget, gdk, gio, glib, glib::clone};
 use p2d::math::Vector2;
 use rnote_compose::Color;
+use rnote_compose::style::smooth::LineStyle;
 use rnote_engine::document::DocumentConfig;
 use rnote_engine::engine::{EngineConfig, EngineConfigShared};
 use rnote_engine::ext::GdkRGBAExt;
@@ -826,6 +827,71 @@ impl RnAppWindow {
         Ok(file_imported)
     }
 
+    /// Cycles the line style of the active pen, solid → dotted → dashed → solid, or the reverse
+    /// when `backwards` is set.
+    ///
+    /// Pens whose current style has no line at all (the textured brush, a rough shape, a
+    /// coordinate system) leave the config untouched.
+    ///
+    /// Returns whether a line style was applied.
+    pub(crate) fn cycle_line_style(&self, backwards: bool) -> bool {
+        let Some(canvas) = self.active_tab_canvas() else {
+            return false;
+        };
+        let pen_style = canvas.engine_ref().current_pen_style_w_override();
+
+        {
+            let engine_config = self.engine_config();
+            let mut config = engine_config.write();
+            let line_style = match pen_style {
+                PenStyle::Brush => config.pens_config.brush_config.line_style(),
+                PenStyle::Shaper => config.pens_config.shaper_config.line_style(),
+                _ => None,
+            };
+            let Some(line_style) = line_style else {
+                return false;
+            };
+            let next = next_line_style(line_style, backwards);
+            match pen_style {
+                PenStyle::Brush => config.pens_config.brush_config.update_line_style(next),
+                PenStyle::Shaper => config.pens_config.shaper_config.update_line_style(next),
+                _ => {}
+            }
+        };
+
+        self.refresh_ui();
+        true
+    }
+
+    /// Cycles the stroke width of the active pen through its width presets, or the reverse when
+    /// `backwards` is set.
+    ///
+    /// Returns whether a width was applied.
+    pub(crate) fn cycle_stroke_width(&self, backwards: bool) -> bool {
+        let Some(canvas) = self.active_tab_canvas() else {
+            return false;
+        };
+        let picker = match canvas.engine_ref().current_pen_style_w_override() {
+            PenStyle::Brush => self
+                .overlays()
+                .penssidebar()
+                .brush_page()
+                .stroke_width_picker(),
+            PenStyle::Shaper => self
+                .overlays()
+                .penssidebar()
+                .shaper_page()
+                .stroke_width_picker(),
+            PenStyle::Eraser => self
+                .overlays()
+                .penssidebar()
+                .eraser_page()
+                .stroke_width_picker(),
+            _ => return false,
+        };
+        picker.cycle_stroke_width(backwards)
+    }
+
     /// Refresh the UI from the global state and from the current active tab page.
     pub(crate) fn refresh_ui(&self) {
         let canvas = self.active_tab_canvas();
@@ -1137,4 +1203,33 @@ fn focus_is_text_editable(focus: Option<Widget>) -> bool {
         widget = current.parent();
     }
     false
+}
+
+/// The line style that follows `line_style` in the cycle, or the one before it when `backwards`
+/// is set.
+fn next_line_style(line_style: LineStyle, backwards: bool) -> LineStyle {
+    match (line_style, backwards) {
+        (LineStyle::Solid, false) => LineStyle::Dotted,
+        (LineStyle::Dotted, false) => LineStyle::Dashed,
+        (LineStyle::Dashed, false) => LineStyle::Solid,
+        (LineStyle::Solid, true) => LineStyle::Dashed,
+        (LineStyle::Dotted, true) => LineStyle::Solid,
+        (LineStyle::Dashed, true) => LineStyle::Dotted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_style_cycle_wraps_both_ways() {
+        assert_eq!(next_line_style(LineStyle::Solid, false), LineStyle::Dotted);
+        assert_eq!(next_line_style(LineStyle::Dotted, false), LineStyle::Dashed);
+        assert_eq!(next_line_style(LineStyle::Dashed, false), LineStyle::Solid);
+
+        assert_eq!(next_line_style(LineStyle::Solid, true), LineStyle::Dashed);
+        assert_eq!(next_line_style(LineStyle::Dotted, true), LineStyle::Solid);
+        assert_eq!(next_line_style(LineStyle::Dashed, true), LineStyle::Dotted);
+    }
 }

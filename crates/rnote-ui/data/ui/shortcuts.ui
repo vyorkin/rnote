@@ -77,7 +77,7 @@
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Shaper'</property>
-                <property name="accelerator">s 2 &lt;ctrl&gt;2 &lt;alt&gt;2</property>
+                <property name="accelerator">2 &lt;ctrl&gt;2 &lt;alt&gt;2</property>
               </object>
             </child>
             <child>
@@ -113,7 +113,19 @@
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Cycle through the Palette Colors</property>
-                <property name="accelerator">c</property>
+                <property name="accelerator">c &lt;Shift&gt;c</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Cycle through the Line Styles</property>
+                <property name="accelerator">s &lt;Shift&gt;s</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Cycle through the Stroke Widths</property>
+                <property name="accelerator">w &lt;Shift&gt;w</property>
               </object>
             </child>
           </object>
