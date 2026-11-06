@@ -339,6 +339,20 @@ pub(crate) fn handle_key_controller_key_pressed(
         return glib::Propagation::Stop;
     }
 
+    // `Ctrl`+`V` is matched here instead of by the `"<Ctrl>v"` accelerator, because an input
+    // remapping layer that adds modifiers to the chord (keyd's Hyper: left Ctrl held, every key
+    // carries Ctrl+Alt+Shift+Super with it) defeats the accelerator lookup - it matches an exact
+    // modifier set *and* keyval, and with Shift held the keyval is `V`. A dictation tool pastes
+    // right after its toggle key, i.e. with that layer still held, and its transcription would be
+    // dropped. Matching the chord here, case-insensitively, keeps the paste working through any
+    // extra modifiers such a layer adds.
+    if gdk_modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && matches!(gdk_key.to_unicode(), Some('v' | 'V'))
+        && canvas.activate_action("win.clipboard-paste", None).is_ok()
+    {
+        return glib::Propagation::Stop;
+    }
+
     let now = Instant::now();
     let keyboard_key = retrieve_keyboard_key(gdk_key);
     let modifier_keys = retrieve_modifier_keys(gdk_modifiers);
