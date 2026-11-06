@@ -491,6 +491,61 @@ impl RnColorPicker {
         self.imp().active_color_label.get()
     }
 
+    fn setters(&self) -> [RnColorSetter; 9] {
+        [
+            self.setter_1(),
+            self.setter_2(),
+            self.setter_3(),
+            self.setter_4(),
+            self.setter_5(),
+            self.setter_6(),
+            self.setter_7(),
+            self.setter_8(),
+            self.setter_9(),
+        ]
+    }
+
+    /// Applies the next color of the palette to the active color pad, like clicking the palette
+    /// setters in order.
+    ///
+    /// The search starts from the color currently on the active pad, so a color chosen outside
+    /// the palette (the color dialog, a loaded document) starts the cycle at the first setter.
+    ///
+    /// Returns whether a color was applied.
+    pub(crate) fn cycle_palette_color(&self) -> bool {
+        let setters = self.setters();
+        let active_color = if self.stroke_color_pad_active() {
+            self.stroke_color()
+        } else if self.fill_color_pad_active() {
+            self.fill_color()
+        } else {
+            return false;
+        };
+
+        // Anchor on the active setter when it carries the current color, so duplicated palette
+        // colors still advance one entry per press instead of sticking on the first copy.
+        let current_index = setters
+            .iter()
+            .position(|setter| setter.is_active() && setter.color() == active_color)
+            .or_else(|| {
+                setters
+                    .iter()
+                    .position(|setter| setter.color() == active_color)
+            });
+        let next_index = current_index.map_or(0, |index| (index + 1) % setters.len());
+
+        let setter = &setters[next_index];
+        if setter.is_active() {
+            // Re-activating the same setter emits nothing, so apply its color directly.
+            self.set_color_active_pad(setter.color());
+        } else {
+            // The setter's "active" handler deselects the others and applies its color to the
+            // active pad.
+            setter.set_active(true);
+        }
+        true
+    }
+
     pub(crate) fn init(&self, appwindow: &RnAppWindow) {
         self.imp().colordialog_button.connect_clicked(
             clone!(#[weak(rename_to=colorpicker)] self, #[weak] appwindow , move |_| {

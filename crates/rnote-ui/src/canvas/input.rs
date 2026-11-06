@@ -39,6 +39,12 @@ pub(crate) fn tool_shortcut_pen_style(gdk_key: gdk::Key) -> Option<PenStyle> {
     }
 }
 
+/// The bare `c` key cycles the colorpicker palette. Cyrillic `с` (`Cyrillic_es`) is the same
+/// key on the `ru` layout.
+pub(crate) fn is_palette_cycle_key(gdk_key: gdk::Key) -> bool {
+    matches!(gdk_key.to_lower(), gdk::Key::c | gdk::Key::Cyrillic_es)
+}
+
 /// Bare tool keys, so the left hand can switch tools while the right one holds the pen.
 /// `Ctrl`+number stays an accelerator, but the left Ctrl is keyd's Hyper layer on this
 /// machine and the right hand is busy.
@@ -72,7 +78,16 @@ pub(crate) fn handle_tool_shortcut_key(
     if canvas.engine_ref().penholder.is_handling_text_input() {
         return false;
     }
-    let Some(pen_style) = tool_shortcut_pen_style(gdk_key.to_lower()) else {
+    let key = gdk_key.to_lower();
+    if is_palette_cycle_key(key) {
+        debug!("Palette shortcut: cycling the colorpicker palette");
+        if appwindow.overlays().colorpicker().cycle_palette_color() {
+            canvas.grab_focus();
+            return true;
+        }
+        return false;
+    }
+    let Some(pen_style) = tool_shortcut_pen_style(key) else {
         return false;
     };
 
@@ -768,6 +783,26 @@ mod tests {
                 Some(pen_style),
                 "key {key:?}"
             );
+        }
+    }
+
+    #[test]
+    fn palette_cycle_key_is_bare_c() {
+        for key in [
+            gdk::Key::c,
+            gdk::Key::C,
+            gdk::Key::Cyrillic_es,
+            gdk::Key::Cyrillic_ES,
+        ] {
+            assert!(is_palette_cycle_key(key), "key {key:?}");
+        }
+        for key in [
+            gdk::Key::b,
+            gdk::Key::space,
+            gdk::Key::_3,
+            gdk::Key::Cyrillic_i,
+        ] {
+            assert!(!is_palette_cycle_key(key), "key {key:?}");
         }
     }
 
