@@ -190,11 +190,6 @@ impl Engine {
         // push clip
         snapshot.push_clip(&graphene::Rect::from_p2d_aabb(doc_bounds));
 
-        // push blend mode for each highlighter stroke
-        for _ in highlighter_keys.iter() {
-            snapshot.push_blend(gtk4::gsk::BlendMode::Multiply);
-        }
-
         self.draw_background_to_gtk_snapshot(snapshot)?;
         self.draw_format_borders_to_gtk_snapshot(snapshot)?;
 
@@ -203,14 +198,15 @@ impl Engine {
             self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
         }
 
-        // top image in blend (highlighter layer)
-        for &key in highlighter_keys.iter() {
-            // pop blend bottom image
-            snapshot.pop();
+        // top image in blend (highlighter layer). The whole layer is blended once,
+        // so overlapping highlighter strokes don't accumulate.
+        if !highlighter_keys.is_empty() {
+            snapshot.push_blend(gtk4::gsk::BlendMode::Multiply);
 
-            self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
+            for &key in highlighter_keys.iter() {
+                self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
+            }
 
-            // pop blend top image
             snapshot.pop();
         }
 
