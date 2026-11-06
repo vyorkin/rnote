@@ -548,7 +548,9 @@ impl StrokeStore {
             if self.preview_keys.contains(&key) {
                 use crate::drawable::DrawableOnDoc;
 
-                if let Err(e) = stroke.draw_on_doc_to_gtk_snapshot(snapshot, engine_view) {
+                if let Err(e) =
+                    stroke.draw_on_doc_to_gtk_snapshot_in_camera_space(snapshot, engine_view)
+                {
                     error!("Drawing stroke preview to gtk snapshot failed, Err: {e:?}");
                 }
                 return;

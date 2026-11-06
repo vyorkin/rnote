@@ -120,6 +120,15 @@ impl EngineViewMut<'_> {
     }
 }
 
+#[cfg(test)]
+impl Engine {
+    /// Runs the given closure with a mutable view into the engine, for tests that drive a pen
+    /// directly instead of going through [Engine::handle_pen_event].
+    pub(crate) fn with_view_mut<R>(&mut self, f: impl FnOnce(&mut EngineViewMut<'_>) -> R) -> R {
+        f(&mut engine_view_mut!(self))
+    }
+}
+
 #[derive(Debug, Clone)]
 /// An engine task, usually coming from a spawned thread and to be processed with [Engine::handle_engine_task].
 pub enum EngineTask {

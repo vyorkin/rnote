@@ -83,4 +83,36 @@ pub trait DrawableOnDoc {
 
         Ok(())
     }
+
+    /// Draw itself on the snapshot, in the coordinate space of the document.
+    ///
+    /// The snapshot is expected to be already transformed by the camera transform, so the cairo
+    /// node is placed and the geometry drawn in document coordinates.
+    #[cfg(feature = "ui")]
+    fn draw_on_doc_to_gtk_snapshot_in_camera_space(
+        &self,
+        snapshot: &gtk4::Snapshot,
+        engine_view: &EngineView,
+    ) -> anyhow::Result<()> {
+        use crate::ext::GrapheneRectExt;
+        use gtk4::{graphene, prelude::*};
+        use rnote_compose::ext::AabbExt;
+
+        if let Some(bounds) = self.bounds_on_doc(engine_view) {
+            let viewport = engine_view.camera.viewport();
+            // Restrict to viewport as maximum bounds, else cairo is very unperformant
+            // and will even crash for very large bounds
+            let mut bounds = bounds.clamp(None, Some(viewport));
+            bounds.ensure_positive();
+            bounds.assert_valid()?;
+
+            snapshot.save();
+            let cairo_cx = snapshot.append_cairo(&graphene::Rect::from_p2d_aabb(bounds));
+            let mut piet_cx = piet_cairo::CairoRenderContext::new(&cairo_cx);
+            self.draw_on_doc(&mut piet_cx, engine_view)?;
+            snapshot.restore();
+        }
+
+        Ok(())
+    }
 }

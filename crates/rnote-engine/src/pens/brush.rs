@@ -600,7 +600,7 @@ impl PenBehaviour for Brush {
             ) => {
                 *adjusted = true;
                 let shape = adjust.adjusted(element.pos);
-                widget_flags |= update_shape_stroke(*stroke_key, shape, engine_view);
+                widget_flags |= update_shape_stroke(*stroke_key, shape, true, engine_view);
 
                 EventResult {
                     handled: true,
@@ -618,7 +618,7 @@ impl PenBehaviour for Brush {
             ) => {
                 if *adjusted {
                     let shape = adjust.adjusted(element.pos);
-                    widget_flags |= update_shape_stroke(*stroke_key, shape, engine_view);
+                    widget_flags |= update_shape_stroke(*stroke_key, shape, false, engine_view);
                     widget_flags |= engine_view.store.record(Instant::now());
                 }
                 self.state = BrushState::Idle;
@@ -629,7 +629,8 @@ impl PenBehaviour for Brush {
                     progress: PenProgress::Finished,
                 }
             }
-            (BrushState::AdjustingShape { .. }, PenEvent::Cancel) => {
+            (BrushState::AdjustingShape { stroke_key, .. }, PenEvent::Cancel) => {
+                widget_flags |= finish_shape_stroke(*stroke_key, engine_view);
                 self.state = BrushState::Idle;
 
                 EventResult {
@@ -855,6 +856,7 @@ impl Brush {
 fn update_shape_stroke(
     stroke_key: StrokeKey,
     shape: Shape,
+    previewing: bool,
     engine_view: &mut EngineViewMut,
 ) -> WidgetFlags {
     let mut widget_flags = WidgetFlags::default();
@@ -865,6 +867,29 @@ fn update_shape_stroke(
         return widget_flags;
     }
 
+    if previewing {
+        // While the pen moves, the stroke is drawn from its geometry as a vector preview.
+        // Regenerating its hitboxes and its image for every pen event is far slower than the pen,
+        // so the events pile up in the queue and the drag stalls.
+        engine_view.store.set_previewing(&[stroke_key], true);
+        widget_flags.redraw = true;
+        return widget_flags;
+    }
+
+    widget_flags |= finish_shape_stroke(stroke_key, engine_view);
+    widget_flags.redraw = true;
+
+    widget_flags
+}
+
+/// Update the hitboxes and the image of a shape stroke and end its vector preview, if it has one.
+///
+/// This is the expensive part of adjusting a shape, so it runs once the pen lifts (or the gesture
+/// is cancelled) instead of once per pen event of the drag.
+fn finish_shape_stroke(stroke_key: StrokeKey, engine_view: &mut EngineViewMut) -> WidgetFlags {
+    let mut widget_flags = WidgetFlags::default();
+
+    engine_view.store.set_previewing(&[stroke_key], false);
     engine_view.store.update_geometry_for_stroke(stroke_key);
     engine_view.store.regenerate_rendering_for_stroke_threaded(
         engine_view.tasks_tx.clone(),
@@ -876,7 +901,6 @@ fn update_shape_stroke(
         .document
         .resize_autoexpand(engine_view.store, engine_view.camera);
     widget_flags.store_modified = true;
-    widget_flags.redraw = true;
 
     widget_flags
 }
@@ -1208,5 +1232,199 @@ mod tests {
         taper_fountain_stroke(&mut path, 10.0);
 
         assert!((path.start.pressure - 1.0).abs() < 1e-9);
+    }
+
+    /// A shape being adjusted by the pen that drew it follows the pen from its geometry: its image
+    /// is rasterized once the pen lifts, not for every step of the drag - rasterizing a surface of
+    /// the shape's size per pen event is far slower than the pen, which makes the drag stall.
+    #[test]
+    fn adjusting_a_shape_keeps_its_image_until_the_pen_lifts() {
+        use crate::Engine;
+        use crate::store::render_comp::RenderCompState;
+        use crate::strokes::{ShapeStroke, Stroke};
+        use p2d::glamx::DAffine2;
+        use rnote_compose::penevent::PenEvent;
+        use rnote_compose::shapes::{Ellipse, Shape};
+        use rnote_compose::style::Style;
+        use rnote_compose::style::smooth::SmoothOptions;
+        use std::collections::HashSet;
+        use std::time::Instant;
+
+        fn pen_event_down(pos: Vector2) -> PenEvent {
+            PenEvent::Down {
+                element: Element::new(pos, Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            }
+        }
+
+        fn pen_event_up(pos: Vector2) -> PenEvent {
+            PenEvent::Up {
+                element: Element::new(pos, Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            }
+        }
+
+        let mut engine = Engine::default();
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+
+        let center = Vector2::new(400., 300.);
+        let shape = Shape::Ellipse(Ellipse {
+            radii: Vector2::splat(225.),
+            affine: DAffine2::from_translation(center),
+        });
+        let key = engine.store.insert_stroke(
+            Stroke::ShapeStroke(ShapeStroke::new(
+                shape.clone(),
+                Style::Smooth(SmoothOptions::default()),
+            )),
+            None,
+        );
+        engine.store.regenerate_rendering_for_strokes(
+            &[key],
+            engine.camera.viewport(),
+            engine.camera.image_scale(),
+        );
+        let images_before = engine.store.debug_image_pixels(key);
+        assert!(
+            images_before.is_some(),
+            "the shape is rendered before the drag"
+        );
+
+        let start_pos = center + Vector2::new(150., -150.);
+        let mut brush = Brush {
+            state: BrushState::AdjustingShape {
+                stroke_key: key,
+                adjust: ShapeAdjust::new(shape, start_pos, false),
+                adjusted: false,
+            },
+            ..Default::default()
+        };
+
+        let now = Instant::now();
+        let _ =
+            engine.with_view_mut(|view| brush.handle_event(pen_event_down(start_pos), now, view));
+        // the drag grows the shape well past the extent it had when it was recognized
+        for step in 1..=20 {
+            let pos = start_pos + Vector2::splat(20. * step as f64);
+            let _ = engine.with_view_mut(|view| brush.handle_event(pen_event_down(pos), now, view));
+        }
+
+        assert_eq!(
+            engine.store.debug_image_pixels(key),
+            images_before,
+            "no step of the drag rasterizes the shape"
+        );
+        assert!(
+            engine.store.debug_is_previewing(key),
+            "the shape is drawn from its geometry while the pen moves"
+        );
+
+        let _ = engine.with_view_mut(|view| {
+            brush.handle_event(pen_event_up(start_pos + Vector2::splat(400.)), now, view)
+        });
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends when the pen lifts"
+        );
+        assert_ne!(
+            engine.store.render_comp_state(key),
+            Some(RenderCompState::Complete),
+            "the image is regenerated once the pen lifts"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "ui"))]
+mod preview_draw {
+    use super::*;
+    use crate::Engine;
+    use crate::strokes::{ShapeStroke, Stroke};
+    use gtk4::prelude::*;
+    use p2d::bounding_volume::Aabb;
+    use p2d::glamx::{DAffine2, DVec2};
+    use rnote_compose::ext::AabbExt;
+    use rnote_compose::shapes::{Ellipse, Shape};
+    use rnote_compose::style::Style;
+    use rnote_compose::style::smooth::SmoothOptions;
+
+    /// The bounds on the surface that the preview of a dragged stroke is drawn into, with the
+    /// document scrolled to `center`, and the bounds the camera transform puts the stroke at.
+    fn preview_bounds_on_surface(center: Vector2) -> (Aabb, Aabb) {
+        let _ = gtk4::init();
+        let mut engine = Engine::default();
+        engine.document.width = 6000.;
+        engine.document.height = 6000.;
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+        let _ = engine
+            .camera
+            .set_offset(center - Vector2::new(400., 300.), &engine.document);
+
+        let key = engine.store.insert_stroke(
+            Stroke::ShapeStroke(ShapeStroke::new(
+                Shape::Ellipse(Ellipse {
+                    radii: Vector2::splat(100.),
+                    affine: DAffine2::from_translation(center),
+                }),
+                Style::Smooth(SmoothOptions::default()),
+            )),
+            None,
+        );
+        engine.store.set_previewing(&[key], true);
+        let stroke = engine.store.get_stroke_arc(key).unwrap();
+
+        let expected = stroke
+            .bounds()
+            .clamp(None, Some(engine.camera.viewport()))
+            .scale(engine.camera.total_zoom())
+            .translate(-engine.camera.offset());
+
+        let snapshot = gtk4::Snapshot::new();
+        snapshot.save();
+        snapshot.transform(Some(&engine.camera.transform_for_gtk_snapshot()));
+        engine
+            .with_view_mut(|view| {
+                stroke.draw_on_doc_to_gtk_snapshot_in_camera_space(&snapshot, &view.as_im())
+            })
+            .unwrap();
+        snapshot.restore();
+        let drawn = snapshot.to_node().unwrap().bounds();
+        let drawn = Aabb::new(
+            DVec2::new(drawn.x() as f64, drawn.y() as f64),
+            DVec2::new(
+                (drawn.x() + drawn.width()) as f64,
+                (drawn.y() + drawn.height()) as f64,
+            ),
+        );
+
+        (drawn, expected)
+    }
+
+    /// A stroke being dragged is drawn from its geometry into the camera-transformed snapshot, so
+    /// it has to land where the camera puts the stroke, also when the document is scrolled far
+    /// from its origin.
+    #[test]
+    fn a_preview_is_drawn_where_the_stroke_is_in_a_panned_document() {
+        let within_a_pixel = |a: &Aabb, b: &Aabb| {
+            (a.mins - b.mins).abs().max_element() < 1.0
+                && (a.maxs - b.maxs).abs().max_element() < 1.0
+        };
+
+        let (drawn, expected) = preview_bounds_on_surface(Vector2::new(400., 300.));
+        assert!(
+            within_a_pixel(&drawn, &expected),
+            "the preview is drawn where the camera puts the stroke: {drawn:?} != {expected:?}"
+        );
+
+        let (drawn, expected) = preview_bounds_on_surface(Vector2::new(2300., 5100.));
+        assert!(
+            within_a_pixel(&drawn, &expected),
+            "the preview follows the document instead of staying at its origin: \
+             {drawn:?} != {expected:?}"
+        );
+        assert!(
+            drawn.maxs.x <= 800. && drawn.maxs.y <= 600.,
+            "the panned preview lands on the surface: {drawn:?}"
+        );
     }
 }
