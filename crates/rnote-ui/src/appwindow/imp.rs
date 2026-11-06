@@ -532,17 +532,7 @@ impl RnAppWindow {
 
                 // A text entry types a space. The typewriter's text box keeps focus on
                 // the canvas, so its state is checked separately.
-                let focus = gtk4::prelude::RootExt::focus(&appwindow);
-                if focus
-                    .as_ref()
-                    .is_some_and(|focus| focus.is::<gtk4::Editable>())
-                {
-                    return glib::Propagation::Proceed;
-                }
-                if focus
-                    .and_then(|focus| focus.downcast::<crate::RnCanvas>().ok())
-                    .is_some_and(|canvas| canvas.engine_ref().penholder.is_handling_text_input())
-                {
+                if focus_is_text_input(&appwindow) {
                     return glib::Propagation::Proceed;
                 }
 
@@ -567,8 +557,72 @@ impl RnAppWindow {
         ));
         obj.add_controller(space_pan_controller);
 
+        // Shift held gives the lasso (the selector) without switching the tool for
+        // good: the style is a hold layer that disappears on the release. A change
+        // that arrives in the middle of a stroke waits for the stroke to end, so the
+        // stroke is neither cancelled nor drawn with the wrong pen.
+        let lasso_hold_controller = EventControllerKey::builder()
+            .name("lasso_hold_controller")
+            .propagation_phase(PropagationPhase::Capture)
+            .build();
+        lasso_hold_controller.connect_key_pressed(clone!(
+            #[weak(rename_to=appwindow)]
+            obj,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, modifiers| {
+                let blocking_modifiers = gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SUPER_MASK
+                    | gdk::ModifierType::HYPER_MASK
+                    | gdk::ModifierType::META_MASK;
+
+                if !matches!(key, gdk::Key::Shift_L | gdk::Key::Shift_R)
+                    || !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+                    || modifiers.intersects(blocking_modifiers)
+                {
+                    return glib::Propagation::Proceed;
+                }
+
+                // Shift selects text there. The typewriter's text box keeps focus on
+                // the canvas, so its state is checked separately.
+                if focus_is_text_input(&appwindow) {
+                    return glib::Propagation::Proceed;
+                }
+
+                for wrapper in appwindow.get_all_tabs() {
+                    let canvas = wrapper.canvas();
+                    let widget_flags = canvas
+                        .engine_mut()
+                        .change_pen_style_hold(Some(PenStyle::Selector));
+                    appwindow.handle_widget_flags(widget_flags, &canvas);
+                }
+                glib::Propagation::Proceed
+            }
+        ));
+        lasso_hold_controller.connect_key_released(clone!(
+            #[weak(rename_to=appwindow)]
+            obj,
+            move |_, key, _, modifiers| {
+                // Releasing one Shift while the other is still held keeps the lasso.
+                if !matches!(key, gdk::Key::Shift_L | gdk::Key::Shift_R)
+                    || modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+                {
+                    return;
+                }
+
+                for wrapper in appwindow.get_all_tabs() {
+                    let canvas = wrapper.canvas();
+                    let widget_flags = canvas.engine_mut().change_pen_style_hold(None);
+                    appwindow.handle_widget_flags(widget_flags, &canvas);
+                }
+            }
+        ));
+        obj.add_controller(lasso_hold_controller);
+
         // A Space held while the window is left has no release delivered here, so the
-        // flag would stay set and the next drag would pan unexpectedly.
+        // flag would stay set and the next drag would pan unexpectedly. A held Shift
+        // has the same problem: its release goes to the newly focused window.
         obj.connect_notify_local(
             Some("is-active"),
             clone!(
@@ -577,7 +631,10 @@ impl RnAppWindow {
                 move |obj, _| {
                     if !obj.is_active() {
                         for wrapper in appwindow.get_all_tabs() {
-                            wrapper.canvas().set_space_pan_held(false);
+                            let canvas = wrapper.canvas();
+                            canvas.set_space_pan_held(false);
+                            let widget_flags = canvas.engine_mut().reset_pen_style_hold();
+                            appwindow.handle_widget_flags(widget_flags, &canvas);
                         }
                     }
                 }
@@ -961,4 +1018,20 @@ impl RnAppWindow {
                 .set_direction(ArrowType::Left);
         }
     }
+}
+
+/// Whether focus is in a text entry, where a bare key types instead of acting on the
+/// canvas. The typewriter's text box keeps focus on the canvas, so its state is
+/// checked separately from the widget type.
+fn focus_is_text_input(appwindow: &super::RnAppWindow) -> bool {
+    let focus = gtk4::prelude::RootExt::focus(appwindow);
+    if focus
+        .as_ref()
+        .is_some_and(|focus| focus.is::<gtk4::Editable>())
+    {
+        return true;
+    }
+    focus
+        .and_then(|focus| focus.downcast::<crate::RnCanvas>().ok())
+        .is_some_and(|canvas| canvas.engine_ref().penholder.is_handling_text_input())
 }

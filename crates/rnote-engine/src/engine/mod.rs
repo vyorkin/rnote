@@ -528,6 +528,27 @@ impl Engine {
             .change_style_override(new_style_override, &mut engine_view_mut!(self))
     }
 
+    /// Temporarily change the pen style while a key is held (e.g. Shift for the lasso).
+    ///
+    /// A change that arrives while the pen is down waits for the stroke to finish, so
+    /// the stroke is neither cancelled nor drawn with the wrong pen.
+    pub fn change_pen_style_hold(&mut self, new_hold_style: Option<PenStyle>) -> WidgetFlags {
+        self.penholder
+            .change_hold_style(new_hold_style, &mut engine_view_mut!(self))
+    }
+
+    /// Drop the held-key pen style immediately, even in the middle of a stroke.
+    pub fn reset_pen_style_hold(&mut self) -> WidgetFlags {
+        self.penholder
+            .reset_hold_style(&mut engine_view_mut!(self))
+    }
+
+    /// Clear every temporary pen style and switch to `pen_style` in one step.
+    pub fn force_pen_style(&mut self, pen_style: PenStyle) -> WidgetFlags {
+        self.penholder
+            .force_pen_style(pen_style, &mut engine_view_mut!(self))
+    }
+
     /// Change the pen mode. Relevant for stylus input.
     pub fn change_pen_mode(&mut self, pen_mode: PenMode) -> WidgetFlags {
         self.penholder

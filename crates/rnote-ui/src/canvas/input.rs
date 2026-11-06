@@ -441,12 +441,22 @@ pub(crate) fn handle_key_controller_key_pressed(
         return glib::Propagation::Stop;
     }
 
+    // `Ctrl`+`C` is matched for the same reason as `Ctrl`+`V` above, and also so it
+    // keeps copying the selection while Shift is held for the lasso.
+    if gdk_modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && matches!(gdk_key.to_unicode(), Some('c' | 'C'))
+        && !canvas.engine_ref().penholder.is_handling_text_input()
+        && canvas.activate_action("win.clipboard-copy", None).is_ok()
+    {
+        return glib::Propagation::Stop;
+    }
+
     let now = Instant::now();
     let keyboard_key = retrieve_keyboard_key(gdk_key);
     let modifier_keys = retrieve_modifier_keys(gdk_modifiers);
     let shortcut_key = retrieve_keyboard_shortcut_key(gdk_key, gdk_modifiers);
 
-    let (propagation, widget_flags) = if let Some(shortcut_key) = shortcut_key {
+    let (propagation, mut widget_flags) = if let Some(shortcut_key) = shortcut_key {
         canvas
             .engine_mut()
             .handle_pressed_shortcut_key(shortcut_key, now)
@@ -461,8 +471,20 @@ pub(crate) fn handle_key_controller_key_pressed(
         )
     };
 
+    // The pen above got Escape first (ending text editing, cancelling a selection or
+    // a shape edit). Whatever tool was current, Escape then returns to the brush.
+    let escaped_to_brush = gdk_key == gdk::Key::Escape
+        && canvas.engine_ref().current_pen_style_w_override() != PenStyle::Brush;
+    if escaped_to_brush {
+        widget_flags |= canvas.engine_mut().force_pen_style(PenStyle::Brush);
+    }
     canvas.emit_handle_widget_flags(widget_flags);
-    propagation.into_glib()
+
+    if escaped_to_brush {
+        glib::Propagation::Stop
+    } else {
+        propagation.into_glib()
+    }
 }
 
 pub(crate) fn handle_key_controller_key_released(
