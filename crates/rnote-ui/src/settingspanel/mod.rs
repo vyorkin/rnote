@@ -19,6 +19,9 @@ use gtk4::{
 use num_traits::ToPrimitive;
 use rnote_compose::penevent::ShortcutKey;
 use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
+use rnote_compose::shaperecognition::{
+    BRACKET_CORNER_RADIUS_RATIO_MAX, BRACKET_CORNER_RADIUS_RATIO_MIN, BracketStyle,
+};
 use rnote_engine::WidgetFlags;
 use rnote_engine::document::Layout;
 use rnote_engine::document::background::PatternStyle;
@@ -27,6 +30,11 @@ use rnote_engine::ext::GdkRGBAExt;
 use rnote_engine::gestures::GestureConfig;
 use rnote_engine::pens::PenMode;
 use std::cell::RefCell;
+
+/// The item of the bracket shape row that makes an arc bracket.
+const BRACKET_STYLE_ARC_INDEX: u32 = 0;
+/// The item of the bracket shape row that makes a rounded bracket.
+const BRACKET_STYLE_ROUNDED_INDEX: u32 = 1;
 
 mod imp {
     use super::*;
@@ -143,6 +151,10 @@ mod imp {
         pub(crate) gestures_shaperecognition_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) gestures_shaperecognition_delay_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) gestures_bracket_style_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) gestures_bracket_corner_radius_row: TemplateChild<adw::SpinRow>,
         #[template_child]
         pub(crate) gestures_curve_recognition_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
@@ -1474,6 +1486,11 @@ impl RnSettingsPanel {
                         .imp()
                         .gestures_curve_recognition_row
                         .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_bracket_style_row
+                        .set_sensitive(row.is_active());
+                    settingspanel.refresh_bracket_corner_radius_sensitivity(&appwindow);
                 }
             ));
 
@@ -1507,6 +1524,41 @@ impl RnSettingsPanel {
                 }
             ));
 
+        imp.gestures_bracket_style_row
+            .connect_selected_item_notify(clone!(
+                #[weak(rename_to=settingspanel)]
+                self,
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow.engine_config().write().gestures.bracket_style =
+                        if row.selected() == BRACKET_STYLE_ROUNDED_INDEX {
+                            BracketStyle::Rounded
+                        } else {
+                            BracketStyle::Arc
+                        };
+                    settingspanel.refresh_bracket_corner_radius_sensitivity(&appwindow);
+                }
+            ));
+
+        imp.gestures_bracket_corner_radius_row
+            .set_range(
+                BRACKET_CORNER_RADIUS_RATIO_MIN * 100.0,
+                BRACKET_CORNER_RADIUS_RATIO_MAX * 100.0,
+            );
+        imp.gestures_bracket_corner_radius_row
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .bracket_corner_radius_ratio = row.value() / 100.0;
+                }
+            ));
+
         imp.gestures_circle_lasso_row.connect_active_notify(clone!(
             #[weak]
             appwindow,
@@ -1531,6 +1583,15 @@ impl RnSettingsPanel {
                         .multi_touch_undo_redo_enabled = row.is_active();
                 }
             ));
+    }
+
+    /// The corner radius of a bracket is only one of the two bracket shapes: it follows the
+    /// switch and whether shapes are recognized at all.
+    fn refresh_bracket_corner_radius_sensitivity(&self, appwindow: &RnAppWindow) {
+        let gestures = appwindow.engine_config().read().gestures.clone();
+        self.imp().gestures_bracket_corner_radius_row.set_sensitive(
+            gestures.shape_recognition_enabled && gestures.bracket_style == BracketStyle::Rounded,
+        );
     }
 
     fn refresh_gestures_ui(&self, appwindow: &RnAppWindow) {
@@ -1568,6 +1629,15 @@ impl RnSettingsPanel {
             .set_active(gestures.curve_recognition_enabled);
         imp.gestures_curve_recognition_row
             .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_bracket_style_row.set_selected(match gestures.bracket_style {
+            BracketStyle::Arc => BRACKET_STYLE_ARC_INDEX,
+            BracketStyle::Rounded => BRACKET_STYLE_ROUNDED_INDEX,
+        });
+        imp.gestures_bracket_style_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_bracket_corner_radius_row
+            .set_value(gestures.bracket_corner_radius_ratio * 100.0);
+        self.refresh_bracket_corner_radius_sensitivity(appwindow);
         imp.gestures_circle_lasso_row
             .set_active(gestures.circle_lasso_enabled);
         imp.gestures_multi_touch_undo_redo_row

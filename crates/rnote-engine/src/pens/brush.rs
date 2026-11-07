@@ -765,10 +765,17 @@ impl Brush {
         {
             let zoom = engine_view.camera.total_zoom();
             let brush_config = &engine_view.config.pens_config.brush_config;
-            shaperecognition::recognize_shape_with_kind(
+            let gestures = &engine_view.config.gestures;
+            shaperecognition::recognize_shape_with_options(
                 &brushstroke.path,
                 zoom,
-                engine_view.config.gestures.curve_recognition_enabled,
+                &shaperecognition::RecognitionOptions {
+                    curves: gestures.curve_recognition_enabled,
+                    bracket: shaperecognition::BracketOptions {
+                        style: gestures.bracket_style,
+                        corner_radius_ratio: gestures.bracket_corner_radius_ratio,
+                    },
+                },
             )
             .map(|recognized| {
                 // The shape is as wide as the stroke it replaces was on average, which is what sets
@@ -1294,7 +1301,7 @@ mod tests {
         let mut brush = Brush {
             state: BrushState::AdjustingShape {
                 stroke_key: key,
-                adjust: ShapeAdjust::new(shape, start_pos, false),
+                adjust: ShapeAdjust::new(shape, start_pos, None),
                 adjusted: false,
             },
             ..Default::default()

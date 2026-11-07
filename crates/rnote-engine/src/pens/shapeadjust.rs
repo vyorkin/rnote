@@ -3,9 +3,10 @@ use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
 use rnote_compose::Transformable;
+use rnote_compose::shaperecognition::BracketStyle;
 use rnote_compose::shapes::cubbez::cubbez_calc;
 use rnote_compose::shapes::{
-    CubicBezier, Ellipse, Line, QuadraticBezier, Rectangle, Shape, Shapeable,
+    CubicBezier, Curve, Ellipse, Line, QuadraticBezier, Rectangle, Shape, Shapeable,
 };
 
 /// The extent a shape keeps at least while it is adjusted, so that it can't collapse into nothing.
@@ -47,6 +48,8 @@ enum AdjustKind {
     CubicBend,
     /// The end of the bracket the pen rested at follows it, its other end stays fixed.
     BracketEnd(BracketEnd),
+    /// The end of the rounded bracket the pen rested at follows it, its other end stays fixed.
+    RoundedBracketEnd(RoundedBracketEnd),
     /// The shape is scaled between the pen and the corner of its bounds opposite to it.
     ScaleFromPivot {
         pivot: Vector2,
@@ -59,10 +62,17 @@ impl ShapeAdjust {
     ///
     /// `bracket` tells a canonical bracket from an ordinary open curve, which look alike but are
     /// adjusted by different parts of themselves.
-    pub(crate) fn new(recognized: Shape, start_pos: Vector2, bracket: bool) -> Self {
+    pub(crate) fn new(
+        recognized: Shape,
+        start_pos: Vector2,
+        bracket: Option<BracketStyle>,
+    ) -> Self {
         let kind = match &recognized {
-            Shape::CubicBezier(cubic) if bracket => {
+            Shape::CubicBezier(cubic) if bracket == Some(BracketStyle::Arc) => {
                 AdjustKind::BracketEnd(BracketEnd::new(cubic, start_pos))
+            }
+            Shape::Curve(curve) if bracket == Some(BracketStyle::Rounded) => {
+                AdjustKind::RoundedBracketEnd(RoundedBracketEnd::new(curve, start_pos))
             }
             Shape::Line(_) => AdjustKind::LineEnd,
             Shape::Rectangle(rectangle) => AdjustKind::RectangleCorner {
@@ -147,6 +157,9 @@ impl ShapeAdjust {
             }
             (Shape::CubicBezier(cubic), AdjustKind::BracketEnd(bracket)) => {
                 Shape::CubicBezier(bracket.adjusted(cubic, offset))
+            }
+            (Shape::Curve(curve), AdjustKind::RoundedBracketEnd(bracket)) => {
+                Shape::Curve(bracket.adjusted(offset).unwrap_or_else(|| curve.clone()))
             }
             (Shape::CubicBezier(cubic), AdjustKind::CubicBend) => Shape::CubicBezier(CubicBezier {
                 cp1: cubic.cp1 + offset,
@@ -262,6 +275,80 @@ impl BracketEnd {
     }
 }
 
+/// The end of a rounded bracket that follows the pen, while the bracket keeps its shape.
+///
+/// The other end stays where it is. The bracket keeps the share of its height its corners take, so
+/// its body stays as straight and its ends as round as they were recognized when it is dragged,
+/// and it keeps bulging to the side it did.
+#[derive(Debug, Clone)]
+struct RoundedBracketEnd {
+    /// The end that stays where it is.
+    fixed_end: Vector2,
+    /// The end that follows the pen, as it was recognized.
+    dragged_end: Vector2,
+    /// Whether the dragged end is the `end` of the curve rather than its `start`.
+    dragged_is_end: bool,
+    /// The corner radius of the bracket relative to its height.
+    radius_ratio: f64,
+    /// The side of the chord the body bulges to, as a unit vector.
+    outward: Vector2,
+}
+
+impl RoundedBracketEnd {
+    fn new(curve: &Curve, pen_pos: Vector2) -> Self {
+        let start = curve
+            .cubics
+            .first()
+            .map_or(Vector2::ZERO, |cubic| cubic.start);
+        let end = curve.cubics.last().map_or(Vector2::ZERO, |cubic| cubic.end);
+        // The first segment ends where the straight body begins, a corner radius from the chord.
+        let corner_end = curve.cubics.first().map_or(start, |cubic| cubic.end);
+
+        let chord_vec = end - start;
+        let chord = chord_vec.length();
+        let height = (end.y - start.y).abs();
+        let (radius_ratio, outward) = if chord > f64::EPSILON && height > f64::EPSILON {
+            let direction = chord_vec / chord;
+            let normal = Vector2::new(-direction.y, direction.x);
+            let offset = normal.dot(corner_end - start);
+            (
+                // Half the height is all the corners a bracket can have: then it is a half circle.
+                (offset.abs() / height).min(0.5),
+                if offset < 0.0 { -normal } else { normal },
+            )
+        } else {
+            (0.0, Vector2::new(1.0, 0.0))
+        };
+
+        let dragged_is_end = pen_pos.distance(end) <= pen_pos.distance(start);
+
+        Self {
+            fixed_end: if dragged_is_end { start } else { end },
+            dragged_end: if dragged_is_end { end } else { start },
+            dragged_is_end,
+            radius_ratio,
+            outward,
+        }
+    }
+
+    /// The bracket with its dragged end moved by `offset`.
+    fn adjusted(&self, offset: Vector2) -> Option<Curve> {
+        let moved = self.dragged_end + offset;
+        let height = (moved.y - self.fixed_end.y).abs();
+        if height < MIN_EXTENT {
+            return None;
+        }
+
+        let (start, end) = if self.dragged_is_end {
+            (self.fixed_end, moved)
+        } else {
+            (moved, self.fixed_end)
+        };
+
+        Curve::new_rounded_bracket(start, end, self.radius_ratio * height, self.outward)
+    }
+}
+
 /// The scale for one axis that grows the given extent by the offset, keeping the minimum extent.
 fn axis_scale(start_extent: f64, signed_offset: f64) -> f64 {
     if start_extent < MIN_EXTENT {
@@ -290,7 +377,7 @@ mod tests {
             start: Vector2::new(100.0, 100.0),
             end: Vector2::new(140.0, 100.0),
         };
-        let adjust = ShapeAdjust::new(Shape::Line(line), Vector2::new(140.0, 100.0), false);
+        let adjust = ShapeAdjust::new(Shape::Line(line), Vector2::new(140.0, 100.0), None);
 
         match adjust.adjusted(Vector2::new(160.0, 120.0)) {
             Shape::Line(adjusted) => {
@@ -307,7 +394,7 @@ mod tests {
             start: Vector2::new(0.0, 0.0),
             end: Vector2::new(100.0, 0.0),
         };
-        let adjust = ShapeAdjust::new(Shape::Line(line), Vector2::new(100.0, 6.0), false);
+        let adjust = ShapeAdjust::new(Shape::Line(line), Vector2::new(100.0, 6.0), None);
 
         for pen in [Vector2::new(100.0, 6.0), Vector2::new(103.0, 6.0)] {
             match adjust.adjusted(pen) {
@@ -330,7 +417,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::Rectangle(rectangle),
             Vector2::new(120.0, 110.0),
-            false,
+            None,
         );
 
         match adjust.adjusted(Vector2::new(130.0, 110.0)) {
@@ -353,7 +440,7 @@ mod tests {
                 * DAffine2::from_angle(std::f64::consts::FRAC_PI_2),
         };
         let start_pos = rectangle.affine.transform_point2(Vector2::new(20.0, 10.0));
-        let adjust = ShapeAdjust::new(Shape::Rectangle(rectangle), start_pos, false);
+        let adjust = ShapeAdjust::new(Shape::Rectangle(rectangle), start_pos, None);
 
         match adjust.adjusted(start_pos + Vector2::new(0.0, 10.0)) {
             Shape::Rectangle(adjusted) => {
@@ -370,7 +457,7 @@ mod tests {
             radii: Vector2::new(30.0, 20.0),
             affine: DAffine2::from_translation(Vector2::new(100.0, 100.0)),
         };
-        let adjust = ShapeAdjust::new(Shape::Ellipse(ellipse), Vector2::new(130.0, 100.0), false);
+        let adjust = ShapeAdjust::new(Shape::Ellipse(ellipse), Vector2::new(130.0, 100.0), None);
 
         match adjust.adjusted(Vector2::new(140.0, 105.0)) {
             Shape::Ellipse(adjusted) => {
@@ -392,7 +479,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::QuadraticBezier(quadratic),
             Vector2::new(150.0, 120.0),
-            false,
+            None,
         );
 
         match adjust.adjusted(Vector2::new(140.0, 90.0)) {
@@ -419,7 +506,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::CubicBezier(bracket),
             Vector2::new(100.0, 200.0),
-            true,
+            Some(BracketStyle::Arc),
         );
 
         // Stretching the lower end down keeps the upper end, and the bulge keeps its share of the
@@ -465,6 +552,56 @@ mod tests {
     }
 
     #[test]
+    fn rounded_bracket_end_follows_pen_and_keeps_the_shape() {
+        // A rounded bracket from (100, 100) to (100, 200), its body 20 to the left: the corner
+        // takes a fifth of the height.
+        let bracket = Curve::new_rounded_bracket(
+            Vector2::new(100.0, 100.0),
+            Vector2::new(100.0, 200.0),
+            20.0,
+            Vector2::new(-1.0, 0.0),
+        )
+        .expect("a bracket");
+        // The pen rests at the lower end.
+        let adjust = ShapeAdjust::new(
+            Shape::Curve(bracket),
+            Vector2::new(100.0, 200.0),
+            Some(BracketStyle::Rounded),
+        );
+
+        // Stretching the lower end down keeps the upper end, and the corners keep their share of
+        // the height: 20 of 100 is a fifth, so 40 of 200. The body stays straight.
+        let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(100.0, 300.0)) else {
+            panic!("expected a curve");
+        };
+        assert_eq!(
+            adjusted.cubics.first().unwrap().start,
+            Vector2::new(100.0, 100.0)
+        );
+        assert_eq!(
+            adjusted.cubics.last().unwrap().end,
+            Vector2::new(100.0, 300.0)
+        );
+        let sampled = adjusted.sampled(64);
+        for point in sampled
+            .iter()
+            .filter(|point| (140.0..260.0).contains(&point.y))
+        {
+            assert!((point.x - 60.0).abs() < 0.5, "body at {point:?}");
+        }
+
+        // The end dragged the other way keeps the bracket on its side of the tips.
+        let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(100.0, 100.0)) else {
+            panic!("expected a curve");
+        };
+        let deepest = adjusted
+            .sampled(64)
+            .iter()
+            .fold(f64::MAX, |x, point| x.min(point.x));
+        assert!(deepest < 100.0, "the bracket lost its side");
+    }
+
+    #[test]
     fn cubic_bends_follow_pen() {
         let cubic = CubicBezier {
             start: Vector2::new(100.0, 200.0),
@@ -472,7 +609,7 @@ mod tests {
             cp2: Vector2::new(170.0, 290.0),
             end: Vector2::new(200.0, 200.0),
         };
-        let adjust = ShapeAdjust::new(Shape::CubicBezier(cubic), Vector2::new(150.0, 200.0), false);
+        let adjust = ShapeAdjust::new(Shape::CubicBezier(cubic), Vector2::new(150.0, 200.0), None);
 
         match adjust.adjusted(Vector2::new(150.0, 220.0)) {
             Shape::CubicBezier(adjusted) => {
@@ -492,7 +629,7 @@ mod tests {
             start: Vector2::new(100.0, 140.0),
             path: vec![Vector2::new(140.0, 140.0), Vector2::new(120.0, 100.0)],
         };
-        let adjust = ShapeAdjust::new(Shape::Polygon(polygon), Vector2::new(140.0, 140.0), false);
+        let adjust = ShapeAdjust::new(Shape::Polygon(polygon), Vector2::new(140.0, 140.0), None);
 
         // Dragging away from the upper left corner of the bounds grows the triangle.
         let adjusted = adjust.adjusted(Vector2::new(160.0, 160.0));

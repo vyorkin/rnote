@@ -3,7 +3,9 @@
 ## Status
 
 accepted (2026-11-05), amended by [0006](0006-goodnotes-style-curves.md): the
-canonical bracket is a circular arc stored as a cubic, not a quadratic
+canonical bracket is a circular arc stored as a cubic, not a quadratic, and
+by [0009](0009-rounded-brackets.md): the arc is one of two bracket shapes, the
+other a straight body rounded at its ends
 
 ## Context
 

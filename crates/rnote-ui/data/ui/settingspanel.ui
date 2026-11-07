@@ -620,6 +620,37 @@ gets disabled.</property>
                       </object>
                     </child>
                     <child>
+                      <object class="AdwComboRow" id="gestures_bracket_style_row">
+                        <property name="title" translatable="yes">Bracket Shape</property>
+                        <property name="subtitle" translatable="yes">How a held stroke that is a bracket is snapped. An arc bulges as deeply as it was drawn, a rounded bracket keeps a straight body with rounded ends</property>
+                        <property name="model">
+                          <object class="GtkStringList">
+                            <items>
+                              <item translatable="yes">Arc</item>
+                              <item translatable="yes">Rounded corners</item>
+                            </items>
+                          </object>
+                        </property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSpinRow" id="gestures_bracket_corner_radius_row">
+                        <property name="title" translatable="yes">Bracket Corner Radius (%)</property>
+                        <property name="tooltip-text" translatable="yes">How much of its height a rounded bracket spends on its corners. A larger radius makes the bracket rounder, a smaller one makes it straighter</property>
+                        <property name="numeric">true</property>
+                        <property name="digits">0</property>
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">2</property>
+                            <property name="upper">40</property>
+                            <property name="step-increment">1</property>
+                            <property name="page-increment">5</property>
+                            <property name="value">12</property>
+                          </object>
+                        </property>
+                      </object>
+                    </child>
+                    <child>
                       <object class="AdwSwitchRow" id="gestures_curve_recognition_row">
                         <property name="title" translatable="yes">Smooth Curves</property>
                         <property name="subtitle" translatable="yes">Hold the pen still at the end of a drawn stroke to replace it with a smooth curve</property>

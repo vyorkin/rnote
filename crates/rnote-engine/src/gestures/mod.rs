@@ -6,6 +6,7 @@
 pub mod circle_lasso;
 
 use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
+use rnote_compose::shaperecognition::{BRACKET_CORNER_RADIUS_RATIO_DEFAULT, BracketStyle};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -28,6 +29,12 @@ pub struct GestureConfig {
     /// Whether a held open stroke is replaced with a smooth curve.
     #[serde(rename = "curve_recognition_enabled")]
     pub curve_recognition_enabled: bool,
+    /// The shape a held stroke that is a bracket is snapped to.
+    #[serde(rename = "bracket_style")]
+    pub bracket_style: BracketStyle,
+    /// The corner radius of a rounded bracket, relative to its height.
+    #[serde(rename = "bracket_corner_radius_ratio")]
+    pub bracket_corner_radius_ratio: f64,
     /// Whether a closed loop around ink selects it and switches to the selector.
     #[serde(rename = "circle_lasso_enabled")]
     pub circle_lasso_enabled: bool,
@@ -44,6 +51,8 @@ impl Default for GestureConfig {
             shape_recognition_enabled: true,
             shape_recognition_delay: Self::SHAPE_RECOGNITION_DELAY_DEFAULT,
             curve_recognition_enabled: false,
+            bracket_style: BracketStyle::Rounded,
+            bracket_corner_radius_ratio: BRACKET_CORNER_RADIUS_RATIO_DEFAULT,
             circle_lasso_enabled: true,
             multi_touch_undo_redo_enabled: true,
         }

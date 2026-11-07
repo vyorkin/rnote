@@ -83,12 +83,19 @@ The depth of a bracket's bend, the largest distance between its stroke and the c
 _Avoid_: curve depth, sagitta
 
 **Canonical bracket**:
-A bracket whose ends lie on one vertical line, whose deepest point is at the middle of its height, and whose bend is a circular arc.
+A bracket whose ends lie on one vertical line, in one of its two shapes: an arc bracket, whose
+deepest point is at the middle of its height and whose bend is a circular arc, or a rounded bracket.
 _Avoid_: neat bracket, clean bracket
+
+**Rounded bracket**:
+A canonical bracket whose body is straight at one corner radius from the vertical of its ends, turned
+out into a short tip at each end. Its radius is a share of its height, not the drawn bulge.
+_Avoid_: straight bracket, stadium bracket
 
 **Bracket snap**:
 Draw-and-Hold replacing an upright parenthesis stroke — its chord within `BRACKET_MAX_TILT` of the
-vertical — with a canonical bracket of the same height and bulge.
+vertical — with a canonical bracket of the same height, in the bracket shape the gesture settings
+name.
 _Avoid_: bracket completion, paren auto-shape
 
 **Curve**:
