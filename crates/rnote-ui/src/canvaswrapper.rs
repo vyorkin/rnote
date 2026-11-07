@@ -366,8 +366,6 @@ mod imp {
         pub(crate) canvas_multi_press_gesture: GestureClick,
         pub(crate) canvas_zoom_scroll_controller: EventControllerScroll,
         pub(crate) canvas_mouse_drag_middle_gesture: GestureDrag,
-        pub(crate) canvas_alt_drag_gesture: GestureDrag,
-        pub(crate) canvas_alt_shift_drag_gesture: GestureDrag,
         pub(crate) touch_two_finger_long_press_gesture: GestureLongPress,
         pub(crate) touch_long_press_gesture: GestureLongPress,
 
@@ -434,22 +432,6 @@ mod imp {
                 .propagation_phase(PropagationPhase::Bubble)
                 .build();
 
-            // alt + drag for panning with pointer
-            let canvas_alt_drag_gesture = GestureDrag::builder()
-                .name("canvas_alt_drag_gesture")
-                .button(gdk::BUTTON_PRIMARY)
-                .exclusive(true)
-                .propagation_phase(PropagationPhase::Capture)
-                .build();
-
-            // alt + shift + drag for zooming with pointer
-            let canvas_alt_shift_drag_gesture = GestureDrag::builder()
-                .name("canvas_alt_shift_drag_gesture")
-                .button(gdk::BUTTON_PRIMARY)
-                .exclusive(true)
-                .propagation_phase(PropagationPhase::Capture)
-                .build();
-
             let touch_two_finger_long_press_gesture = GestureLongPress::builder()
                 .name("touch_two_finger_long_press_gesture")
                 .touch_only(true)
@@ -481,8 +463,6 @@ mod imp {
                 canvas_multi_press_gesture,
                 canvas_zoom_scroll_controller,
                 canvas_mouse_drag_middle_gesture,
-                canvas_alt_drag_gesture,
-                canvas_alt_shift_drag_gesture,
                 touch_two_finger_long_press_gesture,
                 touch_long_press_gesture,
 
@@ -528,10 +508,6 @@ mod imp {
                 .add_controller(self.canvas_zoom_scroll_controller.clone());
             self.scroller
                 .add_controller(self.canvas_mouse_drag_middle_gesture.clone());
-            self.scroller
-                .add_controller(self.canvas_alt_drag_gesture.clone());
-            self.scroller
-                .add_controller(self.canvas_alt_shift_drag_gesture.clone());
             self.scroller
                 .add_controller(self.touch_two_finger_long_press_gesture.clone());
             self.canvas
@@ -1284,60 +1260,6 @@ mod imp {
                 ));
             }
 
-            // Pan with alt + drag
-            {
-                let offset_start = Rc::new(Cell::new(Vector2::ZERO));
-
-                self.canvas_alt_drag_gesture.connect_drag_begin(clone!(
-                    #[strong]
-                    offset_start,
-                    #[weak(rename_to=canvaswrapper)]
-                    obj,
-                    move |gesture, _, _| {
-                        let modifiers = gesture.current_event_state();
-
-                        // At the start BUTTON1_MASK is not included. A Space-held drag is
-                        // handled by the canvas as a pan, so this gesture must stay out of it.
-                        if modifiers.contains(gdk::ModifierType::ALT_MASK)
-                            && !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
-                            && !canvaswrapper.canvas().imp().space_pan_held.get()
-                        {
-                            gesture.set_state(EventSequenceState::Claimed);
-                            offset_start.set(canvaswrapper.canvas().engine_ref().camera.offset());
-                        } else {
-                            gesture.set_state(EventSequenceState::Denied);
-                        }
-                    }
-                ));
-
-                self.canvas_alt_drag_gesture.connect_drag_update(clone!(
-                    #[strong]
-                    offset_start,
-                    #[weak(rename_to=canvaswrapper)]
-                    obj,
-                    move |_, offset_x, offset_y| {
-                        let canvas = canvaswrapper.canvas();
-                        let new_offset = offset_start.get() - Vector2::new(offset_x, offset_y);
-                        let widget_flags = canvas.engine_mut().camera_set_offset_expand(new_offset);
-                        canvas.emit_handle_widget_flags(widget_flags);
-                    }
-                ));
-
-                self.canvas_alt_drag_gesture.connect_drag_end(clone!(
-                    #[weak(rename_to=canvaswrapper)]
-                    obj,
-                    move |_, _, _| {
-                        let widget_flags = canvaswrapper
-                            .canvas()
-                            .engine_mut()
-                            .update_rendering_current_viewport();
-                        canvaswrapper
-                            .canvas()
-                            .emit_handle_widget_flags(widget_flags);
-                    }
-                ));
-            }
-
             // Double press to select word, triple press to select line
             {
                 self.canvas_multi_press_gesture.connect_pressed(clone!(
@@ -1374,93 +1296,6 @@ mod imp {
                             2 => canvas.engine_mut().text_select_closest_line(),
                             _ => unreachable!(),
                         }
-                    }
-                ));
-            }
-
-            // Zoom with alt + shift + drag
-            {
-                let zoom_begin = Rc::new(Cell::new(1_f64));
-                let prev_offset = Rc::new(Cell::new(Vector2::ZERO));
-
-                self.canvas_alt_shift_drag_gesture
-                    .connect_drag_begin(clone!(
-                        #[strong]
-                        zoom_begin,
-                        #[strong]
-                        prev_offset,
-                        #[weak(rename_to=canvaswrapper)]
-                        obj,
-                        move |gesture, _, _| {
-                            let modifiers = gesture.current_event_state();
-
-                            // At the start BUTTON1_MASK is not included
-                            if modifiers.contains(gdk::ModifierType::ALT_MASK)
-                                && modifiers.contains(gdk::ModifierType::SHIFT_MASK)
-                                && !canvaswrapper.canvas().imp().space_pan_held.get()
-                            {
-                                gesture.set_state(EventSequenceState::Claimed);
-
-                                // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/187
-                                canvaswrapper.imp().workaround_disable_kinetic_scrolling();
-
-                                let current_zoom =
-                                    canvaswrapper.canvas().engine_ref().camera.total_zoom();
-                                zoom_begin.set(current_zoom);
-                                prev_offset.set(Vector2::ZERO);
-                            } else {
-                                gesture.set_state(EventSequenceState::Denied);
-                            }
-                        }
-                    ));
-
-                self.canvas_alt_shift_drag_gesture
-                    .connect_drag_update(clone!(
-                        #[strong]
-                        prev_offset,
-                        #[weak(rename_to=canvaswrapper)]
-                        obj,
-                        move |_, offset_x, offset_y| {
-                            let canvas = canvaswrapper.canvas();
-                            let new_offset = Vector2::new(offset_x, offset_y);
-                            let current_total_zoom =
-                                canvaswrapper.canvas().engine_ref().camera.total_zoom();
-                            // drag down zooms out, drag up zooms in
-                            let new_zoom = current_total_zoom
-                                * (1.0
-                                    - (new_offset[1] - prev_offset.get()[1])
-                                        * Camera::DRAG_ZOOM_MAGN_ZOOM_FACTOR);
-
-                            if (Camera::ZOOM_MIN..=Camera::ZOOM_MAX).contains(&new_zoom) {
-                                let viewport_center = canvas.engine_ref().camera.viewport_center();
-
-                                let mut widget_flags = canvas.engine_mut().zoom_w_timeout(new_zoom);
-                                widget_flags |= canvas
-                                    .engine_mut()
-                                    .camera
-                                    .set_viewport_center(viewport_center);
-                                widget_flags |= canvas.engine_mut().doc_expand_autoexpand();
-                                canvas.emit_handle_widget_flags(widget_flags);
-                            }
-
-                            prev_offset.set(new_offset);
-                        }
-                    ));
-
-                self.canvas_alt_shift_drag_gesture.connect_drag_end(clone!(
-                    #[weak(rename_to=canvaswrapper)]
-                    obj,
-                    move |_, _, _| {
-                        // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/187
-                        canvaswrapper.imp().workaround_restore_kinetic_scrolling();
-
-                        let widget_flags = canvaswrapper
-                            .canvas()
-                            .engine_mut()
-                            .update_rendering_current_viewport();
-                        canvaswrapper
-                            .canvas()
-                            .emit_handle_widget_flags(widget_flags);
                     }
                 ));
             }

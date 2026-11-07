@@ -1,10 +1,11 @@
 // Imports
-use super::{RnCanvas, SpacePan};
+use super::{RnCanvas, ViewDrag};
 use crate::RnAppWindow;
-use gtk4::{Native, gdk, glib, graphene, prelude::*, subclass::prelude::*};
+use gtk4::{Native, ScrolledWindow, gdk, glib, graphene, prelude::*, subclass::prelude::*};
 use p2d::math::Vector2;
 use rnote_compose::penevent::{KeyboardKey, ModifierKey, PenEvent, PenState, ShortcutKey};
 use rnote_compose::penpath::Element;
+use rnote_engine::Camera;
 use rnote_engine::WidgetFlags;
 use rnote_engine::ext::EventPropagationExt;
 use rnote_engine::ext::GraphenePointExt;
@@ -175,10 +176,11 @@ pub(crate) fn handle_pointer_controller_event(
         return (glib::Propagation::Proceed, pen_state, stylus_active);
     }
 
-    // Space held: a pen or mouse drag pans the view. Consuming the press here keeps the
-    // engine from starting a stroke, which a gesture claiming the sequence later would
-    // leave unfinished.
-    if handle_space_pan_event(canvas, event, is_stylus) {
+    // Space or Alt held: a pen or mouse drag moves the view instead of drawing. Driving it
+    // from the pointer events keeps it working for the pen, which GTK also repeats as an
+    // emulated mouse: a plain drag gesture sees the press, claims it, and is then reset by
+    // the pen's motion, so the view starts to pan and the stroke begins mid-drag.
+    if handle_view_drag_event(canvas, event, is_stylus) {
         return (glib::Propagation::Stop, pen_state, stylus_active);
     }
 
@@ -424,61 +426,146 @@ pub(crate) fn handle_pointer_controller_event(
     (propagation, pen_state, stylus_active)
 }
 
-/// Pans the view while Space is held and the primary button is down.
+/// Moves the view instead of drawing while Space is held (pan) or `Alt` is held
+/// (`Alt` pans, `Alt`+`Shift` zooms) and the primary button is down.
 ///
 /// Returns true when the event was consumed and must not reach the pens.
-fn handle_space_pan_event(canvas: &RnCanvas, event: &gdk::Event, is_stylus: bool) -> bool {
+fn handle_view_drag_event(canvas: &RnCanvas, event: &gdk::Event, is_stylus: bool) -> bool {
     let event_type = event.event_type();
 
-    // Once a pan has begun it follows the pointer until the button is released (or the
-    // pen leaves), even if Space is let go mid-drag.
-    if let Some(pan) = canvas.imp().space_pan.get() {
+    // Once a drag has begun it follows the pointer until the button is released (or the
+    // pen leaves), even if Space or Alt is let go mid-drag.
+    if let Some(drag) = canvas.imp().view_drag.get() {
         // While the pen is in use GTK repeats its motion as an emulated mouse. Following
         // both streams means alternating between their coordinates, which makes the
         // canvas jitter, so the drag stays with the device that began it.
-        let same_device = pan.is_stylus == is_stylus;
-
-        match event_type {
-            gdk::EventType::MotionNotify if same_device => {
-                if let Some((x, y)) = event.position() {
-                    let delta = Vector2::new(x, y) - pan.press_pos;
-                    let widget_flags = canvas
-                        .engine_mut()
-                        .camera_set_offset_expand(pan.camera_offset_begin - delta);
-                    canvas.emit_handle_widget_flags(widget_flags);
+        if drag.is_stylus() == is_stylus {
+            match event_type {
+                gdk::EventType::MotionNotify | gdk::EventType::EnterNotify => {
+                    // A release outside the canvas never reaches it; the button mask of
+                    // the first motion back says the drag has ended meanwhile.
+                    if !event
+                        .modifier_state()
+                        .contains(gdk::ModifierType::BUTTON1_MASK)
+                    {
+                        end_view_drag(canvas);
+                    } else if event_type == gdk::EventType::MotionNotify
+                        && let Some((x, y)) = event.position()
+                    {
+                        update_view_drag(canvas, drag, Vector2::new(x, y));
+                    }
                 }
+                gdk::EventType::ButtonRelease => end_view_drag(canvas),
+                gdk::EventType::ProximityOut if is_stylus => end_view_drag(canvas),
+                _ => {}
             }
-            gdk::EventType::ButtonRelease if same_device => {
-                canvas.imp().space_pan.set(None);
-                let widget_flags = canvas.engine_mut().update_rendering_current_viewport();
-                canvas.emit_handle_widget_flags(widget_flags);
-            }
-            gdk::EventType::ProximityOut if pan.is_stylus && is_stylus => {
-                canvas.imp().space_pan.set(None);
-                let widget_flags = canvas.engine_mut().update_rendering_current_viewport();
-                canvas.emit_handle_widget_flags(widget_flags);
-            }
-            _ => {}
         }
         return true;
     }
 
-    if event_type == gdk::EventType::ButtonPress
-        && canvas.imp().space_pan_held.get()
-        && event
+    if event_type != gdk::EventType::ButtonPress
+        || !event
             .downcast_ref::<gdk::ButtonEvent>()
             .is_some_and(|button_event| button_event.button() == gdk::BUTTON_PRIMARY)
-        && let Some((x, y)) = event.position()
     {
-        canvas.imp().space_pan.set(Some(SpacePan {
-            camera_offset_begin: canvas.engine_ref().camera.offset(),
-            press_pos: Vector2::new(x, y),
-            is_stylus,
-        }));
-        return true;
+        return false;
     }
 
-    false
+    let modifiers = event.modifier_state();
+    let space_held = canvas.imp().space_pan_held.get();
+    // Space wins over Alt, so a Space+Alt drag still pans.
+    if !space_held && !modifiers.contains(gdk::ModifierType::ALT_MASK) {
+        return false;
+    }
+
+    let Some((x, y)) = event.position() else {
+        return false;
+    };
+    let press_pos = Vector2::new(x, y);
+
+    let drag = if !space_held && modifiers.contains(gdk::ModifierType::SHIFT_MASK) {
+        // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/187
+        canvas.workaround_disable_kinetic_scrolling(canvas_scroller(canvas).as_ref());
+        ViewDrag::Zoom {
+            press_pos,
+            prev_offset: Vector2::ZERO,
+            is_stylus,
+        }
+    } else {
+        ViewDrag::Pan {
+            camera_offset_begin: canvas.engine_ref().camera.offset(),
+            press_pos,
+            is_stylus,
+        }
+    };
+
+    canvas.imp().view_drag.set(Some(drag));
+    true
+}
+
+/// Applies the drag to the camera, given the pointer position.
+fn update_view_drag(canvas: &RnCanvas, drag: ViewDrag, pos: Vector2) {
+    match drag {
+        ViewDrag::Pan {
+            camera_offset_begin,
+            press_pos,
+            ..
+        } => {
+            let delta = pos - press_pos;
+            let widget_flags = canvas
+                .engine_mut()
+                .camera_set_offset_expand(camera_offset_begin - delta);
+            canvas.emit_handle_widget_flags(widget_flags);
+        }
+        ViewDrag::Zoom {
+            press_pos,
+            prev_offset,
+            is_stylus,
+        } => {
+            let offset = pos - press_pos;
+            let current_total_zoom = canvas.engine_ref().camera.total_zoom();
+            // drag down zooms out, drag up zooms in
+            let new_zoom = current_total_zoom
+                * (1.0 - (offset[1] - prev_offset[1]) * Camera::DRAG_ZOOM_MAGN_ZOOM_FACTOR);
+
+            canvas.imp().view_drag.set(Some(ViewDrag::Zoom {
+                press_pos,
+                prev_offset: offset,
+                is_stylus,
+            }));
+
+            if (Camera::ZOOM_MIN..=Camera::ZOOM_MAX).contains(&new_zoom) {
+                let viewport_center = canvas.engine_ref().camera.viewport_center();
+
+                let mut widget_flags = canvas.engine_mut().zoom_w_timeout(new_zoom);
+                widget_flags |= canvas
+                    .engine_mut()
+                    .camera
+                    .set_viewport_center(viewport_center);
+                widget_flags |= canvas.engine_mut().doc_expand_autoexpand();
+                canvas.emit_handle_widget_flags(widget_flags);
+            }
+        }
+    }
+}
+
+/// Ends the view drag, leaving it to the pens again.
+fn end_view_drag(canvas: &RnCanvas) {
+    let Some(drag) = canvas.imp().view_drag.take() else {
+        return;
+    };
+    if matches!(drag, ViewDrag::Zoom { .. }) {
+        // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/187
+        canvas.workaround_restore_kinetic_scrolling(canvas_scroller(canvas).as_ref());
+    }
+
+    let widget_flags = canvas.engine_mut().update_rendering_current_viewport();
+    canvas.emit_handle_widget_flags(widget_flags);
+}
+
+/// The scroller the canvas scrolls in, which the kinetic scrolling workaround toggles.
+fn canvas_scroller(canvas: &RnCanvas) -> Option<ScrolledWindow> {
+    canvas.parent().and_downcast::<ScrolledWindow>()
 }
 
 pub(crate) fn handle_key_controller_key_pressed(

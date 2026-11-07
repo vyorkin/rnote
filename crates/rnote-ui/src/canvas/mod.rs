@@ -49,16 +49,38 @@ pub(crate) struct DragPreview {
     pub(crate) position: Cell<(f64, f64)>,
 }
 
-/// A Space-held drag that pans the view instead of drawing.
+/// A pointer drag that moves the view instead of drawing: Space held or `Alt` pans,
+/// `Alt`+`Shift` zooms.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SpacePan {
-    /// The camera offset when the drag began.
-    pub(crate) camera_offset_begin: Vector2,
-    /// Where the pointer was pressed, in canvas coordinates.
-    pub(crate) press_pos: Vector2,
-    /// Whether the stylus began the drag. GTK also repeats the motion as an emulated
+pub(crate) enum ViewDrag {
+    Pan {
+        /// The camera offset when the drag began.
+        camera_offset_begin: Vector2,
+        /// Where the pointer was pressed, in canvas coordinates.
+        press_pos: Vector2,
+        /// Whether the stylus began the drag. GTK also repeats the motion as an emulated
+        /// mouse, and mixing the two event streams makes the view jitter.
+        is_stylus: bool,
+    },
+    Zoom {
+        /// Where the pointer was pressed, in canvas coordinates.
+        press_pos: Vector2,
+        /// The pointer offset of the previous update, which the zoom step is measured
+        /// against.
+        prev_offset: Vector2,
+        /// Whether the stylus began the drag (see [`ViewDrag::Pan`]).
+        is_stylus: bool,
+    },
+}
+
+impl ViewDrag {
+    /// Whether the stylus began the drag. GTK also repeats its motion as an emulated
     /// mouse, and mixing the two event streams makes the view jitter.
-    pub(crate) is_stylus: bool,
+    pub(crate) fn is_stylus(&self) -> bool {
+        match self {
+            ViewDrag::Pan { is_stylus, .. } | ViewDrag::Zoom { is_stylus, .. } => *is_stylus,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -113,8 +135,8 @@ mod imp {
         pub(crate) last_mouse_position: Cell<Option<(f64, f64)>>,
         /// Whether Space is held, which turns a pen or mouse drag into a view pan.
         pub(crate) space_pan_held: Cell<bool>,
-        /// The Space-held drag in progress, if any.
-        pub(crate) space_pan: Cell<Option<SpacePan>>,
+        /// The view drag in progress (pan or zoom), if any.
+        pub(crate) view_drag: Cell<Option<ViewDrag>>,
         /// Shows the cursor again a moment after the pen has gone, unless it is back by then.
         pub(crate) pen_gone_timeout: RefCell<Option<glib::SourceId>>,
 
@@ -223,7 +245,7 @@ mod imp {
                 last_pen_position: Cell::new(None),
                 last_mouse_position: Cell::new(None),
                 space_pan_held: Cell::new(false),
-                space_pan: Cell::new(None),
+                view_drag: Cell::new(None),
                 pen_gone_timeout: RefCell::new(None),
 
                 engine: RefCell::new(engine),
