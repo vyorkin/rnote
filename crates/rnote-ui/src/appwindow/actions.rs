@@ -177,6 +177,8 @@ impl RnAppWindow {
         self.add_action(&action_touch_drawing);
         let action_focus_mode = gio::PropertyAction::new("focus-mode", self, "focus-mode");
         self.add_action(&action_focus_mode);
+        let action_zen_mode = gio::PropertyAction::new("zen-mode", self, "zen-mode");
+        self.add_action(&action_zen_mode);
         let action_pen_sounds = gio::PropertyAction::new("pen-sounds", self, "pen-sounds");
         self.add_action(&action_pen_sounds);
         let action_snap_positions =
@@ -1169,6 +1171,7 @@ impl RnAppWindow {
 
         app.set_accels_for_action("win.active-tab-close", &["<Ctrl>w"]);
         app.set_accels_for_action("win.fullscreen", &["F11"]);
+        app.set_accels_for_action("win.zen-mode", &["<Ctrl><Shift>f"]);
         app.set_accels_for_action("win.keyboard-shortcuts", &["<Ctrl>question"]);
         app.set_accels_for_action("win.toggle-overview", &["<Ctrl><Shift>o"]);
         app.set_accels_for_action("win.open-canvasmenu", &["F9"]);

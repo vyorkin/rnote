@@ -29,6 +29,13 @@ pub(crate) struct RnAppWindow {
     pub(crate) respect_borders: Cell<bool>,
     pub(crate) touch_drawing: Cell<bool>,
     pub(crate) focus_mode: Cell<bool>,
+    pub(crate) zen_mode: Cell<bool>,
+    /// Whether the window was fullscreened when zen mode was entered, so leaving zen
+    /// restores the state it replaced.
+    pub(crate) zen_restore_fullscreen: Cell<bool>,
+    /// Set when fullscreen itself ends zen (F11), where restoring fullscreen on the way
+    /// out would immediately undo the user's action.
+    pub(crate) zen_skip_fullscreen_restore: Cell<bool>,
     pub(crate) devel_mode: Cell<bool>,
     pub(crate) visual_debug: Cell<bool>,
 
@@ -71,6 +78,9 @@ impl Default for RnAppWindow {
             respect_borders: Cell::new(false),
             touch_drawing: Cell::new(false),
             focus_mode: Cell::new(false),
+            zen_mode: Cell::new(false),
+            zen_restore_fullscreen: Cell::new(false),
+            zen_skip_fullscreen_restore: Cell::new(false),
             devel_mode: Cell::new(false),
             visual_debug: Cell::new(false),
 
@@ -146,6 +156,23 @@ impl ObjectImpl for RnAppWindow {
         self.setup_overview();
         self.setup_split_view();
         self.setup_tabbar();
+
+        // Zen mode is entered together with fullscreen: hiding the header in a windowed
+        // state would leave the window with no buttons and nothing to drag. Leaving
+        // fullscreen with F11 therefore leaves zen too, or the window would stay without
+        // chrome. The property is cleared first, so the exit below does not restore the
+        // fullscreen the user just gave up.
+        obj.connect_fullscreened_notify(clone!(
+            #[weak(rename_to=appwindow)]
+            obj,
+            move |_| {
+                if appwindow.property::<bool>("zen-mode") && !appwindow.is_fullscreen() {
+                    appwindow.imp().zen_skip_fullscreen_restore.replace(true);
+                    appwindow.set_property("zen-mode", false);
+                    appwindow.imp().zen_skip_fullscreen_restore.replace(false);
+                }
+            }
+        ));
     }
 
     fn dispose(&self) {
@@ -190,6 +217,9 @@ impl ObjectImpl for RnAppWindow {
                 glib::ParamSpecBoolean::builder("focus-mode")
                     .default_value(false)
                     .build(),
+                glib::ParamSpecBoolean::builder("zen-mode")
+                    .default_value(false)
+                    .build(),
                 glib::ParamSpecBoolean::builder("devel-mode")
                     .default_value(false)
                     .build(),
@@ -222,6 +252,7 @@ impl ObjectImpl for RnAppWindow {
             "respect-borders" => self.respect_borders.get().to_value(),
             "touch-drawing" => self.touch_drawing.get().to_value(),
             "focus-mode" => self.focus_mode.get().to_value(),
+            "zen-mode" => self.zen_mode.get().to_value(),
             "devel-mode" => self.devel_mode.get().to_value(),
             "visual-debug" => self.visual_debug.get().to_value(),
             "save-in-progress" => self.save_in_progress.get().to_value(),
@@ -321,6 +352,25 @@ impl ObjectImpl for RnAppWindow {
                 self.focus_mode.replace(focus_mode);
 
                 self.overlays.set_toolbars_visible(!focus_mode);
+            }
+            "zen-mode" => {
+                let zen_mode: bool = value.get().expect("The value needs to be of type `bool`");
+                if self.zen_mode.replace(zen_mode) == zen_mode {
+                    return;
+                }
+
+                // The header bar is the window's client-side decoration, and the tab bar
+                // sits right below it. Zen keeps the toolbars, which are overlay children
+                // of `RnOverlays` and not part of the window chrome.
+                self.main_header.set_visible(!zen_mode);
+                self.tabbar.set_visible(!zen_mode);
+
+                if zen_mode {
+                    self.zen_restore_fullscreen.replace(obj.is_fullscreen());
+                    obj.set_fullscreened(true);
+                } else if !self.zen_skip_fullscreen_restore.get() {
+                    obj.set_fullscreened(self.zen_restore_fullscreen.get());
+                }
             }
             "devel-mode" => {
                 let devel_mode = value
@@ -686,6 +736,37 @@ impl RnAppWindow {
                 }
             ),
         );
+
+        // Escape leaves zen mode. It has to be captured here: the canvas handles Escape
+        // itself (ending text editing, cancelling a selection, returning to the brush)
+        // and often stops the event, so a later phase would never see it. Leaving zen
+        // stops the event as well, so one Escape does one thing.
+        let zen_escape_controller = EventControllerKey::builder()
+            .name("zen_escape_controller")
+            .propagation_phase(PropagationPhase::Capture)
+            .build();
+        zen_escape_controller.connect_key_pressed(clone!(
+            #[weak(rename_to=appwindow)]
+            obj,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, modifiers| {
+                // Caps lock and num lock are part of the state, and neither should keep
+                // Escape from leaving zen.
+                if key != gdk::Key::Escape
+                    || !modifiers
+                        .difference(gdk::ModifierType::LOCK_MASK)
+                        .is_empty()
+                    || !appwindow.property::<bool>("zen-mode")
+                {
+                    return glib::Propagation::Proceed;
+                }
+
+                appwindow.set_property("zen-mode", false);
+                glib::Propagation::Stop
+            }
+        ));
+        obj.add_controller(zen_escape_controller);
     }
 
     fn setup_overview(&self) {
