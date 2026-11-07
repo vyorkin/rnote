@@ -737,37 +737,10 @@ impl RnAppWindow {
             ),
         );
 
-        // Escape leaves zen mode, but only when nothing else wanted it. The canvas runs its own
-        // key controller in the capture phase (on the focused canvas) and stops Escape when it
-        // ended text editing, cancelled a selection or returned a non-brush pen to the brush;
-        // a capture-phase controller here would have taken Escape before all of that, so this
-        // one sits in the bubble phase, which only sees an Escape that no one consumed.
-        let zen_escape_controller = EventControllerKey::builder()
-            .name("zen_escape_controller")
-            .propagation_phase(PropagationPhase::Bubble)
-            .build();
-        zen_escape_controller.connect_key_pressed(clone!(
-            #[weak(rename_to=appwindow)]
-            obj,
-            #[upgrade_or]
-            glib::Propagation::Proceed,
-            move |_, key, _, modifiers| {
-                // Caps lock and num lock are part of the state, and neither should keep
-                // Escape from leaving zen.
-                if key != gdk::Key::Escape
-                    || !modifiers
-                        .difference(gdk::ModifierType::LOCK_MASK)
-                        .is_empty()
-                    || !appwindow.property::<bool>("zen-mode")
-                {
-                    return glib::Propagation::Proceed;
-                }
-
-                appwindow.set_property("zen-mode", false);
-                glib::Propagation::Stop
-            }
-        ));
-        obj.add_controller(zen_escape_controller);
+        // Escape is left to the canvas alone: it ends text editing, cancels a selection and
+        // returns a non-brush pen to the brush, and it does not leave zen mode either way.
+        // Zen is left with `<Ctrl><Shift>f`, F11 or the compositor, which all keep the way back
+        // to the hidden header explicit.
     }
 
     fn setup_overview(&self) {

@@ -29,12 +29,12 @@ close it.
 - Leaving fullscreen by any route (F11, the compositor) leaves zen too. Otherwise the window would
   keep a hidden header and no way back to its buttons. The exit clears the property before the
   fullscreen restore runs, so the restore does not undo the user's own fullscreen exit.
-- Escape leaves zen, but only an Escape nothing else consumed: the controller sits in the window's
-  bubble phase, after the canvas's own key controller. The canvas runs in the capture phase, so it
-  gets Escape first and stops it when it ended text editing, cancelled a selection or returned a
-  non-brush pen to the brush; a capture-phase controller on the window would instead have taken
-  Escape before any of that and left zen under a running text box, which reads as a bug (2026-11-07).
-  When the canvas has nothing to do with Escape, the event reaches the window and zen ends.
+- Escape never leaves zen. The canvas owns Escape (ending text editing, cancelling a selection,
+  returning a non-brush pen to the brush), and a window-level controller on the same key made an
+  Escape meant for the canvas end zen first, which reads as a bug (2026-11-07). Zen is left with
+  `<Ctrl><Shift>f`, F11 or the compositor instead; every one of those is an explicit act, so a zen
+  session is never ended by the key the user presses to get out of a half-finished stroke or text
+  box.
 
 ## Consequences
 
