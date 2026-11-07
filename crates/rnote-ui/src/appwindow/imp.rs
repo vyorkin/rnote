@@ -737,13 +737,14 @@ impl RnAppWindow {
             ),
         );
 
-        // Escape leaves zen mode. It has to be captured here: the canvas handles Escape
-        // itself (ending text editing, cancelling a selection, returning to the brush)
-        // and often stops the event, so a later phase would never see it. Leaving zen
-        // stops the event as well, so one Escape does one thing.
+        // Escape leaves zen mode, but only when nothing else wanted it. The canvas runs its own
+        // key controller in the capture phase (on the focused canvas) and stops Escape when it
+        // ended text editing, cancelled a selection or returned a non-brush pen to the brush;
+        // a capture-phase controller here would have taken Escape before all of that, so this
+        // one sits in the bubble phase, which only sees an Escape that no one consumed.
         let zen_escape_controller = EventControllerKey::builder()
             .name("zen_escape_controller")
-            .propagation_phase(PropagationPhase::Capture)
+            .propagation_phase(PropagationPhase::Bubble)
             .build();
         zen_escape_controller.connect_key_pressed(clone!(
             #[weak(rename_to=appwindow)]
