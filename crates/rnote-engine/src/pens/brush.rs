@@ -367,11 +367,15 @@ impl PenBehaviour for Brush {
                 engine_view
                     .store
                     .update_geometry_for_stroke(*current_stroke_key);
-                let (erased, wf) = erase_with_scribble(
+                let (erased, wf) = if is_scribble_stroke(
                     *current_stroke_key,
                     now.saturating_duration_since(*begin),
-                    engine_view,
-                );
+                    &engine_view.as_im(),
+                ) {
+                    erase_with_scribble(*current_stroke_key, engine_view)
+                } else {
+                    (false, WidgetFlags::default())
+                };
                 widget_flags |= wf;
                 if !erased {
                     engine_view.store.regenerate_rendering_for_stroke_threaded(
@@ -544,23 +548,11 @@ impl PenBehaviour for Brush {
                         engine_view
                             .store
                             .update_geometry_for_stroke(*current_stroke_key);
-                        let lasso = if engine_view.config.gestures.circle_lasso_enabled
-                            && engine_view.config.pens_config.brush_config.style
-                                != BrushStyle::Marker
-                        {
-                            try_circle_lasso(*current_stroke_key, engine_view)
-                        } else {
-                            (false, WidgetFlags::default())
-                        };
-                        let (gesture_handled, wf) = if lasso.0 {
-                            lasso
-                        } else {
-                            erase_with_scribble(
-                                *current_stroke_key,
-                                now.saturating_duration_since(*begin),
-                                engine_view,
-                            )
-                        };
+                        let (gesture_handled, wf) = finish_drawn_stroke(
+                            *current_stroke_key,
+                            now.saturating_duration_since(*begin),
+                            engine_view,
+                        );
                         widget_flags |= wf;
                         if !gesture_handled {
                             engine_view.store.regenerate_rendering_for_stroke_threaded(
@@ -1004,26 +996,15 @@ fn try_circle_lasso(stroke_key: StrokeKey, engine_view: &mut EngineViewMut) -> (
     (true, widget_flags)
 }
 
-/// Erase the strokes a finished stroke was scribbled over.
-///
-/// When the stroke is the gesture of scratching something out and it actually went over strokes,
-/// those strokes and the scribble itself are trashed. A scribble over empty space stays the stroke
-/// it is, so that scratching in the margin still draws.
-///
-/// Returns whether the stroke erased anything, in which case it is gone from the store.
-fn erase_with_scribble(
-    stroke_key: StrokeKey,
-    duration: Duration,
-    engine_view: &mut EngineViewMut,
-) -> (bool, WidgetFlags) {
-    let mut widget_flags = WidgetFlags::default();
-
+/// Whether the finished stroke is the scratch-out gesture that erases.
+fn is_scribble_stroke(stroke_key: StrokeKey, duration: Duration, engine_view: &EngineView) -> bool {
     if !engine_view.config.gestures.scribble_erase_enabled
         || engine_view.config.pens_config.brush_config.style == BrushStyle::Marker
     {
-        return (false, widget_flags);
+        return false;
     }
-    let is_scribble = match engine_view.store.get_stroke_ref(stroke_key) {
+
+    match engine_view.store.get_stroke_ref(stroke_key) {
         Some(Stroke::BrushStroke(brushstroke)) => scribblerecognition::is_scribble(
             &brushstroke.path,
             engine_view.camera.total_zoom(),
@@ -1031,10 +1012,47 @@ fn erase_with_scribble(
             &engine_view.config.gestures.scribble_recognition_options,
         ),
         _ => false,
-    };
-    if !is_scribble {
-        return (false, widget_flags);
     }
+}
+
+/// End a drawn stroke with the gesture it is.
+///
+/// A scratch-out erases what it went over, a closed loop around ink is the circle lasso, and
+/// anything else stays the stroke it is. The scribble is checked first: a scratch-out drawn in a
+/// circular motion is also a closed loop that fits an ellipse, so trying the lasso first would
+/// select the strokes inside it and switch the pen to the selector instead of erasing them.
+///
+/// Returns whether a gesture handled the stroke, in which case it is gone from the store.
+fn finish_drawn_stroke(
+    stroke_key: StrokeKey,
+    duration: Duration,
+    engine_view: &mut EngineViewMut,
+) -> (bool, WidgetFlags) {
+    if is_scribble_stroke(stroke_key, duration, &engine_view.as_im()) {
+        return erase_with_scribble(stroke_key, engine_view);
+    }
+
+    if engine_view.config.gestures.circle_lasso_enabled
+        && engine_view.config.pens_config.brush_config.style != BrushStyle::Marker
+    {
+        return try_circle_lasso(stroke_key, engine_view);
+    }
+
+    (false, WidgetFlags::default())
+}
+
+/// Erase the strokes a scribble was drawn over.
+///
+/// The caller has already recognized the stroke as a scribble. The strokes it actually went over
+/// and the scribble itself are trashed. A scribble over empty space stays the stroke it is, so
+/// that scratching in the margin still draws.
+///
+/// Returns whether the stroke erased anything, in which case it is gone from the store.
+fn erase_with_scribble(
+    stroke_key: StrokeKey,
+    engine_view: &mut EngineViewMut,
+) -> (bool, WidgetFlags) {
+    let mut widget_flags = WidgetFlags::default();
 
     let (trashed, modified_keys, wf) = engine_view
         .store
@@ -1338,6 +1356,104 @@ mod tests {
             engine.store.render_comp_state(key),
             Some(RenderCompState::Complete),
             "the image is regenerated once the pen lifts"
+        );
+    }
+
+    /// A scratch-out drawn in a circular motion is also a closed loop that fits an ellipse. It has
+    /// to erase what it went over: taken for the circle lasso first, it selected the strokes inside
+    /// it and switched the pen to the selector instead.
+    #[test]
+    fn a_circular_scratch_out_erases_and_keeps_the_brush() {
+        use crate::Engine;
+        use crate::pens::PenStyle;
+        use crate::strokes::{BrushStroke, Stroke};
+        use rnote_compose::Style;
+        use rnote_compose::eventresult::EventPropagation;
+        use std::collections::HashSet;
+        use std::time::Instant;
+
+        let mut engine = Engine::default();
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+
+        let center = Vector2::new(400., 300.);
+        let insert = |engine: &mut Engine, start: Vector2, end: Vector2| {
+            let key = engine.store.insert_stroke(
+                Stroke::BrushStroke(BrushStroke::from_penpath(
+                    PenPath::try_from_elements([
+                        Element::new(start, Element::PRESSURE_DEFAULT),
+                        Element::new(end, Element::PRESSURE_DEFAULT),
+                    ])
+                    .unwrap(),
+                    Style::default(),
+                )),
+                None,
+            );
+            engine.store.update_geometry_for_stroke(key);
+            engine.store.regenerate_rendering_for_strokes(
+                &[key],
+                engine.camera.viewport(),
+                engine.camera.image_scale(),
+            );
+            key
+        };
+
+        // The word being scratched out runs through the coil, and another one sits inside it.
+        let crossed = insert(
+            &mut engine,
+            center - Vector2::new(100., 0.),
+            center + Vector2::new(100., 0.),
+        );
+        let inside = insert(
+            &mut engine,
+            center - Vector2::new(10., 0.),
+            center + Vector2::new(10., 0.),
+        );
+
+        // Two coils around the word, drawn quickly as a scratch-out is.
+        let steps = 20;
+        let loops = 2;
+        let n = loops * steps;
+        let now = Instant::now();
+        for i in 0..=n {
+            let angle = i as f64 / n as f64 * loops as f64 * std::f64::consts::TAU;
+            let pos = center + Vector2::new(60. * angle.cos(), 60. * angle.sin());
+            let event = PenEvent::Down {
+                element: Element::new(pos, Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            };
+            let _ =
+                engine.handle_pen_event(event, None, now + Duration::from_millis(10 * i as u64));
+        }
+        let last_pos = center + Vector2::new(60., 0.);
+        assert_eq!(
+            engine
+                .handle_pen_event(
+                    PenEvent::Up {
+                        element: Element::new(last_pos, Element::PRESSURE_DEFAULT),
+                        modifier_keys: HashSet::new(),
+                    },
+                    None,
+                    now + Duration::from_millis(10 * n as u64),
+                )
+                .0,
+            EventPropagation::Stop
+        );
+
+        assert_eq!(
+            engine.store.trashed(crossed),
+            Some(true),
+            "the scratch-out erased the stroke it went over"
+        );
+        assert_ne!(
+            engine.store.trashed(inside),
+            Some(true),
+            "a stroke the scratch-out never touched is left alone"
+        );
+        assert!(!engine.has_selection(), "the scratch-out selects nothing");
+        assert_eq!(
+            engine.current_pen_style_w_override(),
+            PenStyle::Brush,
+            "the pen stays the brush"
         );
     }
 }
