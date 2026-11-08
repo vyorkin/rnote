@@ -36,7 +36,10 @@ close it.
   outputs can do this; Hyprland is such a compositor, and the dispatches use its IPC. When the
   compositor refuses the span, the variant degrades to the fullscreen of the active-monitor variant.
   Spanning also hides the desktop's own bar for as long as it lasts, and gives it back on leave, on a
-  window close, or when the window is no longer spanning.
+  window close, or when the window is no longer spanning. While the flag stands it is also recorded
+  in the state dir as this app's own, so a run that dies before its exit path does not leave the whole
+  desktop without a bar: the next launch gives back a bar its marker claims. A bar the user hid
+  themselves carries no marker and stays hidden.
 - The toolbars are unaffected: they are overlay children of `RnOverlays`, not part of the window
   chrome. The sidebars and the overview are left hidden as before, so zen does not open panels the
   user did not ask for.
