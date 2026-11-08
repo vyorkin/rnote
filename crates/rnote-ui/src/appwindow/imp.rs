@@ -815,8 +815,8 @@ impl RnAppWindow {
 
         // Escape is left to the canvas alone: it ends text editing, cancels a selection and
         // returns a non-brush pen to the brush, and it does not leave zen mode either way.
-        // Zen is left with `<Ctrl><Shift>f`, F11 or the compositor, which all keep the way back
-        // to the hidden header explicit.
+        // Zen is left with its own zen shortcut, F11 or the compositor, which all keep the way
+        // back to the hidden header explicit.
     }
 
     fn setup_overview(&self) {

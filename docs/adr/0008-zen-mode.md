@@ -21,8 +21,8 @@ close it.
   fullscreen window on the monitor it is on) and `win.zen-mode-all-monitors` (one window over the
   whole desktop area). A variant's action leaves zen when that variant is on, and switches the
   variant when the other one is on. Focus mode stays as it is.
-- The two accelerators are user settings (`zen-accel-active-monitor`, default `<Ctrl><Shift>m`, and
-  `zen-accel-all-monitors`, default `<Ctrl><Shift>f`), captured in the settings panel and applied to
+- The two accelerators are user settings (`zen-accel-active-monitor`, default `<Ctrl><Shift>f`, and
+  `zen-accel-all-monitors`, default `<Ctrl><Shift>m`), captured in the settings panel and applied to
   the app's actions at startup and on every change. The shortcuts dialog shows the current
   combinations, not the defaults. An unparsable stored value falls back to the schema default and
   then to a compiled-in one, so a settings file written for an older install cannot leave the

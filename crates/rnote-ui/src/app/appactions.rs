@@ -100,8 +100,8 @@ impl RnApp {
     /// no default to fall back on, and the shortcuts must still work.
     fn zen_accel_default(key: &str) -> &'static str {
         match key {
-            "zen-accel-active-monitor" => "<Ctrl><Shift>m",
-            _ => "<Ctrl><Shift>f",
+            "zen-accel-active-monitor" => "<Ctrl><Shift>f",
+            _ => "<Ctrl><Shift>m",
         }
     }
 
