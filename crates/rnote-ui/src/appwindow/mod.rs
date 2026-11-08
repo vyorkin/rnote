@@ -2,6 +2,7 @@
 mod actions;
 mod appsettings;
 mod imp;
+mod span;
 
 // Imports
 use crate::{

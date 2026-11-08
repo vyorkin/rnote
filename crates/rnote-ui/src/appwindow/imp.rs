@@ -36,6 +36,10 @@ pub(crate) struct RnAppWindow {
     /// Set when fullscreen itself ends zen (F11), where restoring fullscreen on the way
     /// out would immediately undo the user's action.
     pub(crate) zen_skip_fullscreen_restore: Cell<bool>,
+    /// Whether the window currently covers every monitor through the compositor.
+    pub(crate) zen_spanning: Cell<bool>,
+    /// The compositor state the span replaced, put back when the span ends.
+    pub(crate) zen_span_restore: RefCell<Option<super::span::SpanRestore>>,
     pub(crate) devel_mode: Cell<bool>,
     pub(crate) visual_debug: Cell<bool>,
 
@@ -81,6 +85,8 @@ impl Default for RnAppWindow {
             zen_mode: Cell::new(false),
             zen_restore_fullscreen: Cell::new(false),
             zen_skip_fullscreen_restore: Cell::new(false),
+            zen_spanning: Cell::new(false),
+            zen_span_restore: RefCell::new(None),
             devel_mode: Cell::new(false),
             visual_debug: Cell::new(false),
 
@@ -157,15 +163,30 @@ impl ObjectImpl for RnAppWindow {
         self.setup_split_view();
         self.setup_tabbar();
 
+        obj.watch_zen_span_monitors();
+
         // Zen mode is entered together with fullscreen: hiding the header in a windowed
         // state would leave the window with no buttons and nothing to drag. Leaving
         // fullscreen with F11 therefore leaves zen too, or the window would stay without
         // chrome. The property is cleared first, so the exit below does not restore the
         // fullscreen the user just gave up.
+        //
+        // A window that spans every monitor is not fullscreen - the compositor owns its
+        // geometry - so the unfullscreen a span dispatches on entry must not end zen.
+        // F11 there gives up the span, because a fullscreen window covers one output;
+        // zen ends with it and the fullscreen the user asked for stays.
         obj.connect_fullscreened_notify(clone!(
             #[weak(rename_to=appwindow)]
             obj,
             move |_| {
+                if appwindow.imp().zen_spanning.get() {
+                    if appwindow.is_fullscreen() {
+                        appwindow.imp().zen_skip_fullscreen_restore.replace(true);
+                        appwindow.set_property("zen-mode", false);
+                        appwindow.imp().zen_skip_fullscreen_restore.replace(false);
+                    }
+                    return;
+                }
                 if appwindow.property::<bool>("zen-mode") && !appwindow.is_fullscreen() {
                     appwindow.imp().zen_skip_fullscreen_restore.replace(true);
                     appwindow.set_property("zen-mode", false);
@@ -367,9 +388,19 @@ impl ObjectImpl for RnAppWindow {
 
                 if zen_mode {
                     self.zen_restore_fullscreen.replace(obj.is_fullscreen());
-                    obj.set_fullscreened(true);
-                } else if !self.zen_skip_fullscreen_restore.get() {
-                    obj.set_fullscreened(self.zen_restore_fullscreen.get());
+                    // Zen covers the whole desktop when the compositor can give one
+                    // window the union of all monitor geometries. Otherwise it stays a
+                    // fullscreen window on the monitor the window is on.
+                    if !obj.enter_zen_span() {
+                        obj.set_fullscreened(true);
+                    }
+                } else {
+                    if self.zen_spanning.get() {
+                        obj.leave_zen_span();
+                    }
+                    if !self.zen_skip_fullscreen_restore.get() {
+                        obj.set_fullscreened(self.zen_restore_fullscreen.get());
+                    }
                 }
             }
             "devel-mode" => {
