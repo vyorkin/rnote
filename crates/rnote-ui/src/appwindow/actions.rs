@@ -177,8 +177,29 @@ impl RnAppWindow {
         self.add_action(&action_touch_drawing);
         let action_focus_mode = gio::PropertyAction::new("focus-mode", self, "focus-mode");
         self.add_action(&action_focus_mode);
-        let action_zen_mode = gio::PropertyAction::new("zen-mode", self, "zen-mode");
-        self.add_action(&action_zen_mode);
+        // Zen mode comes in two variants, each with its own accelerator: a
+        // fullscreen window on the active monitor, and one window over every
+        // monitor. Pressing a variant's accelerator while zen is on leaves zen;
+        // pressing the other variant's accelerator switches the variant.
+        let action_zen_mode_active_monitor =
+            gio::SimpleAction::new("zen-mode-active-monitor", None);
+        self.add_action(&action_zen_mode_active_monitor);
+        action_zen_mode_active_monitor.connect_activate(clone!(
+            #[weak(rename_to = appwindow)]
+            self,
+            move |_, _| {
+                appwindow.toggle_zen_mode(false);
+            }
+        ));
+        let action_zen_mode_all_monitors = gio::SimpleAction::new("zen-mode-all-monitors", None);
+        self.add_action(&action_zen_mode_all_monitors);
+        action_zen_mode_all_monitors.connect_activate(clone!(
+            #[weak(rename_to = appwindow)]
+            self,
+            move |_, _| {
+                appwindow.toggle_zen_mode(true);
+            }
+        ));
         let action_pen_sounds = gio::PropertyAction::new("pen-sounds", self, "pen-sounds");
         self.add_action(&action_pen_sounds);
         let action_snap_positions =
@@ -1171,7 +1192,8 @@ impl RnAppWindow {
 
         app.set_accels_for_action("win.active-tab-close", &["<Ctrl>w"]);
         app.set_accels_for_action("win.fullscreen", &["F11"]);
-        app.set_accels_for_action("win.zen-mode", &["<Ctrl><Shift>f"]);
+        // The zen accelerators are user settings, applied by `RnApp` at startup
+        // and whenever they change.
         app.set_accels_for_action("win.keyboard-shortcuts", &["<Ctrl>question"]);
         app.set_accels_for_action("win.toggle-overview", &["<Ctrl><Shift>o"]);
         app.set_accels_for_action("win.open-canvasmenu", &["F9"]);

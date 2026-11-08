@@ -54,6 +54,25 @@ pub(crate) fn dialog_keyboard_shortcuts(appwindow: &RnAppWindow) {
         Builder::from_resource((String::from(config::APP_IDPATH) + "ui/shortcuts.ui").as_str());
     #[allow(deprecated)]
     let dialog: ShortcutsWindow = builder.object("shortcuts_window").unwrap();
+
+    // The two zen shortcuts are user settings, so show the combinations the user
+    // assigned instead of the defaults the file carries.
+    let settings = appwindow.app().app_settings();
+    for (id, key) in [
+        (
+            "zen_mode_active_monitor_shortcut",
+            "zen-accel-active-monitor",
+        ),
+        ("zen_mode_all_monitors_shortcut", "zen-accel-all-monitors"),
+    ] {
+        #[allow(deprecated)]
+        if let Some(shortcut) = builder.object::<gtk4::ShortcutsShortcut>(id) {
+            shortcut.set_accelerator(Some(
+                crate::RnApp::zen_accel(settings.as_ref(), key).as_str(),
+            ));
+        }
+    }
+
     dialog.set_transient_for(Some(appwindow));
     dialog.present();
 }

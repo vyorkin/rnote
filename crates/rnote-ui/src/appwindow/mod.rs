@@ -181,6 +181,17 @@ impl RnAppWindow {
         self.set_property("touch-drawing", touch_drawing.to_value());
     }
 
+    /// Enter zen in the requested variant, or leave zen when that variant is
+    /// already on. Asking for the other variant while zen is on switches it.
+    pub(crate) fn toggle_zen_mode(&self, span: bool) {
+        if self.property::<bool>("zen-mode") && self.property::<bool>("zen-span") == span {
+            self.set_property("zen-mode", false);
+        } else {
+            self.set_property("zen-span", span);
+            self.set_property("zen-mode", true);
+        }
+    }
+
     #[allow(unused)]
     pub(crate) fn focus_mode(&self) -> bool {
         self.property::<bool>("focus-mode")

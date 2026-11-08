@@ -155,6 +155,42 @@ gets disabled.</property>
                     </child>
                   </object>
                 </child>
+                <!-- Zen Group -->
+                <child>
+                  <object class="AdwPreferencesGroup">
+                    <property name="title" translatable="yes">Zen Mode</property>
+                    <child>
+                      <object class="AdwActionRow" id="zen_accel_all_monitors_row">
+                        <property name="title" translatable="yes">Zen Across All Monitors</property>
+                        <property name="subtitle" translatable="yes">Covers every monitor with one window. Needs a compositor that can place a window across monitors (Hyprland); others fall back to the active monitor. Click the shortcut to change it.</property>
+                        <child type="suffix">
+                          <object class="GtkMenuButton" id="zen_accel_all_monitors_button">
+                            <property name="valign">center</property>
+                            <property name="popover">zen_accel_all_monitors_popover</property>
+                            <child>
+                              <object class="GtkLabel" id="zen_accel_all_monitors_label"/>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwActionRow" id="zen_accel_active_monitor_row">
+                        <property name="title" translatable="yes">Zen on the Active Monitor</property>
+                        <property name="subtitle" translatable="yes">Fullscreens the window on the monitor it is on. Click the shortcut to change it.</property>
+                        <child type="suffix">
+                          <object class="GtkMenuButton" id="zen_accel_active_monitor_button">
+                            <property name="valign">center</property>
+                            <property name="popover">zen_accel_active_monitor_popover</property>
+                            <child>
+                              <object class="GtkLabel" id="zen_accel_active_monitor_label"/>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                  </object>
+                </child>
                 <!-- Format Group -->
                 <child>
                   <object class="AdwPreferencesGroup" id="format_preferences_group">
@@ -840,6 +876,38 @@ on a drawing pad</property>
       <child>
         <object class="RnIconPicker" id="general_drawing_cursor_picker">
           <property name="valign">center</property>
+        </object>
+      </child>
+    </object>
+    <object class="GtkPopover" id="zen_accel_active_monitor_popover">
+      <child>
+        <object class="GtkBox" id="zen_accel_active_monitor_capture">
+          <property name="can-focus">true</property>
+          <property name="margin-start">18</property>
+          <property name="margin-end">18</property>
+          <property name="margin-top">12</property>
+          <property name="margin-bottom">12</property>
+          <child>
+            <object class="GtkLabel" id="zen_accel_active_monitor_prompt">
+              <property name="label" translatable="yes">Press the new key combination</property>
+            </object>
+          </child>
+        </object>
+      </child>
+    </object>
+    <object class="GtkPopover" id="zen_accel_all_monitors_popover">
+      <child>
+        <object class="GtkBox" id="zen_accel_all_monitors_capture">
+          <property name="can-focus">true</property>
+          <property name="margin-start">18</property>
+          <property name="margin-end">18</property>
+          <property name="margin-top">12</property>
+          <property name="margin-bottom">12</property>
+          <child>
+            <object class="GtkLabel" id="zen_accel_all_monitors_prompt">
+              <property name="label" translatable="yes">Press the new key combination</property>
+            </object>
+          </child>
         </object>
       </child>
     </object>

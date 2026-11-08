@@ -64,9 +64,15 @@
               </object>
             </child>
             <child>
-              <object class="GtkShortcutsShortcut">
-                <property name="title" translatable="yes">Toggle Zen Mode</property>
+              <object class="GtkShortcutsShortcut" id="zen_mode_all_monitors_shortcut">
+                <property name="title" translatable="yes">Toggle Zen Mode Across All Monitors</property>
                 <property name="accelerator">&lt;ctrl&gt;&lt;shift&gt;f</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut" id="zen_mode_active_monitor_shortcut">
+                <property name="title" translatable="yes">Toggle Zen Mode on the Active Monitor</property>
+                <property name="accelerator">&lt;ctrl&gt;&lt;shift&gt;m</property>
               </object>
             </child>
           </object>

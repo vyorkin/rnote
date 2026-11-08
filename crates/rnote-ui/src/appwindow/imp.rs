@@ -30,6 +30,9 @@ pub(crate) struct RnAppWindow {
     pub(crate) touch_drawing: Cell<bool>,
     pub(crate) focus_mode: Cell<bool>,
     pub(crate) zen_mode: Cell<bool>,
+    /// Which zen variant the user asked for: the whole desktop area, or a
+    /// fullscreen window on the monitor it is on. Only read while zen mode is on.
+    pub(crate) zen_span: Cell<bool>,
     /// Whether the window was fullscreened when zen mode was entered, so leaving zen
     /// restores the state it replaced.
     pub(crate) zen_restore_fullscreen: Cell<bool>,
@@ -83,6 +86,7 @@ impl Default for RnAppWindow {
             touch_drawing: Cell::new(false),
             focus_mode: Cell::new(false),
             zen_mode: Cell::new(false),
+            zen_span: Cell::new(false),
             zen_restore_fullscreen: Cell::new(false),
             zen_skip_fullscreen_restore: Cell::new(false),
             zen_spanning: Cell::new(false),
@@ -200,10 +204,10 @@ impl ObjectImpl for RnAppWindow {
         // compositor dispatches a window to address.
         let weak_window = obj.downgrade();
         obj.connect_close_request(move |_| {
-            if let Some(appwindow) = weak_window.upgrade() {
-                if appwindow.imp().zen_spanning.get() {
-                    appwindow.leave_zen_span();
-                }
+            if let Some(appwindow) = weak_window.upgrade()
+                && appwindow.imp().zen_spanning.get()
+            {
+                appwindow.leave_zen_span();
             }
             glib::Propagation::Proceed
         });
@@ -254,6 +258,9 @@ impl ObjectImpl for RnAppWindow {
                 glib::ParamSpecBoolean::builder("zen-mode")
                     .default_value(false)
                     .build(),
+                glib::ParamSpecBoolean::builder("zen-span")
+                    .default_value(false)
+                    .build(),
                 glib::ParamSpecBoolean::builder("devel-mode")
                     .default_value(false)
                     .build(),
@@ -287,6 +294,7 @@ impl ObjectImpl for RnAppWindow {
             "touch-drawing" => self.touch_drawing.get().to_value(),
             "focus-mode" => self.focus_mode.get().to_value(),
             "zen-mode" => self.zen_mode.get().to_value(),
+            "zen-span" => self.zen_span.get().to_value(),
             "devel-mode" => self.devel_mode.get().to_value(),
             "visual-debug" => self.visual_debug.get().to_value(),
             "save-in-progress" => self.save_in_progress.get().to_value(),
@@ -401,10 +409,11 @@ impl ObjectImpl for RnAppWindow {
 
                 if zen_mode {
                     self.zen_restore_fullscreen.replace(obj.is_fullscreen());
-                    // Zen covers the whole desktop when the compositor can give one
-                    // window the union of all monitor geometries. Otherwise it stays a
-                    // fullscreen window on the monitor the window is on.
-                    if !obj.enter_zen_span() {
+                    // A spanning zen covers the whole desktop when the compositor can
+                    // give one window the union of all monitor geometries. Otherwise,
+                    // and for the active-monitor variant, it stays a fullscreen window
+                    // on the monitor the window is on.
+                    if !self.zen_span.get() || !obj.enter_zen_span() {
                         obj.set_fullscreened(true);
                     }
                 } else {
@@ -414,6 +423,28 @@ impl ObjectImpl for RnAppWindow {
                     if !self.zen_skip_fullscreen_restore.get() {
                         obj.set_fullscreened(self.zen_restore_fullscreen.get());
                     }
+                }
+            }
+            "zen-span" => {
+                let zen_span: bool = value.get().expect("The value needs to be of type `bool`");
+                if self.zen_span.replace(zen_span) == zen_span {
+                    return;
+                }
+                if !self.zen_mode.get() {
+                    return;
+                }
+
+                // The variant switched while zen mode is on: take the new one and
+                // keep zen itself on.
+                if zen_span {
+                    if !obj.enter_zen_span() {
+                        obj.set_fullscreened(true);
+                    }
+                } else {
+                    if self.zen_spanning.get() {
+                        obj.leave_zen_span();
+                    }
+                    obj.set_fullscreened(true);
                 }
             }
             "devel-mode" => {

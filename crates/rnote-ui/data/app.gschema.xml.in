@@ -133,6 +133,14 @@
       <default>true</default>
       <summary>Whether touch scrolling on the canvas is inertial</summary>
     </key>
+    <key name="zen-accel-all-monitors" type="s">
+      <default>"&lt;Ctrl&gt;&lt;Shift&gt;f"</default>
+      <summary>Accelerator that enters zen mode over all monitors</summary>
+    </key>
+    <key name="zen-accel-active-monitor" type="s">
+      <default>"&lt;Ctrl&gt;&lt;Shift&gt;m"</default>
+      <summary>Accelerator that enters zen mode on the active monitor</summary>
+    </key>
     <key name="righthanded" type="b">
       <default>true</default>
       <summary>Whether the user is righthanded (or lefthanded)</summary>

@@ -114,10 +114,11 @@ impl RnAppWindow {
 
         // Only hide the bar once the span itself is in place, so a refused span
         // never leaves the desktop without its bar.
-        if !bar_hidden() && set_bar_hidden(true) {
-            if let Some(restore) = imp.zen_span_restore.borrow_mut().as_mut() {
-                restore.hid_bar = true;
-            }
+        if !bar_hidden()
+            && set_bar_hidden(true)
+            && let Some(restore) = imp.zen_span_restore.borrow_mut().as_mut()
+        {
+            restore.hid_bar = true;
         }
 
         true
@@ -130,8 +131,7 @@ impl RnAppWindow {
         // A fullscreen window cannot be moved or resized, and the span relies on
         // both. The unfullscreen notification this dispatch causes arrives after
         // `zen_spanning` is set, so the fullscreen handler ignores it.
-        let left_fullscreen = client.fullscreen == 0
-            && !self.is_fullscreen()
+        let left_fullscreen = client.fullscreen == 0 && !self.is_fullscreen()
             || dispatch(
                 "fullscreen",
                 &format!(
@@ -141,9 +141,7 @@ impl RnAppWindow {
         left_fullscreen
             && dispatch(
                 "float",
-                &format!(
-                    "hl.dsp.window.float({{ action = \"set\", window = \"{address}\" }})"
-                ),
+                &format!("hl.dsp.window.float({{ action = \"set\", window = \"{address}\" }})"),
             )
             && dispatch(
                 "resize",
@@ -333,10 +331,10 @@ fn own_client(window: &RnAppWindow) -> Option<HyprClient> {
         [] => None,
         [only] => Some((*only).clone()),
         many => {
-            if let Some(active) = active_client() {
-                if let Some(client) = many.iter().find(|client| client.address == active) {
-                    return Some((*client).clone());
-                }
+            if let Some(active) = active_client()
+                && let Some(client) = many.iter().find(|client| client.address == active)
+            {
+                return Some((*client).clone());
             }
             let title = window
                 .title()

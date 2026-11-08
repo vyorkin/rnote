@@ -36,6 +36,146 @@ const BRACKET_STYLE_ARC_INDEX: u32 = 0;
 /// The item of the bracket shape row that makes a rounded bracket.
 const BRACKET_STYLE_ROUNDED_INDEX: u32 = 1;
 
+/// The widgets of one zen accelerator row: its capture popover and the label
+/// showing the combination it currently holds.
+struct ZenAccelRow {
+    popover: gtk4::Popover,
+    capture: gtk4::Box,
+    prompt: gtk4::Label,
+    label: gtk4::Label,
+}
+
+/// Show an accelerator string the way the platform spells it.
+fn set_zen_accel_label(label: &gtk4::Label, accel: &str) {
+    match gtk4::accelerator_parse(accel) {
+        Some((keyval, mods)) => label.set_label(&gtk4::accelerator_get_label(keyval, mods)),
+        None => label.set_label(accel),
+    }
+}
+
+/// Whether the key is only a modifier, which recording waits past until the key
+/// it modifies arrives.
+fn is_modifier_key(keyval: gdk::Key) -> bool {
+    matches!(
+        keyval,
+        gdk::Key::Shift_L
+            | gdk::Key::Shift_R
+            | gdk::Key::Control_L
+            | gdk::Key::Control_R
+            | gdk::Key::Alt_L
+            | gdk::Key::Alt_R
+            | gdk::Key::Super_L
+            | gdk::Key::Super_R
+            | gdk::Key::Meta_L
+            | gdk::Key::Meta_R
+            | gdk::Key::Hyper_L
+            | gdk::Key::Hyper_R
+            | gdk::Key::Caps_Lock
+            | gdk::Key::Num_Lock
+            | gdk::Key::Scroll_Lock
+    )
+}
+
+/// Wire one zen accelerator row: show the combination its setting holds, and
+/// capture a new one in a popover when the row's button is clicked.
+fn setup_zen_accel_row(
+    settings: &gtk4::gio::Settings,
+    key: &'static str,
+    other_key: &'static str,
+    ZenAccelRow {
+        popover,
+        capture,
+        prompt,
+        label,
+    }: ZenAccelRow,
+) {
+    set_zen_accel_label(&label, &settings.string(key));
+    settings.connect_changed(
+        Some(key),
+        clone!(
+            #[weak]
+            label,
+            #[weak]
+            settings,
+            move |_, _| set_zen_accel_label(&label, &settings.string(key))
+        ),
+    );
+
+    // The popover holds the focus while it is open, so its own key controller
+    // sees the combination before the window resolves it as an accelerator.
+    popover.connect_show(clone!(
+        #[weak]
+        prompt,
+        #[weak]
+        capture,
+        move |_| {
+            prompt.set_label(&gettext("Press the new key combination"));
+            capture.grab_focus();
+        }
+    ));
+
+    let controller = gtk4::EventControllerKey::new();
+    controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    controller.connect_key_pressed(clone!(
+        #[weak]
+        popover,
+        #[weak]
+        prompt,
+        #[weak]
+        settings,
+        // A dead capture row must not fall through to the window, where the
+        // key would resolve as an accelerator.
+        #[upgrade_or]
+        glib::Propagation::Stop,
+        move |_, keyval, _, state| {
+            if keyval == gdk::Key::Escape {
+                popover.popdown();
+                return glib::Propagation::Stop;
+            }
+            if is_modifier_key(keyval) {
+                // Wait for the key the modifiers belong to.
+                return glib::Propagation::Proceed;
+            }
+
+            // A plain key would take the key away from the canvas while
+            // drawing, so a zen shortcut needs a modifier.
+            let with_modifier = state.intersects(
+                gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SUPER_MASK
+                    | gdk::ModifierType::HYPER_MASK
+                    | gdk::ModifierType::META_MASK,
+            );
+            if !with_modifier {
+                prompt.set_label(&gettext("Hold Ctrl, Alt or Super with the key"));
+                return glib::Propagation::Stop;
+            }
+            let accel = gtk4::accelerator_name(keyval, state).to_string();
+            if gtk4::accelerator_parse(&accel).is_none() {
+                prompt.set_label(&gettext("That combination cannot be used"));
+                return glib::Propagation::Stop;
+            }
+
+            let previous = settings.string(key).to_string();
+            // The two zen modes must stay on different combinations, so a
+            // combination the other mode holds trades places with it.
+            if settings.string(other_key).as_str() == accel
+                && settings.set_string(other_key, &previous).is_err()
+            {
+                prompt.set_label(&gettext("The shortcut could not be saved"));
+                return glib::Propagation::Stop;
+            }
+            if settings.set_string(key, &accel).is_ok() {
+                popover.popdown();
+            } else {
+                prompt.set_label(&gettext("The shortcut could not be saved"));
+            }
+            glib::Propagation::Stop
+        }
+    ));
+    capture.add_controller(controller);
+}
+
 mod imp {
     use super::*;
 
@@ -61,6 +201,26 @@ mod imp {
         pub(crate) general_optimize_epd_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) general_inertial_scrolling_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) zen_accel_active_monitor_button: TemplateChild<MenuButton>,
+        #[template_child]
+        pub(crate) zen_accel_active_monitor_label: TemplateChild<gtk4::Label>,
+        #[template_child]
+        pub(crate) zen_accel_all_monitors_button: TemplateChild<MenuButton>,
+        #[template_child]
+        pub(crate) zen_accel_all_monitors_label: TemplateChild<gtk4::Label>,
+        #[template_child]
+        pub(crate) zen_accel_active_monitor_popover: TemplateChild<gtk4::Popover>,
+        #[template_child]
+        pub(crate) zen_accel_active_monitor_capture: TemplateChild<gtk4::Box>,
+        #[template_child]
+        pub(crate) zen_accel_active_monitor_prompt: TemplateChild<gtk4::Label>,
+        #[template_child]
+        pub(crate) zen_accel_all_monitors_popover: TemplateChild<gtk4::Popover>,
+        #[template_child]
+        pub(crate) zen_accel_all_monitors_capture: TemplateChild<gtk4::Box>,
+        #[template_child]
+        pub(crate) zen_accel_all_monitors_prompt: TemplateChild<gtk4::Label>,
         #[template_child]
         pub(crate) general_regular_cursor_picker: TemplateChild<RnIconPicker>,
         #[template_child]
@@ -614,6 +774,7 @@ impl RnSettingsPanel {
 
     pub(crate) fn init(&self, appwindow: &RnAppWindow) {
         self.setup_general(appwindow);
+        self.setup_zen_mode(appwindow);
         self.setup_format(appwindow);
         self.setup_doc(appwindow);
         self.setup_gestures(appwindow);
@@ -806,6 +967,43 @@ impl RnSettingsPanel {
             .sync_create()
             .bidirectional()
             .build();
+    }
+
+    /// The two zen variants carry the accelerators the user gave them; the rows
+    /// show the current ones and capture a new combination when clicked.
+    fn setup_zen_mode(&self, appwindow: &RnAppWindow) {
+        let imp = self.imp();
+        let Some(settings) = appwindow.app().app_settings() else {
+            imp.zen_accel_active_monitor_button.set_sensitive(false);
+            imp.zen_accel_all_monitors_button.set_sensitive(false);
+            return;
+        };
+
+        let active_monitor_row = ZenAccelRow {
+            popover: (*imp.zen_accel_active_monitor_popover).clone(),
+            capture: (*imp.zen_accel_active_monitor_capture).clone(),
+            prompt: (*imp.zen_accel_active_monitor_prompt).clone(),
+            label: (*imp.zen_accel_active_monitor_label).clone(),
+        };
+        let all_monitors_row = ZenAccelRow {
+            popover: (*imp.zen_accel_all_monitors_popover).clone(),
+            capture: (*imp.zen_accel_all_monitors_capture).clone(),
+            prompt: (*imp.zen_accel_all_monitors_prompt).clone(),
+            label: (*imp.zen_accel_all_monitors_label).clone(),
+        };
+
+        setup_zen_accel_row(
+            &settings,
+            "zen-accel-active-monitor",
+            "zen-accel-all-monitors",
+            active_monitor_row,
+        );
+        setup_zen_accel_row(
+            &settings,
+            "zen-accel-all-monitors",
+            "zen-accel-active-monitor",
+            all_monitors_row,
+        );
     }
 
     fn setup_format(&self, appwindow: &RnAppWindow) {
@@ -1358,12 +1556,10 @@ impl RnSettingsPanel {
                 }
             ));
 
-        imp.gestures_scribbleerase_min_speed_row
-            .get()
-            .set_range(
-                ScribbleRecognitionOptions::MIN_SPEED_MIN,
-                ScribbleRecognitionOptions::MIN_SPEED_MAX,
-            );
+        imp.gestures_scribbleerase_min_speed_row.get().set_range(
+            ScribbleRecognitionOptions::MIN_SPEED_MIN,
+            ScribbleRecognitionOptions::MIN_SPEED_MAX,
+        );
         imp.gestures_scribbleerase_min_speed_row
             .connect_changed(clone!(
                 #[weak]
@@ -1541,11 +1737,10 @@ impl RnSettingsPanel {
                 }
             ));
 
-        imp.gestures_bracket_corner_radius_row
-            .set_range(
-                BRACKET_CORNER_RADIUS_RATIO_MIN * 100.0,
-                BRACKET_CORNER_RADIUS_RATIO_MAX * 100.0,
-            );
+        imp.gestures_bracket_corner_radius_row.set_range(
+            BRACKET_CORNER_RADIUS_RATIO_MIN * 100.0,
+            BRACKET_CORNER_RADIUS_RATIO_MAX * 100.0,
+        );
         imp.gestures_bracket_corner_radius_row
             .connect_changed(clone!(
                 #[weak]
@@ -1629,10 +1824,11 @@ impl RnSettingsPanel {
             .set_active(gestures.curve_recognition_enabled);
         imp.gestures_curve_recognition_row
             .set_sensitive(gestures.shape_recognition_enabled);
-        imp.gestures_bracket_style_row.set_selected(match gestures.bracket_style {
-            BracketStyle::Arc => BRACKET_STYLE_ARC_INDEX,
-            BracketStyle::Rounded => BRACKET_STYLE_ROUNDED_INDEX,
-        });
+        imp.gestures_bracket_style_row
+            .set_selected(match gestures.bracket_style {
+                BracketStyle::Arc => BRACKET_STYLE_ARC_INDEX,
+                BracketStyle::Rounded => BRACKET_STYLE_ROUNDED_INDEX,
+            });
         imp.gestures_bracket_style_row
             .set_sensitive(gestures.shape_recognition_enabled);
         imp.gestures_bracket_corner_radius_row
