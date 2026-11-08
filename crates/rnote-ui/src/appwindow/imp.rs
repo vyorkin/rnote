@@ -194,6 +194,19 @@ impl ObjectImpl for RnAppWindow {
                 }
             }
         ));
+
+        // A window that closes while it spans must not take the bar it hid with
+        // it. Restoring here, while the window is still alive, also gives the
+        // compositor dispatches a window to address.
+        let weak_window = obj.downgrade();
+        obj.connect_close_request(move |_| {
+            if let Some(appwindow) = weak_window.upgrade() {
+                if appwindow.imp().zen_spanning.get() {
+                    appwindow.leave_zen_span();
+                }
+            }
+            glib::Propagation::Proceed
+        });
     }
 
     fn dispose(&self) {

@@ -8,11 +8,22 @@
 //!
 //! The state taken over here is remembered per window, so leaving the span puts
 //! the geometry, the floating state and the decoration back as they were.
+//!
+//! The Omarchy bar is a layer surface above a floating window, so the span hides
+//! it through Omarchy's own toggle and shows it again on exit, unless it was
+//! already hidden when the span began. A window that closes while spanning
+//! restores the bar too, before the compositor forgets its surface.
+//!
+//! The compositor dispatch is a request, not a guarantee: after it the window is
+//! checked against the wanted geometry once, retried once and only then accepted,
+//! so a lost race falls back to the fullscreen zen instead of a half-applied
+//! span with the bar gone.
 
 use super::RnAppWindow;
 use glib::subclass::prelude::*;
 use gtk4::{gdk, glib, glib::clone, prelude::*};
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::process::Command;
 use tracing::{debug, warn};
 
@@ -22,6 +33,9 @@ pub(crate) struct SpanRestore {
     floating: bool,
     at: (i32, i32),
     size: (i32, i32),
+    /// Set when the span hid a bar that was visible, so only that bar is shown
+    /// again; a bar the user had hidden stays hidden.
+    hid_bar: bool,
 }
 
 /// The union of every monitor's geometry, in layout coordinates.
@@ -80,13 +94,42 @@ impl RnAppWindow {
             floating: client.floating,
             at: (client.at[0], client.at[1]),
             size: (client.size[0], client.size[1]),
+            hid_bar: false,
         });
         imp.zen_spanning.set(true);
 
+        // The span is one compositor transaction that the compositor can also
+        // lose to a competing layout change, so ask once and check the result.
+        let mut spans =
+            self.dispatch_zen_span(&client, &rect) && span_in_place(&rect, &client.address);
+        if !spans {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            spans = self.dispatch_zen_span(&client, &rect) && span_in_place(&rect, &client.address);
+        }
+        if !spans {
+            warn!("zen span: the compositor did not keep the window on the whole desktop area");
+            self.leave_zen_span();
+            return false;
+        }
+
+        // Only hide the bar once the span itself is in place, so a refused span
+        // never leaves the desktop without its bar.
+        if !bar_hidden() && set_bar_hidden(true) {
+            if let Some(restore) = imp.zen_span_restore.borrow_mut().as_mut() {
+                restore.hid_bar = true;
+            }
+        }
+
+        true
+    }
+
+    /// Ask the compositor for the span itself: unfullscreen, float, resize, move,
+    /// drop the border.
+    fn dispatch_zen_span(&self, client: &HyprClient, rect: &SpanRect) -> bool {
         let address = format!("address:{}", client.address);
         // A fullscreen window cannot be moved or resized, and the span relies on
         // both. The unfullscreen notification this dispatch causes arrives after
-        // `zen_spanning` is set, so the fullscreen handler below ignores it.
+        // `zen_spanning` is set, so the fullscreen handler ignores it.
         let left_fullscreen = client.fullscreen == 0
             && !self.is_fullscreen()
             || dispatch(
@@ -95,7 +138,7 @@ impl RnAppWindow {
                     "hl.dsp.window.fullscreen({{ mode = \"fullscreen\", action = \"unset\", window = \"{address}\" }})"
                 ),
             );
-        let ok = left_fullscreen
+        left_fullscreen
             && dispatch(
                 "float",
                 &format!(
@@ -121,15 +164,7 @@ impl RnAppWindow {
                 &format!(
                     "hl.dsp.window.set_prop({{ prop = \"decorate\", value = \"0\", window = \"{address}\" }})"
                 ),
-            );
-
-        if !ok {
-            warn!("zen span: the compositor did not accept the span dispatches");
-            self.leave_zen_span();
-            return false;
-        }
-
-        true
+            )
     }
 
     /// Put the window back where the compositor had it before the span.
@@ -140,6 +175,9 @@ impl RnAppWindow {
         let Some(restore) = imp.zen_span_restore.borrow_mut().take() else {
             return;
         };
+        if restore.hid_bar {
+            set_bar_hidden(false);
+        }
         let Some(client) = own_client(self) else {
             warn!("zen span: the window was not found in the compositor's clients");
             return;
@@ -212,6 +250,16 @@ impl RnAppWindow {
     }
 }
 
+/// A compositor that never answers the span is normal off Hyprland; on Hyprland
+/// it is a fault worth reporting.
+fn report(problem: &str) {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        warn!("{problem}");
+    } else {
+        debug!("{problem}");
+    }
+}
+
 /// Run a dispatcher through `hyprctl`, which speaks Lua on the Hyprland this
 /// fork targets. `true` only when the compositor answered "ok".
 fn dispatch(name: &str, request: &str) -> bool {
@@ -221,24 +269,26 @@ fn dispatch(name: &str, request: &str) -> bool {
             if answer.trim() == "ok" {
                 true
             } else {
-                debug!(
+                report(&format!(
                     "zen span: `{name}` dispatch refused: {}{}",
                     answer.trim(),
                     String::from_utf8_lossy(&output.stderr).trim()
-                );
+                ));
                 false
             }
         }
         Ok(output) => {
-            debug!(
+            report(&format!(
                 "zen span: `{name}` dispatch failed: {}{}",
                 String::from_utf8_lossy(&output.stdout).trim(),
                 String::from_utf8_lossy(&output.stderr).trim()
-            );
+            ));
             false
         }
         Err(err) => {
-            debug!("zen span: `{name}` dispatch could not run hyprctl: {err}");
+            report(&format!(
+                "zen span: `{name}` dispatch could not run hyprctl: {err}"
+            ));
             false
         }
     }
@@ -253,6 +303,23 @@ fn clients() -> Option<Vec<HyprClient>> {
         return None;
     }
     serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Whether the compositor reports the window floating over the whole span area.
+/// Hyprland can round the requested size by a pixel, so positions and sizes are
+/// compared within a hair.
+fn span_in_place(rect: &SpanRect, address: &str) -> bool {
+    let near = |a: i32, b: i32| (a - b).abs() <= 2;
+    let Some(client) =
+        clients().and_then(|all| all.into_iter().find(|client| client.address == *address))
+    else {
+        return false;
+    };
+    client.floating
+        && near(client.at[0], rect.x)
+        && near(client.at[1], rect.y)
+        && near(client.size[0], rect.width)
+        && near(client.size[1], rect.height)
 }
 
 /// The compositor's view of this window. A process can hold several app windows,
@@ -293,6 +360,44 @@ fn active_client() -> Option<String> {
     }
     let active: HyprClient = serde_json::from_slice(&output.stdout).ok()?;
     Some(active.address)
+}
+
+/// Omarchy's flag for a hidden bar.
+fn bar_flag() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/state/omarchy/toggles/bar-off"))
+}
+
+fn bar_hidden() -> bool {
+    bar_flag().is_some_and(|flag| flag.exists())
+}
+
+/// Hide or show the Omarchy bar the way its own toggle does. Omarchy's script
+/// also nudges the shell to re-read the flag, which the file watcher can miss
+/// when a span begins and ends in quick succession; without it the flag alone
+/// is still what the bar watches.
+fn set_bar_hidden(hidden: bool) -> bool {
+    // The flag names the bar, not its state: `on` writes a `bar-off` flag, which
+    // hides the bar, and `off` removes it.
+    let action = if hidden { "on" } else { "off" };
+    if Command::new("omarchy-toggle-bar")
+        .arg(action)
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return true;
+    }
+
+    let Some(flag) = bar_flag() else {
+        return false;
+    };
+    if hidden {
+        flag.parent()
+            .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
+            && std::fs::File::create(&flag).is_ok()
+    } else {
+        std::fs::remove_file(&flag).is_ok() || !flag.exists()
+    }
 }
 
 /// The bounding box of every monitor, in layout coordinates: one window that
