@@ -366,6 +366,35 @@ fn bar_flag() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".local/state/omarchy/toggles/bar-off"))
 }
 
+/// A marker that this app hid the bar. A span that ends without its exit path — a
+/// crash, a kill, a window that never got to close — would otherwise leave the
+/// whole desktop without its bar, and nothing on the next launch would know the
+/// flag was ours to clear.
+fn bar_marker() -> Option<PathBuf> {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+        })?;
+    Some(state.join("rnote").join("zen-bar-hidden"))
+}
+
+/// Give back a bar a span hid but never showed again, as left behind by a run
+/// that ended without its exit path.
+pub(crate) fn repair_stranded_zen_bar() {
+    let Some(marker) = bar_marker() else {
+        return;
+    };
+    if !marker.exists() {
+        return;
+    }
+    if bar_hidden() {
+        debug!("zen span: a bar hid by an earlier run is still hidden; showing it");
+        set_bar_hidden(false);
+    }
+    let _ = std::fs::remove_file(&marker);
+}
+
 fn bar_hidden() -> bool {
     bar_flag().is_some_and(|flag| flag.exists())
 }
@@ -378,24 +407,38 @@ fn set_bar_hidden(hidden: bool) -> bool {
     // The flag names the bar, not its state: `on` writes a `bar-off` flag, which
     // hides the bar, and `off` removes it.
     let action = if hidden { "on" } else { "off" };
-    if Command::new("omarchy-toggle-bar")
+    let done = if Command::new("omarchy-toggle-bar")
         .arg(action)
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        return true;
-    }
-
-    let Some(flag) = bar_flag() else {
-        return false;
-    };
-    if hidden {
-        flag.parent()
-            .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
-            && std::fs::File::create(&flag).is_ok()
+        true
     } else {
-        std::fs::remove_file(&flag).is_ok() || !flag.exists()
+        let Some(flag) = bar_flag() else {
+            return false;
+        };
+        if hidden {
+            flag.parent()
+                .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
+                && std::fs::File::create(&flag).is_ok()
+        } else {
+            std::fs::remove_file(&flag).is_ok() || !flag.exists()
+        }
+    };
+
+    // Track the flag as ours while it stands hidden, so a run that dies before
+    // showing it again is repaired on the next launch.
+    if done && let Some(marker) = bar_marker() {
+        if hidden {
+            if let Some(dir) = marker.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::File::create(&marker);
+        } else {
+            let _ = std::fs::remove_file(&marker);
+        }
     }
+    done
 }
 
 /// The bounding box of every monitor, in layout coordinates: one window that

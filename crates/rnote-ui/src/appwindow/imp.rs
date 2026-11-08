@@ -168,6 +168,7 @@ impl ObjectImpl for RnAppWindow {
         self.setup_tabbar();
 
         obj.watch_zen_span_monitors();
+        super::span::repair_stranded_zen_bar();
 
         // Zen mode is entered together with fullscreen: hiding the header in a windowed
         // state would leave the window with no buttons and nothing to drag. Leaving
