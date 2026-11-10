@@ -765,6 +765,7 @@ impl Brush {
                     curves: gestures.curve_recognition_enabled,
                     bracket: shaperecognition::BracketOptions {
                         style: gestures.bracket_style,
+                        brace: gestures.brace_style,
                         corner_radius_ratio: gestures.bracket_corner_radius_ratio,
                     },
                 },

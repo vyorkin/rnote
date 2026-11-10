@@ -154,6 +154,50 @@ impl Curve {
         Some(Self { cubics })
     }
 
+    /// A square bracket from `start` to `end`: a straight body with a sharp corner at each end.
+    ///
+    /// The body runs parallel to the chord between the ends, `depth` away from it on the side
+    /// `outward` points to, and each end runs straight out to the body along the normal of the
+    /// chord. So each corner is a right angle, and the bracket is as deep as `depth`.
+    ///
+    /// The depth is at most half the chord. `None` when the ends coincide or the depth vanishes.
+    pub fn new_square_bracket(
+        start: Vector2,
+        end: Vector2,
+        depth: f64,
+        outward: Vector2,
+    ) -> Option<Self> {
+        let chord_vec = end - start;
+        let chord = chord_vec.length();
+        if chord < f64::EPSILON || depth <= f64::EPSILON {
+            return None;
+        }
+
+        let direction = chord_vec / chord;
+        let mut normal = Vector2::new(-direction.y, direction.x);
+        if normal.dot(outward) < 0.0 {
+            normal = -normal;
+        }
+
+        let depth = depth.min(chord * 0.5);
+        let straight = |from: Vector2, to: Vector2| CubicBezier {
+            start: from,
+            cp1: from.lerp(to, 1.0 / 3.0),
+            cp2: from.lerp(to, 2.0 / 3.0),
+            end: to,
+        };
+        let top_corner = start + normal * depth;
+        let bottom_corner = end + normal * depth;
+
+        Some(Self {
+            cubics: vec![
+                straight(start, top_corner),
+                straight(top_corner, bottom_corner),
+                straight(bottom_corner, end),
+            ],
+        })
+    }
+
     /// A curly brace from `start` to `end`, its cusp `depth` away from the chord on the side
     /// `outward` points to.
     ///
@@ -350,6 +394,37 @@ mod tests {
         for point in &sampled {
             let offset = *point - Vector2::new(100.0, 150.0);
             assert!((offset.length() - 50.0).abs() < 0.5, "point {point:?}");
+        }
+    }
+
+    #[test]
+    fn square_bracket_has_right_angles_and_straight_arms() {
+        let start = Vector2::new(100.0, 100.0);
+        let end = Vector2::new(100.0, 400.0);
+        let depth = 30.0;
+        let bracket = Curve::new_square_bracket(start, end, depth, Vector2::new(-1.0, 0.0))
+            .expect("a square bracket");
+
+        let sampled = bracket.sampled(64);
+        // The ends stay where they were drawn, the body runs one depth to the side of the chord.
+        assert!((sampled[0] - start).length() < 1e-9);
+        assert!((*sampled.last().unwrap() - end).length() < 1e-9);
+        for point in sampled
+            .iter()
+            .filter(|point| (110.0..390.0).contains(&point.y))
+        {
+            assert!((point.x - 70.0).abs() < 1e-6, "body at {point:?}");
+        }
+
+        // A corner at each end is a right angle, not a rounded tip.
+        for (arm, body) in [(0, 1), (2, 1)] {
+            let arriving = bracket.cubics[arm].end - bracket.cubics[arm].cp2;
+            let leaving = bracket.cubics[body].cp1 - bracket.cubics[body].start;
+            let turn = arriving.normalize().angle_to(leaving.normalize()).abs();
+            assert!(
+                (turn - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
+                "the corner turns {turn} rad"
+            );
         }
     }
 

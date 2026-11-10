@@ -6,7 +6,9 @@
 pub mod circle_lasso;
 
 use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
-use rnote_compose::shaperecognition::{BRACKET_CORNER_RADIUS_RATIO_DEFAULT, BracketStyle};
+use rnote_compose::shaperecognition::{
+    BRACKET_CORNER_RADIUS_RATIO_DEFAULT, BraceStyle, ParenthesisStyle,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -29,9 +31,12 @@ pub struct GestureConfig {
     /// Whether a held open stroke is replaced with a smooth curve.
     #[serde(rename = "curve_recognition_enabled")]
     pub curve_recognition_enabled: bool,
-    /// The shape a held stroke that is a bracket is snapped to.
+    /// The glyph a held stroke that is a round parenthesis is snapped to.
     #[serde(rename = "bracket_style")]
-    pub bracket_style: BracketStyle,
+    pub bracket_style: ParenthesisStyle,
+    /// The glyph a held stroke that is a curly brace is snapped to.
+    #[serde(rename = "brace_style")]
+    pub brace_style: BraceStyle,
     /// The corner radius of a rounded bracket, relative to its height.
     #[serde(rename = "bracket_corner_radius_ratio")]
     pub bracket_corner_radius_ratio: f64,
@@ -51,7 +56,8 @@ impl Default for GestureConfig {
             shape_recognition_enabled: true,
             shape_recognition_delay: Self::SHAPE_RECOGNITION_DELAY_DEFAULT,
             curve_recognition_enabled: false,
-            bracket_style: BracketStyle::Rounded,
+            bracket_style: ParenthesisStyle::Rounded,
+            brace_style: BraceStyle::Curly,
             bracket_corner_radius_ratio: BRACKET_CORNER_RADIUS_RATIO_DEFAULT,
             circle_lasso_enabled: true,
             multi_touch_undo_redo_enabled: true,

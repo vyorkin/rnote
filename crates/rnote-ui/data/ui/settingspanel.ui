@@ -657,13 +657,29 @@ gets disabled.</property>
                     </child>
                     <child>
                       <object class="AdwComboRow" id="gestures_bracket_style_row">
-                        <property name="title" translatable="yes">Bracket Shape</property>
-                        <property name="subtitle" translatable="yes">How a held stroke that is a bracket is snapped. An arc bulges as deeply as it was drawn, a rounded bracket keeps a straight body with rounded ends</property>
+                        <property name="title" translatable="yes">Round Bracket Shape</property>
+                        <property name="subtitle" translatable="yes">How a held stroke that is a round parenthesis is snapped. An arc bulges as deeply as it was drawn, a rounded bracket keeps a straight body with rounded ends, a square bracket has sharp corners</property>
                         <property name="model">
                           <object class="GtkStringList">
                             <items>
                               <item translatable="yes">Arc</item>
                               <item translatable="yes">Rounded corners</item>
+                              <item translatable="yes">Square corners</item>
+                            </items>
+                          </object>
+                        </property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwComboRow" id="gestures_brace_style_row">
+                        <property name="title" translatable="yes">Curly Brace Shape</property>
+                        <property name="subtitle" translatable="yes">How a held stroke that is a curly brace is snapped: a curly brace with its cusp, a rounded bracket, or a square bracket with sharp corners</property>
+                        <property name="model">
+                          <object class="GtkStringList">
+                            <items>
+                              <item translatable="yes">Curly</item>
+                              <item translatable="yes">Rounded corners</item>
+                              <item translatable="yes">Square corners</item>
                             </items>
                           </object>
                         </property>
@@ -672,7 +688,7 @@ gets disabled.</property>
                     <child>
                       <object class="AdwSpinRow" id="gestures_bracket_corner_radius_row">
                         <property name="title" translatable="yes">Bracket Corner Radius (%)</property>
-                        <property name="tooltip-text" translatable="yes">How much of its height a rounded bracket spends on its corners. A larger radius makes the bracket rounder, a smaller one makes it straighter</property>
+                        <property name="tooltip-text" translatable="yes">How much of its height a rounded bracket spends on its corners, whether it was snapped from a parenthesis or from a curly brace. A larger radius makes the bracket rounder, a smaller one makes it straighter</property>
                         <property name="numeric">true</property>
                         <property name="digits">0</property>
                         <property name="adjustment">

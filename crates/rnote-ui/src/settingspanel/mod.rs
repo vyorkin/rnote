@@ -20,7 +20,8 @@ use num_traits::ToPrimitive;
 use rnote_compose::penevent::ShortcutKey;
 use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
 use rnote_compose::shaperecognition::{
-    BRACKET_CORNER_RADIUS_RATIO_MAX, BRACKET_CORNER_RADIUS_RATIO_MIN, BracketStyle,
+    BRACKET_CORNER_RADIUS_RATIO_MAX, BRACKET_CORNER_RADIUS_RATIO_MIN, BraceStyle,
+    ParenthesisStyle,
 };
 use rnote_engine::WidgetFlags;
 use rnote_engine::document::Layout;
@@ -31,10 +32,18 @@ use rnote_engine::gestures::GestureConfig;
 use rnote_engine::pens::PenMode;
 use std::cell::RefCell;
 
-/// The item of the bracket shape row that makes an arc bracket.
-const BRACKET_STYLE_ARC_INDEX: u32 = 0;
-/// The item of the bracket shape row that makes a rounded bracket.
-const BRACKET_STYLE_ROUNDED_INDEX: u32 = 1;
+/// The item of the round bracket shape row that makes an arc bracket.
+const PARENTHESIS_STYLE_ARC_INDEX: u32 = 0;
+/// The item of the round bracket shape row that makes a rounded bracket.
+const PARENTHESIS_STYLE_ROUNDED_INDEX: u32 = 1;
+/// The item of the round bracket shape row that makes a square bracket.
+const PARENTHESIS_STYLE_SQUARE_INDEX: u32 = 2;
+/// The item of the curly brace shape row that makes a curly brace.
+const BRACE_STYLE_CURLY_INDEX: u32 = 0;
+/// The item of the curly brace shape row that makes a rounded bracket.
+const BRACE_STYLE_ROUNDED_INDEX: u32 = 1;
+/// The item of the curly brace shape row that makes a square bracket.
+const BRACE_STYLE_SQUARE_INDEX: u32 = 2;
 
 /// The widgets of one zen accelerator row: its capture popover and the label
 /// showing the combination it currently holds.
@@ -313,6 +322,8 @@ mod imp {
         pub(crate) gestures_shaperecognition_delay_row: TemplateChild<adw::SpinRow>,
         #[template_child]
         pub(crate) gestures_bracket_style_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) gestures_brace_style_row: TemplateChild<adw::ComboRow>,
         #[template_child]
         pub(crate) gestures_bracket_corner_radius_row: TemplateChild<adw::SpinRow>,
         #[template_child]
@@ -1686,6 +1697,10 @@ impl RnSettingsPanel {
                         .imp()
                         .gestures_bracket_style_row
                         .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_brace_style_row
+                        .set_sensitive(row.is_active());
                     settingspanel.refresh_bracket_corner_radius_sensitivity(&appwindow);
                 }
             ));
@@ -1728,10 +1743,27 @@ impl RnSettingsPanel {
                 appwindow,
                 move |row| {
                     appwindow.engine_config().write().gestures.bracket_style =
-                        if row.selected() == BRACKET_STYLE_ROUNDED_INDEX {
-                            BracketStyle::Rounded
-                        } else {
-                            BracketStyle::Arc
+                        match row.selected() {
+                            PARENTHESIS_STYLE_ARC_INDEX => ParenthesisStyle::Arc,
+                            PARENTHESIS_STYLE_ROUNDED_INDEX => ParenthesisStyle::Rounded,
+                            _ => ParenthesisStyle::Square,
+                        };
+                    settingspanel.refresh_bracket_corner_radius_sensitivity(&appwindow);
+                }
+            ));
+
+        imp.gestures_brace_style_row
+            .connect_selected_item_notify(clone!(
+                #[weak(rename_to=settingspanel)]
+                self,
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow.engine_config().write().gestures.brace_style =
+                        match row.selected() {
+                            BRACE_STYLE_CURLY_INDEX => BraceStyle::Curly,
+                            BRACE_STYLE_ROUNDED_INDEX => BraceStyle::Rounded,
+                            _ => BraceStyle::Square,
                         };
                     settingspanel.refresh_bracket_corner_radius_sensitivity(&appwindow);
                 }
@@ -1780,12 +1812,14 @@ impl RnSettingsPanel {
             ));
     }
 
-    /// The corner radius of a bracket is only one of the two bracket shapes: it follows the
-    /// switch and whether shapes are recognized at all.
+    /// The corner radius of a bracket is only one of the glyphs a stroke can snap to: it follows
+    /// whether shapes are recognized at all, and whether either gesture snaps to a rounded bracket.
     fn refresh_bracket_corner_radius_sensitivity(&self, appwindow: &RnAppWindow) {
         let gestures = appwindow.engine_config().read().gestures.clone();
         self.imp().gestures_bracket_corner_radius_row.set_sensitive(
-            gestures.shape_recognition_enabled && gestures.bracket_style == BracketStyle::Rounded,
+            gestures.shape_recognition_enabled
+                && (gestures.bracket_style == ParenthesisStyle::Rounded
+                    || gestures.brace_style == BraceStyle::Rounded),
         );
     }
 
@@ -1826,10 +1860,19 @@ impl RnSettingsPanel {
             .set_sensitive(gestures.shape_recognition_enabled);
         imp.gestures_bracket_style_row
             .set_selected(match gestures.bracket_style {
-                BracketStyle::Arc => BRACKET_STYLE_ARC_INDEX,
-                BracketStyle::Rounded => BRACKET_STYLE_ROUNDED_INDEX,
+                ParenthesisStyle::Arc => PARENTHESIS_STYLE_ARC_INDEX,
+                ParenthesisStyle::Rounded => PARENTHESIS_STYLE_ROUNDED_INDEX,
+                ParenthesisStyle::Square => PARENTHESIS_STYLE_SQUARE_INDEX,
             });
         imp.gestures_bracket_style_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_brace_style_row
+            .set_selected(match gestures.brace_style {
+                BraceStyle::Curly => BRACE_STYLE_CURLY_INDEX,
+                BraceStyle::Rounded => BRACE_STYLE_ROUNDED_INDEX,
+                BraceStyle::Square => BRACE_STYLE_SQUARE_INDEX,
+            });
+        imp.gestures_brace_style_row
             .set_sensitive(gestures.shape_recognition_enabled);
         imp.gestures_bracket_corner_radius_row
             .set_value(gestures.bracket_corner_radius_ratio * 100.0);
