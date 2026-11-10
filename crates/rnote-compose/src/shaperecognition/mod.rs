@@ -151,6 +151,12 @@ const BRACKET_HOOK_RATIO: f64 = 0.08;
 /// letter.
 const BRACKET_MAX_APEX_OFFSET: f64 = 0.2;
 
+/// How much of the bulge a point may fall short of and still count as one of the deepest.
+///
+/// A straight body is as deep all the way along it, so the middle of that band decides where the
+/// stroke bends most, not the one point of it that happens to be first.
+const BRACKET_DEPTH_PLATEAU_SHARE: f64 = 0.05;
+
 /// The corner radius of a rounded bracket, relative to its height: the default.
 pub const BRACKET_CORNER_RADIUS_RATIO_DEFAULT: f64 = 0.12;
 /// The smallest corner radius of a rounded bracket, relative to its height.
@@ -167,17 +173,24 @@ pub const BRACKET_CORNER_RADIUS_RATIO_MAX: f64 = 0.4;
 /// line from being read as a corner.
 const BRACKET_MIN_DEPTH_SURFACE: f64 = 4.0;
 
-/// The share of the body at each end of a rounded bracket that carries a corner.
+/// The share of the body at each end of a square bracket that carries a corner.
 const BRACKET_CORNER_SHARE: f64 = 0.25;
 
-/// The turn (radians) a corner of a rounded bracket has to turn by.
+/// The turn (radians) a corner of a square bracket has to turn by over that share of the body.
 const BRACKET_CORNER_MIN_TURN: f64 = 60.0 * std::f64::consts::PI / 180.0;
 
-/// The share of the height the middle of a rounded bracket may deviate from straight by.
+/// The turn (radians) a single point of a square bracket has to carry.
+///
+/// A square bracket is drawn with the pen turning at the corner itself: one point of the stroke
+/// turns by the whole right angle. A bracket drawn with rounded ends turns a little at every point
+/// of a long arc instead, so no one point of it turns this far.
+const SQUARE_CORNER_MIN_TURN: f64 = 30.0 * std::f64::consts::PI / 180.0;
+
+/// The share of the height the middle of a square bracket may deviate from straight by.
 const BRACKET_STRAIGHT_MAX_DEV_RATIO: f64 = 0.02;
 
 /// The distance (in surface coordinates) from straight that is tolerated for the middle of a
-/// rounded bracket, whatever its height.
+/// square bracket, whatever its height.
 const BRACKET_STRAIGHT_TOLERANCE_SURFACE: f64 = 2.5;
 
 /// The depth of a curly brace, relative to its height, from the tips to its cusp.
@@ -227,7 +240,10 @@ const CURLY_MAX_DEPTH_RATIO: f64 = 0.6;
 /// sits where a brace's cusp does.
 const CURLY_TIP_MIN_TURN: f64 = 30.0 * std::f64::consts::PI / 180.0;
 
-/// What a stroke recognized as a round parenthesis is snapped to.
+/// How a stroke recognized as a round parenthesis is drawn.
+///
+/// The gesture always gives a bracket; the style picks which representation of it it gets, the way
+/// the parenthesis is set: round, round with a straight body, or square.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParenthesisStyle {
     /// A circular arc between the ends, as deep as the stroke was drawn.
@@ -236,70 +252,65 @@ pub enum ParenthesisStyle {
     /// A straight body rounded into short tips at its ends, its depth a fixed share of its height.
     #[serde(rename = "rounded")]
     Rounded,
-    /// A straight body with a sharp corner at each end, its depth a fixed share of its height.
+    /// A square bracket: a straight body with a right angle at each end, its depth the same fixed
+    /// share of its height.
     #[serde(rename = "square")]
     Square,
 }
 
-/// What a stroke recognized as a curly brace is snapped to.
+/// How a stroke recognized as a curly brace is drawn.
+///
+/// The gesture always gives a curly brace, its cusp marking it; the style picks how the corners of
+/// the brace, its tips and its cusp, are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BraceStyle {
-    /// A curly brace with its cusp, opening to the side the cusp points to.
+    /// The brace of type: the tips curl and the arms meet in a point at the cusp.
     #[serde(rename = "curly")]
     Curly,
-    /// A straight body rounded into short tips at its ends, opening to the side of the cusp.
+    /// The same brace with its cusp turned over a fillet, so it has no sharp point anywhere.
     #[serde(rename = "rounded")]
     Rounded,
-    /// A straight body with a sharp corner at each end, opening to the side of the cusp.
+    /// The same brace with a right angle at each tip and a right-angled tab at its cusp.
     #[serde(rename = "square")]
     Square,
 }
 
-/// How a recognized bracket is shaped and adjusted with the pen that drew it.
+/// How a recognized bracket is drawn and adjusted with the pen that drew it.
 ///
-/// The settings decide the glyph a stroke is snapped to, but a parenthesis and a curly brace are
-/// told apart by the stroke itself: a brace turns sharply at its cusp, a parenthesis bends
-/// smoothly all along its height.
+/// Which glyph a stroke is snapped to is decided by the stroke, never by the settings: a smooth
+/// bend is a parenthesis, a stroke that turns sharply at a point in the middle of its height is a
+/// curly brace, and a straight body between two corners is a square bracket. The settings only pick
+/// the representation of the glyph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BracketKind {
-    /// A circular arc, as deep as the stroke was drawn.
-    Arc,
-    /// A straight body rounded into short tips at its ends.
-    Rounded,
-    /// A straight body with a sharp corner at each end.
-    Square,
-    /// A curly brace with its cusp.
-    Curly,
+    /// A parenthesis, in the representation its style asks for.
+    Parenthesis(ParenthesisStyle),
+    /// A curly brace, in the representation its style asks for.
+    Brace(BraceStyle),
+    /// A square bracket.
+    SquareBracket,
 }
 
 impl From<ParenthesisStyle> for BracketKind {
     fn from(style: ParenthesisStyle) -> Self {
-        match style {
-            ParenthesisStyle::Arc => Self::Arc,
-            ParenthesisStyle::Rounded => Self::Rounded,
-            ParenthesisStyle::Square => Self::Square,
-        }
+        Self::Parenthesis(style)
     }
 }
 
 impl From<BraceStyle> for BracketKind {
     fn from(style: BraceStyle) -> Self {
-        match style {
-            BraceStyle::Curly => Self::Curly,
-            BraceStyle::Rounded => Self::Rounded,
-            BraceStyle::Square => Self::Square,
-        }
+        Self::Brace(style)
     }
 }
 
 /// How a bracket is shaped and adjusted.
 #[derive(Debug, Clone, Copy)]
 pub struct BracketOptions {
-    /// The glyph a stroke recognized as a round parenthesis is snapped to.
+    /// How a stroke recognized as a round parenthesis is drawn.
     pub style: ParenthesisStyle,
-    /// The glyph a stroke recognized as a curly brace is snapped to.
+    /// How a stroke recognized as a curly brace is drawn.
     pub brace: BraceStyle,
-    /// The corner radius of a rounded bracket, relative to its height.
+    /// The corner radius of a rounded parenthesis, relative to its height.
     pub corner_radius_ratio: f64,
 }
 
@@ -410,13 +421,20 @@ pub fn recognize_shape_with_options(
     if closed {
         recognize_closed(&input_points, bounds_diag).map(RecognizedShape::plain)
     } else {
-        // A parenthesis is judged before a line, so that a shallow one stays a bracket. An arc
-        // bracket gate rejects every stroke a line is: its bulge has to be larger than the
-        // deviation a line of that length may have.
+        // The glyph is decided before the representation, and a stroke with a cusp is a brace
+        // whatever else it looks like: a cornered bracket has a straight middle, and the cusp of a
+        // brace is the one sharp turn in the middle of a stroke.
         if let Some((shape, kind)) = recognize_curly_brace(&input_points, zoom, &options.bracket) {
             return Some(RecognizedShape::bracket(shape, kind));
         }
 
+        if let Some((shape, kind)) = recognize_square_bracket(&input_points, zoom) {
+            return Some(RecognizedShape::bracket(shape, kind));
+        }
+
+        // A parenthesis is judged before a line, so that a shallow one stays a bracket. An arc
+        // bracket gate rejects every stroke a line is: its bulge has to be larger than the
+        // deviation a line of that length may have.
         if let Some((shape, kind)) = recognize_bracket(&input_points, zoom, &options.bracket) {
             return Some(RecognizedShape::bracket(shape, kind));
         }
@@ -615,13 +633,124 @@ fn line_dev_tolerance(span: f64, zoom: f64) -> f64 {
     (ratio * span).max(LINE_MIN_DEV_TOLERANCE_SURFACE / zoom)
 }
 
-/// Recognize an upright stroke that is a bracket and snap it to a canonical one.
+/// An upright stroke that is some bracket, with the canonical ends it is snapped to.
+struct BracketStroke {
+    /// The start of the bracket, on the vertical the ends are snapped onto.
+    canonical_start: Vector2,
+    /// The end of the bracket, on the same vertical.
+    canonical_end: Vector2,
+    /// The height between the ends.
+    height: f64,
+    /// The length of the chord between the ends.
+    chord: f64,
+    /// The largest distance between the stroke and its chord.
+    bulge: f64,
+    /// The side the stroke bulges to, as a unit vector across the chord.
+    outward: Vector2,
+    /// The stroke, resampled to an even spacing.
+    resampled: Vec<Vector2>,
+    /// Whether the stroke bulges deepest in the middle of its height, as a bracket does: either a
+    /// smooth bend drawn in one sweep, or a straight body turned out at its ends.
+    apex_in_the_middle: bool,
+}
+
+impl BracketStroke {
+    /// `None` when the stroke is not an upright one of the least height, when it bulges to both
+    /// sides of its chord, or when it wraps further than a bracket bends.
+    fn new(points: &[Vector2], zoom: f64) -> Option<Self> {
+        let start = *points.first()?;
+        let end = *points.last()?;
+        let chord_vec = end - start;
+        let chord = chord_vec.length();
+        if chord < f64::EPSILON {
+            return None;
+        }
+
+        // A bracket stands upright.
+        let upright = (chord_vec / chord).dot(Vector2::new(0.0, 1.0)).abs();
+        if upright < BRACKET_MAX_TILT.cos() {
+            return None;
+        }
+        let height = (end.y - start.y).abs();
+        if height * zoom < BRACKET_MIN_HEIGHT_SURFACE {
+            return None;
+        }
+
+        let resampled = resample(points, N_RESAMPLE, false);
+        let hook = (resampled.len() as f64 * BRACKET_HOOK_RATIO).round() as usize;
+        if resampled.len() <= 2 * hook + 2 * TURN_WINDOW {
+            return None;
+        }
+        let body = resampled[hook..resampled.len() - hook].to_vec();
+
+        // One bulge only: the stroke stays on one side of its chord. Points close to the chord say
+        // nothing about the side, they are the jitter of the hand near the ends.
+        let side_tolerance = LINE_MIN_DEV_TOLERANCE_SURFACE / zoom;
+        let normal = Vector2::new(-chord_vec.y, chord_vec.x) / chord;
+        let mut bulge = 0.0_f64;
+        let mut bulge_side = 0.0_f64;
+        for point in body.iter() {
+            let distance = normal.dot(*point - start);
+            if distance.abs() <= side_tolerance {
+                continue;
+            }
+            let side = distance.signum();
+            if bulge_side != 0.0 && side != bulge_side {
+                return None;
+            }
+            bulge_side = side;
+            bulge = bulge.max(distance.abs());
+        }
+        if bulge_side == 0.0 || bulge > BRACKET_MAX_BULGE_RATIO * chord {
+            return None;
+        }
+
+        // The stroke bends where a bracket bends: in the middle. A stroke whose deepest point sits
+        // at one of its ends is a hook, or a letter.
+        let plateau: Vec<usize> = (0..body.len())
+            .filter(|&index| {
+                normal.dot(body[index] - start).abs() >= bulge * (1.0 - BRACKET_DEPTH_PLATEAU_SHARE)
+            })
+            .collect();
+        let apex = plateau[plateau.len() / 2];
+        let apex_fraction = apex as f64 / (body.len() - 1) as f64;
+        let apex_in_the_middle = (apex_fraction - 0.5).abs() <= BRACKET_MAX_APEX_OFFSET;
+
+        // Snap the ends onto one vertical, keep their height.
+        let x = (start.x + end.x) * 0.5;
+        let outward_x = if bulge_side * normal.x < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+
+        Some(Self {
+            canonical_start: Vector2::new(x, start.y),
+            canonical_end: Vector2::new(x, end.y),
+            height,
+            chord,
+            bulge,
+            outward: Vector2::new(outward_x, 0.0),
+            resampled,
+            apex_in_the_middle,
+        })
+    }
+
+    /// Whether the stroke is a straight run between a corner at each end.
+    fn has_corners_at_the_ends(&self, zoom: f64) -> bool {
+        has_corners_at_the_ends(&self.resampled, zoom, self.chord)
+    }
+}
+
+/// Recognize an upright stroke the round bracket gesture draws and snap it to a bracket.
 ///
-/// The canonical bracket puts the ends on one vertical line and keeps their height. What the bend
-/// becomes depends on [`BracketOptions::style`]: an arc keeps the drawn bulge, the sagitta of the
-/// circular arc the bracket is snapped to; a rounded bracket has a straight body, its depth the
-/// configured share of the height, turned out into short tips at the ends; a square bracket is the
-/// same body with a sharp corner at each end.
+/// The stroke is drawn in one sweep, deepest in the middle of its height — a smooth bend or a
+/// straight body turned out at its ends. What it becomes depends on [`BracketOptions::style`]: an
+/// arc keeps the drawn bulge, the sagitta of the circular arc the bracket is snapped to; a rounded
+/// parenthesis has a straight body, its depth the configured share of the height, turned out into
+/// short tips at the ends; a square bracket has the same straight body, its depth a fixed share of
+/// the height, turned out at right angles. A stroke drawn with a sharp corner at its ends is a
+/// square bracket whichever style is set, with a gesture of its own, and never reaches this.
 ///
 /// The bulge is the largest distance between the stroke and its chord.
 fn recognize_bracket(
@@ -629,120 +758,78 @@ fn recognize_bracket(
     zoom: f64,
     options: &BracketOptions,
 ) -> Option<(Shape, BracketKind)> {
-    let start = *points.first()?;
-    let end = *points.last()?;
-    let chord_vec = end - start;
-    let chord = chord_vec.length();
-    if chord < f64::EPSILON {
+    let stroke = BracketStroke::new(points, zoom)?;
+
+    // A stroke the line recognizer accepts is a line, not a shallow parenthesis. A stroke whose
+    // deepest point sits at one of its ends is a hook or a letter: a parenthesis bulges deepest in
+    // the middle of its height. How its ends turn out of it, smoothly or at a sharp corner, says
+    // nothing here: a square bracket has been told apart from a parenthesis by then.
+    if !stroke.apex_in_the_middle || stroke.bulge <= line_dev_tolerance(stroke.chord, zoom) {
         return None;
     }
-
-    // A bracket stands upright.
-    let upright = (chord_vec / chord).dot(Vector2::new(0.0, 1.0)).abs();
-    if upright < BRACKET_MAX_TILT.cos() {
-        return None;
-    }
-    let height = (end.y - start.y).abs();
-    if height * zoom < BRACKET_MIN_HEIGHT_SURFACE {
-        return None;
-    }
-
-    let resampled = resample(points, N_RESAMPLE, false);
-    let hook = (resampled.len() as f64 * BRACKET_HOOK_RATIO).round() as usize;
-    let body = &resampled[hook..resampled.len() - hook];
-    if body.len() <= 2 * TURN_WINDOW {
-        return None;
-    }
-
-    // One bulge only: the stroke stays on one side of its chord. Points close to the chord say
-    // nothing about the side, they are the jitter of the hand near the ends.
-    let side_tolerance = LINE_MIN_DEV_TOLERANCE_SURFACE / zoom;
-    let normal = Vector2::new(-chord_vec.y, chord_vec.x) / chord;
-    let mut bulge = 0.0_f64;
-    let mut bulge_side = 0.0_f64;
-    let mut apex = 0;
-    for (index, point) in body.iter().enumerate() {
-        let distance = normal.dot(*point - start);
-        if distance.abs() <= side_tolerance {
-            continue;
-        }
-        let side = distance.signum();
-        if bulge_side != 0.0 && side != bulge_side {
-            return None;
-        }
-        bulge_side = side;
-        if distance.abs() > bulge {
-            bulge = distance.abs();
-            apex = index;
-        }
-    }
-    if bulge_side == 0.0 || bulge > BRACKET_MAX_BULGE_RATIO * chord {
-        return None;
-    }
-
-    // The stroke bends where a bracket bends: in the middle. A stroke whose deepest point sits at
-    // one of its ends is a hook, or a letter.
-    let apex_fraction = apex as f64 / (body.len() - 1) as f64;
-    let apex_in_the_middle = (apex_fraction - 0.5).abs() <= BRACKET_MAX_APEX_OFFSET;
-
-    // A smooth bend of the stroke, as a parenthesis drawn in one sweep looks.
-    let smooth_bend = max_open_turn(body) <= CURVE_MAX_TURN && apex_in_the_middle;
-
-    // Snap the ends onto one vertical, keep their height.
-    let x = (start.x + end.x) * 0.5;
-    let outward_x = if bulge_side * normal.x < 0.0 {
-        -1.0
-    } else {
-        1.0
-    };
-    let outward = Vector2::new(outward_x, 0.0);
-    let canonical_start = Vector2::new(x, start.y);
-    let canonical_end = Vector2::new(x, end.y);
 
     match options.style {
         ParenthesisStyle::Arc => {
-            // A stroke the line recognizer accepts is a line, not a shallow bracket.
-            if !smooth_bend || bulge <= line_dev_tolerance(chord, zoom) {
-                return None;
-            }
-            let arc =
-                CubicBezier::new_circular_arc(canonical_start, canonical_end, bulge, outward)?;
-            Some((Shape::CubicBezier(arc), BracketKind::Arc))
+            let arc = CubicBezier::new_circular_arc(
+                stroke.canonical_start,
+                stroke.canonical_end,
+                stroke.bulge,
+                stroke.outward,
+            )?;
+            Some((Shape::CubicBezier(arc), BracketKind::from(options.style)))
         }
         ParenthesisStyle::Rounded => {
-            // A shallow bow is a line; a straight body with a corner at each end is not, however
-            // little the body is offset, since a line has no corners.
-            let shallow_arc = smooth_bend && bulge > line_dev_tolerance(chord, zoom);
-            let cornered = bulge * zoom >= BRACKET_MIN_DEPTH_SURFACE
-                && has_corners_at_the_ends(&resampled, zoom, chord);
-            if !shallow_arc && !cornered {
-                return None;
-            }
-
             let radius = options.corner_radius_ratio.clamp(
                 BRACKET_CORNER_RADIUS_RATIO_MIN,
                 BRACKET_CORNER_RADIUS_RATIO_MAX,
-            ) * height;
-            let bracket =
-                Curve::new_rounded_bracket(canonical_start, canonical_end, radius, outward)?;
-            Some((Shape::Curve(bracket), BracketKind::Rounded))
+            ) * stroke.height;
+            let bracket = Curve::new_rounded_bracket(
+                stroke.canonical_start,
+                stroke.canonical_end,
+                radius,
+                stroke.outward,
+            )?;
+            Some((Shape::Curve(bracket), BracketKind::from(options.style)))
         }
         ParenthesisStyle::Square => {
-            // A square bracket is drawn exactly like a rounded one, with sharper corners: the same
-            // gates accept it.
-            let shallow_arc = smooth_bend && bulge > line_dev_tolerance(chord, zoom);
-            let cornered = bulge * zoom >= BRACKET_MIN_DEPTH_SURFACE
-                && has_corners_at_the_ends(&resampled, zoom, chord);
-            if !shallow_arc && !cornered {
-                return None;
-            }
-
-            let depth = SQUARE_DEPTH_RATIO * height;
-            let bracket =
-                Curve::new_square_bracket(canonical_start, canonical_end, depth, outward)?;
-            Some((Shape::Curve(bracket), BracketKind::Square))
+            let bracket = Curve::new_square_bracket(
+                stroke.canonical_start,
+                stroke.canonical_end,
+                SQUARE_DEPTH_RATIO * stroke.height,
+                stroke.outward,
+            )?;
+            Some((Shape::Curve(bracket), BracketKind::SquareBracket))
         }
     }
+}
+
+/// Recognize an upright stroke drawn as a square bracket: a straight body between two corners.
+///
+/// The corners are the tips the bracket is drawn from: a stroke turns sharply at both of its ends,
+/// the same way, and runs exactly straight between them. A smooth bend has no such corners, and a
+/// stroke with a hook at one end only turns at one end.
+///
+/// The depth is a fixed share of the height, so the bracket is as deep as it is set in type
+/// however shallow it was drawn.
+fn recognize_square_bracket(points: &[Vector2], zoom: f64) -> Option<(Shape, BracketKind)> {
+    let stroke = BracketStroke::new(points, zoom)?;
+    if stroke.bulge * zoom < BRACKET_MIN_DEPTH_SURFACE || !stroke.has_corners_at_the_ends(zoom) {
+        return None;
+    }
+    // The corners turn at the corner: a bracket whose ends are rounded turns gradually through an
+    // arc there, and is a parenthesis drawn by the other gesture.
+    if sharpest_turn(&stroke.resampled) < SQUARE_CORNER_MIN_TURN {
+        return None;
+    }
+
+    let bracket = Curve::new_square_bracket(
+        stroke.canonical_start,
+        stroke.canonical_end,
+        SQUARE_DEPTH_RATIO * stroke.height,
+        stroke.outward,
+    )?;
+
+    Some((Shape::Curve(bracket), BracketKind::SquareBracket))
 }
 
 /// Recognize an open stroke drawn as a curly brace.
@@ -752,8 +839,9 @@ fn recognize_bracket(
 /// middle of the height. The side the cusp points to is the side the brace closes towards: left
 /// is `{`, right is `}`.
 ///
-/// The stroke is snapped to the glyph [`BraceStyle`] asks for, of the height it was drawn, on the
-/// side of the cusp: a curly brace with its cusp, a rounded bracket, or a square bracket.
+/// The stroke is snapped to a brace of the height it was drawn, on the side of the cusp, in the
+/// representation [`BraceStyle`] asks for: the brace of type, the same with a rounded cusp, or the
+/// same with right angles.
 fn recognize_curly_brace(
     points: &[Vector2],
     zoom: f64,
@@ -832,34 +920,14 @@ fn recognize_curly_brace(
     let snapped_start = Vector2::new(x, start.y);
     let snapped_end = Vector2::new(x, end.y);
 
-    match options.brace {
-        BraceStyle::Curly => {
-            let brace = Curve::new_curly_brace(
-                snapped_start,
-                snapped_end,
-                CURLY_DEPTH_RATIO * height,
-                outward,
-            )?;
-            Some((Shape::Curve(brace), BracketKind::Curly))
-        }
-        BraceStyle::Rounded => {
-            let radius = options.corner_radius_ratio.clamp(
-                BRACKET_CORNER_RADIUS_RATIO_MIN,
-                BRACKET_CORNER_RADIUS_RATIO_MAX,
-            ) * height;
-            let bracket = Curve::new_rounded_bracket(snapped_start, snapped_end, radius, outward)?;
-            Some((Shape::Curve(bracket), BracketKind::Rounded))
-        }
-        BraceStyle::Square => {
-            let bracket = Curve::new_square_bracket(
-                snapped_start,
-                snapped_end,
-                SQUARE_DEPTH_RATIO * height,
-                outward,
-            )?;
-            Some((Shape::Curve(bracket), BracketKind::Square))
-        }
-    }
+    let depth = CURLY_DEPTH_RATIO * height;
+    let brace = match options.brace {
+        BraceStyle::Curly => Curve::new_curly_brace(snapped_start, snapped_end, depth, outward),
+        BraceStyle::Rounded => Curve::new_rounded_brace(snapped_start, snapped_end, depth, outward),
+        BraceStyle::Square => Curve::new_square_brace(snapped_start, snapped_end, depth, outward),
+    }?;
+
+    Some((Shape::Curve(brace), BracketKind::from(options.brace)))
 }
 
 /// Whether the stroke is a straight run between a corner at each end, as a tall bracket is drawn.
@@ -890,6 +958,17 @@ fn has_corners_at_the_ends(stroke: &[Vector2], zoom: f64, chord: f64) -> bool {
     start_turn.abs() >= BRACKET_CORNER_MIN_TURN
         && end_turn.abs() >= BRACKET_CORNER_MIN_TURN
         && start_turn.signum() == end_turn.signum()
+}
+
+/// The sharpest turn, in radians, the stroke makes at any one of its points.
+fn sharpest_turn(points: &[Vector2]) -> f64 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+
+    (1..points.len() - 1)
+        .map(|i| turn_through(&points[i - 1..=i + 1]).abs())
+        .fold(0.0, f64::max)
 }
 
 /// The signed turn, in radians, the stroke makes from its first point to its last.
@@ -1838,7 +1917,7 @@ mod tests {
             .expect("a parenthesis is recognized");
         assert_eq!(
             recognized.bracket,
-            Some(BracketKind::Arc),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Arc)),
             "expected a bracket, got {:?}",
             recognized.shape
         );
@@ -1866,7 +1945,7 @@ mod tests {
         .expect("a parenthesis is recognized");
         assert_eq!(
             recognized.bracket,
-            Some(BracketKind::Arc),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Arc)),
             "expected a bracket, got {:?}",
             recognized.shape
         );
@@ -1955,7 +2034,7 @@ mod tests {
             .expect("a slanted parenthesis is recognized");
         assert_eq!(
             recognized.bracket,
-            Some(BracketKind::Arc),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Arc)),
             "expected a bracket, got {:?}",
             recognized.shape
         );
@@ -2004,7 +2083,7 @@ mod tests {
             .expect("a deep parenthesis is recognized");
         assert_eq!(
             recognized.bracket,
-            Some(BracketKind::Arc),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Arc)),
             "expected a bracket, got {:?}",
             recognized.shape
         );
@@ -2035,7 +2114,7 @@ mod tests {
             .expect("a parenthesis with hooked ends is recognized");
         assert_eq!(
             recognized.bracket,
-            Some(BracketKind::Arc),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Arc)),
             "expected a bracket, got {:?}",
             recognized.shape
         );
@@ -2234,7 +2313,10 @@ mod tests {
         let points = with_resting_tail(curly_brace_points(true));
         let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, false)
             .expect("a curly brace is recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Curly));
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Brace(BraceStyle::Curly))
+        );
 
         let Shape::Curve(curve) = recognized.shape else {
             panic!("expected a curve, got {:?}", recognized.shape);
@@ -2254,7 +2336,10 @@ mod tests {
         let points = with_resting_tail(curly_brace_points(false));
         let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, false)
             .expect("a curly brace is recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Curly));
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Brace(BraceStyle::Curly))
+        );
 
         let Shape::Curve(curve) = recognized.shape else {
             panic!("expected a curve, got {:?}", recognized.shape);
@@ -2281,36 +2366,69 @@ mod tests {
         )
     }
 
+    /// A square bracket as it is drawn: a straight body, a corner at each end, the tips
+    /// horizontal, `depth` to the left of the chord.
+    fn square_bracket_points(x: f64, top: f64, bottom: f64, depth: f64) -> Vec<Vector2> {
+        let mut points = Vec::new();
+        for i in 0..=6 {
+            points.push(Vector2::new(x - depth * i as f64 / 6.0, top));
+        }
+        for i in 1..=40 {
+            points.push(Vector2::new(
+                x - depth,
+                top + (bottom - top) * i as f64 / 40.0,
+            ));
+        }
+        for i in 1..=6 {
+            points.push(Vector2::new(x - depth + depth * i as f64 / 6.0, bottom));
+        }
+        points
+    }
+
     #[test]
-    fn a_parenthesis_snaps_to_a_square_bracket_when_the_settings_say_so() {
+    fn a_cornered_stroke_snaps_to_a_square_bracket() {
+        // The square bracket has its own gesture: a straight body with a corner at each end.
         let start = Vector2::new(100.0, 100.0);
         let end = Vector2::new(100.0, 400.0);
         let recognized = recognize_with_brackets(
-            with_resting_tail(parenthesis_points(start, end, 40.0)),
-            BracketOptions {
-                style: ParenthesisStyle::Square,
-                ..BracketOptions::default()
-            },
+            with_resting_tail(square_bracket_points(100.0, 100.0, 400.0, 15.0)),
+            BracketOptions::default(),
         )
-        .expect("a parenthesis is recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Square));
+        .expect("a square bracket is recognized");
+        assert_eq!(recognized.bracket, Some(BracketKind::SquareBracket));
 
         let Shape::Curve(curve) = recognized.shape else {
             panic!("expected a curve, got {:?}", recognized.shape);
         };
         let tip = curve.cubics.first().unwrap().start;
-        assert!((tip.x - 100.0).abs() < 0.01, "tip at {tip:?}");
-        assert!((tip.y - 100.0).abs() < 0.01, "tip at {tip:?}");
-        // The body is a canonical share of the height to the side the stroke bulged to.
+        assert!((tip - start).length() < 0.01, "tip at {tip:?}");
+        // The body is a canonical share of the height to the side the stroke went to.
         let body = curve.cubics[1].start;
         assert!(
-            (body.x - (100.0 - SQUARE_DEPTH_RATIO * 300.0)).abs() < 0.5,
+            (body.x - (100.0 - SQUARE_DEPTH_RATIO * (end.y - start.y))).abs() < 0.5,
             "body at {body:?}"
         );
     }
 
     #[test]
-    fn a_curly_brace_snaps_to_a_square_bracket_when_the_settings_say_so() {
+    fn a_smooth_parenthesis_is_not_a_square_bracket() {
+        // The parenthesis gesture has no corner anywhere, so it keeps its own bracket whatever
+        // the settings say of the other gestures.
+        let start = Vector2::new(100.0, 100.0);
+        let end = Vector2::new(100.0, 400.0);
+        let recognized = recognize_with_brackets(
+            with_resting_tail(parenthesis_points(start, end, 40.0)),
+            BracketOptions::default(),
+        )
+        .expect("a parenthesis is recognized");
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Arc))
+        );
+    }
+
+    #[test]
+    fn a_curly_brace_snaps_to_a_square_cornered_brace_when_the_settings_say_so() {
         let recognized = recognize_with_brackets(
             with_resting_tail(curly_brace_points(true)),
             BracketOptions {
@@ -2319,22 +2437,37 @@ mod tests {
             },
         )
         .expect("a curly brace is recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Square));
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Brace(BraceStyle::Square))
+        );
 
         let Shape::Curve(curve) = recognized.shape else {
             panic!("expected a curve, got {:?}", recognized.shape);
         };
+        // The first segment runs out of the tip at a right angle and touches the body at a corner:
+        // it is straight, its end a tip share of the depth to the side of the tip.
         let tip = curve.cubics.first().unwrap().start;
         assert!((tip.x - 160.0).abs() < 1.0, "tip at {tip:?}");
-        let body = curve.cubics[1].start;
+        let first = curve.cubics[0];
+        let corner = first.end;
+        let tip_share = 0.5 * CURLY_DEPTH_RATIO * 300.0;
+        assert!((first.cp1 - tip.lerp(corner, 1.0 / 3.0)).length() < 0.01);
         assert!(
-            (body.x - (160.0 - SQUARE_DEPTH_RATIO * 300.0)).abs() < 1.0,
-            "body at {body:?}"
+            (corner.x - (tip.x - tip_share)).abs() < 0.5,
+            "corner at {corner:?}"
+        );
+        assert!((corner.y - tip.y).abs() < 0.5, "corner at {corner:?}");
+        // The cusp is a right-angled tab, its mesa as deep as the canonical brace.
+        let deepest = curve.sampled(64).iter().fold(f64::MAX, |x, p| x.min(p.x));
+        assert!(
+            (deepest - (160.0 - CURLY_DEPTH_RATIO * 300.0)).abs() < 0.5,
+            "the cusp at {deepest}"
         );
     }
 
     #[test]
-    fn a_curly_brace_snaps_to_a_rounded_bracket_when_the_settings_say_so() {
+    fn a_curly_brace_snaps_to_a_rounded_brace_when_the_settings_say_so() {
         let recognized = recognize_with_brackets(
             with_resting_tail(curly_brace_points(true)),
             BracketOptions {
@@ -2343,17 +2476,41 @@ mod tests {
             },
         )
         .expect("a curly brace is recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Rounded));
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Brace(BraceStyle::Rounded))
+        );
 
         let Shape::Curve(curve) = recognized.shape else {
             panic!("expected a curve, got {:?}", recognized.shape);
         };
         let tip = curve.cubics.first().unwrap().start;
         assert!((tip.x - 160.0).abs() < 1.0, "tip at {tip:?}");
-        // The corner radius is the configured share of the height, on the side of the cusp.
-        let body = curve.cubics[1].start;
-        let radius = BRACKET_CORNER_RADIUS_RATIO_DEFAULT * 300.0;
-        assert!((body.x - (160.0 - radius)).abs() < 1.0, "body at {body:?}");
+        // The tip turns over a quarter circle into the body: its end is a tip share of the depth
+        // to the side of the tip and the same share down from it.
+        let corner = curve.cubics[0].end;
+        let tip_share = 0.5 * CURLY_DEPTH_RATIO * 300.0;
+        assert!(
+            (corner.x - (tip.x - tip_share)).abs() < 0.5,
+            "corner at {corner:?}"
+        );
+        assert!(
+            (corner.y - (tip.y + tip_share)).abs() < 0.5,
+            "corner at {corner:?}"
+        );
+        // The cusp turns over a fillet: it peaks short of the canonical point, and the turn across
+        // it is spread over the fillet instead of happening at one sample as a sharp point.
+        let deepest = curve.sampled(64).iter().fold(f64::MAX, |x, p| x.min(p.x));
+        let shortfall = Curve::rounded_cusp_shortfall() * CURLY_DEPTH_RATIO * 300.0;
+        assert!(
+            (deepest - (160.0 - CURLY_DEPTH_RATIO * 300.0 + shortfall)).abs() < 2.0,
+            "the cusp at {deepest}"
+        );
+        let turn = max_open_turn(&curve.sampled(64));
+        assert!(
+            turn < 30.0_f64.to_radians(),
+            "a rounded cusp still has a sharp point: {turn} rad"
+        );
     }
 
     #[test]
@@ -2369,7 +2526,8 @@ mod tests {
         ]);
         let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, false);
         assert!(
-            recognized.and_then(|recognized| recognized.bracket) != Some(BracketKind::Curly),
+            recognized.and_then(|recognized| recognized.bracket)
+                != Some(BracketKind::Brace(BraceStyle::Curly)),
             "a hooked stroke is not a curly brace"
         );
     }
@@ -2420,7 +2578,10 @@ mod tests {
         .map(|(x, y)| Vector2::new(x, y));
         let path = pen_path_from_points(with_resting_tail(drawn));
         let recognized = recognize_shape_with_kind(&path, 1.0, false).expect("recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Curly));
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Brace(BraceStyle::Curly))
+        );
     }
 
     #[test]
@@ -2467,7 +2628,10 @@ mod tests {
         .map(|(x, y)| Vector2::new(x, y));
         let path = pen_path_from_points(with_resting_tail(drawn));
         let recognized = recognize_shape_with_kind(&path, 1.0, false).expect("recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Curly));
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Brace(BraceStyle::Curly))
+        );
     }
 
     #[test]
@@ -2484,7 +2648,8 @@ mod tests {
         }));
         let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, false);
         assert!(
-            recognized.and_then(|recognized| recognized.bracket) != Some(BracketKind::Curly),
+            recognized.and_then(|recognized| recognized.bracket)
+                != Some(BracketKind::Brace(BraceStyle::Curly)),
             "a v is not a curly brace"
         );
     }
@@ -2881,13 +3046,23 @@ mod tests {
         points: Vec<Vector2>,
         corner_radius_ratio: f64,
     ) -> Option<RecognizedShape> {
+        recognize_with_style(points, ParenthesisStyle::Rounded, corner_radius_ratio)
+    }
+
+    /// Recognize a stroke the way the brush does, with the given parenthesis shape and the brace
+    /// of type.
+    fn recognize_with_style(
+        points: Vec<Vector2>,
+        style: ParenthesisStyle,
+        corner_radius_ratio: f64,
+    ) -> Option<RecognizedShape> {
         recognize_shape_with_options(
             &pen_path_from_points(points),
             1.0,
             &RecognitionOptions {
                 curves: true,
                 bracket: BracketOptions {
-                    style: ParenthesisStyle::Rounded,
+                    style,
                     brace: BraceStyle::Curly,
                     corner_radius_ratio,
                 },
@@ -2928,7 +3103,10 @@ mod tests {
         let points =
             parenthesis_points(Vector2::new(100.0, 100.0), Vector2::new(100.0, 400.0), 40.0);
         let recognized = recognize_rounded(points, 0.12).expect("a tall parenthesis is recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Rounded));
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Rounded))
+        );
 
         let Shape::Curve(curve) = recognized.shape else {
             panic!("expected a curve");
@@ -2948,23 +3126,52 @@ mod tests {
     }
 
     #[test]
-    fn a_bracket_drawn_with_a_straight_body_is_recognized() {
-        // As the gesture is meant to be drawn: nearly vertical, rounded at the ends only. It has
-        // no apex in the middle, so it is told from a smooth bend by its straight body.
-        let points = straight_bracket_points(100.0, 100.0, 400.0, 20.0);
-        let recognized =
-            recognize_rounded(points, 0.12).expect("a straight-bodied bracket is recognized");
-        assert_eq!(recognized.bracket, Some(BracketKind::Rounded));
+    fn a_smooth_parenthesis_snaps_to_a_square_bracket_with_the_square_style() {
+        // The same stroke as the parenthesis above, its glyph asked for: a smooth bend, which is
+        // no square bracket drawn by hand, becomes one all the same.
+        let points =
+            parenthesis_points(Vector2::new(100.0, 100.0), Vector2::new(100.0, 400.0), 40.0);
+        let recognized = recognize_with_style(points, ParenthesisStyle::Square, 0.12)
+            .expect("a tall parenthesis is recognized");
+        assert_eq!(recognized.bracket, Some(BracketKind::SquareBracket));
 
         let Shape::Curve(curve) = recognized.shape else {
             panic!("expected a curve");
         };
         let sampled = curve.sampled(64);
-        assert!((sampled[0] - Vector2::new(120.0, 100.0)).length() < 0.01);
-        assert!((*sampled.last().unwrap() - Vector2::new(120.0, 400.0)).length() < 0.01);
+        assert!((sampled[0] - Vector2::new(100.0, 100.0)).length() < 0.01);
+        assert!((*sampled.last().unwrap() - Vector2::new(100.0, 400.0)).length() < 0.01);
+        // The body is straight, the square bracket's depth to the side of the ends: 15% of the
+        // height, not the depth the stroke was bowed with.
+        for point in &sampled {
+            if point.y > 160.0 && point.y < 340.0 {
+                assert!((point.x - 55.0).abs() < 0.5, "body at {point:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bracket_drawn_with_a_straight_body_is_recognized() {
+        // As the parenthesis gesture is meant to be drawn: nearly vertical, rounded at the ends
+        // only. Its corners are turned too gently to be a square bracket's.
+        let points = straight_bracket_points(100.0, 100.0, 400.0, 40.0);
+        let recognized =
+            recognize_rounded(points, 0.12).expect("a straight-bodied bracket is recognized");
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Rounded))
+        );
+
+        let Shape::Curve(curve) = recognized.shape else {
+            panic!("expected a curve");
+        };
+        let sampled = curve.sampled(64);
+        assert!((sampled[0] - Vector2::new(140.0, 100.0)).length() < 0.01);
+        assert!((*sampled.last().unwrap() - Vector2::new(140.0, 400.0)).length() < 0.01);
+        // The body is the configured radius to the side of the tips.
         for point in &sampled {
             if point.y > 140.0 && point.y < 360.0 {
-                assert!((point.x - 84.0).abs() < 0.5, "body at {point:?}");
+                assert!((point.x - 104.0).abs() < 0.5, "body at {point:?}");
             }
         }
     }

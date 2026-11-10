@@ -31,13 +31,13 @@ pub struct GestureConfig {
     /// Whether a held open stroke is replaced with a smooth curve.
     #[serde(rename = "curve_recognition_enabled")]
     pub curve_recognition_enabled: bool,
-    /// The glyph a held stroke that is a round parenthesis is snapped to.
+    /// How a held stroke that is a round parenthesis is drawn.
     #[serde(rename = "bracket_style")]
     pub bracket_style: ParenthesisStyle,
-    /// The glyph a held stroke that is a curly brace is snapped to.
+    /// How a held stroke that is a curly brace is drawn.
     #[serde(rename = "brace_style")]
     pub brace_style: BraceStyle,
-    /// The corner radius of a rounded bracket, relative to its height.
+    /// The corner radius of a rounded parenthesis, relative to its height.
     #[serde(rename = "bracket_corner_radius_ratio")]
     pub bracket_corner_radius_ratio: f64,
     /// Whether a closed loop around ink selects it and switches to the selector.

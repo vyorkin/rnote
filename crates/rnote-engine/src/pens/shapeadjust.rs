@@ -3,7 +3,9 @@ use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
 use rnote_compose::Transformable;
-use rnote_compose::shaperecognition::{BracketKind, CURLY_DEPTH_RATIO};
+use rnote_compose::shaperecognition::{
+    BraceStyle, BracketKind, CURLY_DEPTH_RATIO, ParenthesisStyle,
+};
 use rnote_compose::shapes::cubbez::cubbez_calc;
 use rnote_compose::shapes::{
     CubicBezier, Curve, Ellipse, Line, QuadraticBezier, Rectangle, Shape, Shapeable,
@@ -57,7 +59,7 @@ enum AdjustKind {
     /// A rounded bracket and a square one are both such a body; only the corners differ.
     BracketBodyEnd(BracketBodyEnd),
     /// The end of the curly brace the pen rested at follows it, its other end stays fixed.
-    CurlyBraceEnd(CurlyBraceEnd),
+    BraceEnd(BraceEnd),
     /// The shape is scaled between the pen and the corner of its bounds opposite to it.
     ScaleFromPivot {
         pivot: Vector2,
@@ -71,37 +73,33 @@ impl ShapeAdjust {
     /// `bracket` tells a canonical bracket from an ordinary open curve, which look alike but are
     /// adjusted by different parts of themselves.
     pub(crate) fn new(recognized: Shape, start_pos: Vector2, bracket: Option<BracketKind>) -> Self {
-        let kind = match &recognized {
-            Shape::CubicBezier(cubic) if bracket == Some(BracketKind::Arc) => {
+        let kind = match (&recognized, bracket) {
+            (Shape::CubicBezier(cubic), Some(BracketKind::Parenthesis(ParenthesisStyle::Arc))) => {
                 AdjustKind::BracketEnd(BracketEnd::new(cubic, start_pos))
             }
-            Shape::Curve(curve) if bracket == Some(BracketKind::Rounded) => {
+            (Shape::Curve(curve), Some(BracketKind::Parenthesis(ParenthesisStyle::Rounded))) => {
                 AdjustKind::BracketBodyEnd(BracketBodyEnd::new(
                     curve,
                     start_pos,
                     BracketBody::Rounded,
                 ))
             }
-            Shape::Curve(curve) if bracket == Some(BracketKind::Square) => {
-                AdjustKind::BracketBodyEnd(BracketBodyEnd::new(
-                    curve,
-                    start_pos,
-                    BracketBody::Square,
-                ))
+            (Shape::Curve(curve), Some(BracketKind::SquareBracket)) => AdjustKind::BracketBodyEnd(
+                BracketBodyEnd::new(curve, start_pos, BracketBody::Square),
+            ),
+            (Shape::Curve(curve), Some(BracketKind::Brace(corners))) => {
+                AdjustKind::BraceEnd(BraceEnd::new(curve, start_pos, corners))
             }
-            Shape::Curve(curve) if bracket == Some(BracketKind::Curly) => {
-                AdjustKind::CurlyBraceEnd(CurlyBraceEnd::new(curve, start_pos))
-            }
-            Shape::Line(_) => AdjustKind::LineEnd,
-            Shape::Rectangle(rectangle) => AdjustKind::RectangleCorner {
+            (Shape::Line(_), _) => AdjustKind::LineEnd,
+            (Shape::Rectangle(rectangle), _) => AdjustKind::RectangleCorner {
                 corner_signs: signs(rectangle.affine.inverse().transform_point2(start_pos)),
             },
-            Shape::Ellipse(ellipse) => AdjustKind::EllipseRadii {
+            (Shape::Ellipse(ellipse), _) => AdjustKind::EllipseRadii {
                 radii_signs: signs(ellipse.affine.inverse().transform_point2(start_pos)),
             },
-            Shape::QuadraticBezier(_) => AdjustKind::QuadraticBend,
-            Shape::CubicBezier(_) => AdjustKind::CubicBend,
-            shape => {
+            (Shape::QuadraticBezier(_), _) => AdjustKind::QuadraticBend,
+            (Shape::CubicBezier(_), _) => AdjustKind::CubicBend,
+            (shape, _) => {
                 let bounds = shape.bounds();
                 let center = bounds.center();
                 // The corner of the bounds that lies opposite to the pen stays fixed.
@@ -179,7 +177,7 @@ impl ShapeAdjust {
             (Shape::Curve(curve), AdjustKind::BracketBodyEnd(bracket)) => {
                 Shape::Curve(bracket.adjusted(offset).unwrap_or_else(|| curve.clone()))
             }
-            (Shape::Curve(curve), AdjustKind::CurlyBraceEnd(brace)) => {
+            (Shape::Curve(curve), AdjustKind::BraceEnd(brace)) => {
                 Shape::Curve(brace.adjusted(offset).unwrap_or_else(|| curve.clone()))
             }
             (Shape::CubicBezier(cubic), AdjustKind::CubicBend) => Shape::CubicBezier(CubicBezier {
@@ -391,9 +389,9 @@ impl BracketBodyEnd {
 ///
 /// The other end stays where it is. The brace keeps the share of its height its depth takes, so it
 /// stays as slim and as pointed as it was recognized when it is dragged, and it keeps opening to
-/// the side of its chord it did.
+/// the side of its chord it did. It is drawn again in the representation it was recognized in.
 #[derive(Debug, Clone)]
-struct CurlyBraceEnd {
+struct BraceEnd {
     /// The end that stays where it is.
     fixed_end: Vector2,
     /// The end that follows the pen, as the brace was recognized.
@@ -404,10 +402,12 @@ struct CurlyBraceEnd {
     depth_ratio: f64,
     /// The side of the chord the cusp points to, as a unit vector.
     outward: Vector2,
+    /// How the corners of the brace, its tips and its cusp, are drawn.
+    corners: BraceStyle,
 }
 
-impl CurlyBraceEnd {
-    fn new(curve: &Curve, pen_pos: Vector2) -> Self {
+impl BraceEnd {
+    fn new(curve: &Curve, pen_pos: Vector2, corners: BraceStyle) -> Self {
         let start = curve
             .cubics
             .first()
@@ -434,9 +434,20 @@ impl CurlyBraceEnd {
                         }
                     });
             let depth = normal.dot(deepest - start);
+            // A fillet turns the cusp of a rounded brace over short of the point, so its deepest
+            // sample is not its depth: dividing the shortfall out keeps the brace's depth from
+            // shrinking each time it is dragged.
+            let depth = match corners {
+                BraceStyle::Rounded => depth.abs() / (1.0 - Curve::rounded_cusp_shortfall()),
+                _ => depth.abs(),
+            };
             (
-                (depth.abs() / height).min(0.5),
-                if depth < 0.0 { -normal } else { normal },
+                (depth / height).min(0.5),
+                if normal.dot(deepest - start) < 0.0 {
+                    -normal
+                } else {
+                    normal
+                },
             )
         } else {
             (CURLY_DEPTH_RATIO, Vector2::new(1.0, 0.0))
@@ -455,6 +466,7 @@ impl CurlyBraceEnd {
             dragged_is_end,
             depth_ratio,
             outward,
+            corners,
         }
     }
 
@@ -472,7 +484,13 @@ impl CurlyBraceEnd {
         } else {
             (moved, self.fixed_end)
         };
-        Curve::new_curly_brace(start, end, self.depth_ratio * height, self.outward)
+        let depth = self.depth_ratio * height;
+
+        match self.corners {
+            BraceStyle::Curly => Curve::new_curly_brace(start, end, depth, self.outward),
+            BraceStyle::Rounded => Curve::new_rounded_brace(start, end, depth, self.outward),
+            BraceStyle::Square => Curve::new_square_brace(start, end, depth, self.outward),
+        }
     }
 }
 
@@ -633,7 +651,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::CubicBezier(bracket),
             Vector2::new(100.0, 200.0),
-            Some(BracketKind::Arc),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Arc)),
         );
 
         // Stretching the lower end down keeps the upper end, and the bulge keeps its share of the
@@ -693,7 +711,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::Curve(bracket),
             Vector2::new(100.0, 200.0),
-            Some(BracketKind::Rounded),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Rounded)),
         );
 
         // Stretching the lower end down keeps the upper end, and the corners keep their share of
@@ -743,7 +761,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::Curve(bracket),
             Vector2::new(100.0, 200.0),
-            Some(BracketKind::Square),
+            Some(BracketKind::SquareBracket),
         );
 
         // Stretching the lower end down keeps the upper end, and the arms keep their share of the
@@ -800,7 +818,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::Curve(brace),
             Vector2::new(100.0, 300.0),
-            Some(BracketKind::Curly),
+            Some(BracketKind::Brace(BraceStyle::Curly)),
         );
 
         // Stretching the lower end down keeps the upper end, and the cusp keeps its share of the
@@ -831,6 +849,67 @@ mod tests {
             .iter()
             .fold(f64::MIN, |x, point| x.max(point.x));
         assert!(deepest > 100.0, "the brace lost its side: {deepest}");
+    }
+
+    #[test]
+    fn rounded_brace_end_dragged_keeps_its_depth() {
+        // A rounded brace from (100, 100) to (100, 300), its cusp to the right, its depth a fifth
+        // of the height.
+        let brace = Curve::new_rounded_brace(
+            Vector2::new(100.0, 100.0),
+            Vector2::new(100.0, 300.0),
+            40.0,
+            Vector2::new(1.0, 0.0),
+        )
+        .expect("a rounded brace");
+        // The cusp fills its corner, so the deepest point stays this far short of the tab's point.
+        let shortfall = Curve::rounded_cusp_shortfall();
+        let adjust = ShapeAdjust::new(
+            Shape::Curve(brace),
+            Vector2::new(100.0, 300.0),
+            Some(BracketKind::Brace(BraceStyle::Rounded)),
+        );
+
+        // The depth is what the brace was drawn with, not what its deepest point reads, so
+        // stretching the end down keeps the depth it has: a fifth of 200 is 40, of 400 is 80.
+        let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(100.0, 500.0)) else {
+            panic!("expected a curve");
+        };
+        assert_eq!(
+            adjusted.cubics.first().unwrap().start,
+            Vector2::new(100.0, 100.0)
+        );
+        assert_eq!(
+            adjusted.cubics.last().unwrap().end,
+            Vector2::new(100.0, 500.0)
+        );
+        let deepest = adjusted
+            .sampled(32)
+            .iter()
+            .fold(f64::MIN, |x, point| x.max(point.x));
+        assert!(
+            (deepest - (100.0 + 80.0 * (1.0 - shortfall))).abs() < 0.5,
+            "the cusp at {deepest}"
+        );
+
+        // Dragging it again reads the same depth back, so the cusp is not drawn shallower on each
+        // drag.
+        let adjust = ShapeAdjust::new(
+            Shape::Curve(adjusted),
+            Vector2::new(100.0, 500.0),
+            Some(BracketKind::Brace(BraceStyle::Rounded)),
+        );
+        let Shape::Curve(again) = adjust.adjusted(Vector2::new(100.0, 700.0)) else {
+            panic!("expected a curve");
+        };
+        let deepest = again
+            .sampled(32)
+            .iter()
+            .fold(f64::MIN, |x, point| x.max(point.x));
+        assert!(
+            (deepest - (100.0 + 120.0 * (1.0 - shortfall))).abs() < 0.5,
+            "the cusp at {deepest}"
+        );
     }
 
     #[test]

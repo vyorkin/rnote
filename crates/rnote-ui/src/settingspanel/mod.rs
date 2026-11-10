@@ -20,8 +20,7 @@ use num_traits::ToPrimitive;
 use rnote_compose::penevent::ShortcutKey;
 use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
 use rnote_compose::shaperecognition::{
-    BRACKET_CORNER_RADIUS_RATIO_MAX, BRACKET_CORNER_RADIUS_RATIO_MIN, BraceStyle,
-    ParenthesisStyle,
+    BRACKET_CORNER_RADIUS_RATIO_MAX, BRACKET_CORNER_RADIUS_RATIO_MIN, BraceStyle, ParenthesisStyle,
 };
 use rnote_engine::WidgetFlags;
 use rnote_engine::document::Layout;
@@ -32,17 +31,17 @@ use rnote_engine::gestures::GestureConfig;
 use rnote_engine::pens::PenMode;
 use std::cell::RefCell;
 
-/// The item of the round bracket shape row that makes an arc bracket.
+/// The item of the round bracket shape row that makes an arc parenthesis.
 const PARENTHESIS_STYLE_ARC_INDEX: u32 = 0;
-/// The item of the round bracket shape row that makes a rounded bracket.
+/// The item of the round bracket shape row that makes a parenthesis with rounded corners.
 const PARENTHESIS_STYLE_ROUNDED_INDEX: u32 = 1;
 /// The item of the round bracket shape row that makes a square bracket.
 const PARENTHESIS_STYLE_SQUARE_INDEX: u32 = 2;
-/// The item of the curly brace shape row that makes a curly brace.
+/// The item of the curly brace shape row that makes the curly brace of type.
 const BRACE_STYLE_CURLY_INDEX: u32 = 0;
-/// The item of the curly brace shape row that makes a rounded bracket.
+/// The item of the curly brace shape row that makes a curly brace with rounded corners.
 const BRACE_STYLE_ROUNDED_INDEX: u32 = 1;
-/// The item of the curly brace shape row that makes a square bracket.
+/// The item of the curly brace shape row that makes a curly brace with square corners.
 const BRACE_STYLE_SQUARE_INDEX: u32 = 2;
 
 /// The widgets of one zen accelerator row: its capture popover and the label
@@ -1742,30 +1741,26 @@ impl RnSettingsPanel {
                 #[weak]
                 appwindow,
                 move |row| {
-                    appwindow.engine_config().write().gestures.bracket_style =
-                        match row.selected() {
-                            PARENTHESIS_STYLE_ARC_INDEX => ParenthesisStyle::Arc,
-                            PARENTHESIS_STYLE_ROUNDED_INDEX => ParenthesisStyle::Rounded,
-                            _ => ParenthesisStyle::Square,
-                        };
+                    appwindow.engine_config().write().gestures.bracket_style = match row.selected()
+                    {
+                        PARENTHESIS_STYLE_ARC_INDEX => ParenthesisStyle::Arc,
+                        PARENTHESIS_STYLE_SQUARE_INDEX => ParenthesisStyle::Square,
+                        _ => ParenthesisStyle::Rounded,
+                    };
                     settingspanel.refresh_bracket_corner_radius_sensitivity(&appwindow);
                 }
             ));
 
         imp.gestures_brace_style_row
             .connect_selected_item_notify(clone!(
-                #[weak(rename_to=settingspanel)]
-                self,
                 #[weak]
                 appwindow,
                 move |row| {
-                    appwindow.engine_config().write().gestures.brace_style =
-                        match row.selected() {
-                            BRACE_STYLE_CURLY_INDEX => BraceStyle::Curly,
-                            BRACE_STYLE_ROUNDED_INDEX => BraceStyle::Rounded,
-                            _ => BraceStyle::Square,
-                        };
-                    settingspanel.refresh_bracket_corner_radius_sensitivity(&appwindow);
+                    appwindow.engine_config().write().gestures.brace_style = match row.selected() {
+                        BRACE_STYLE_CURLY_INDEX => BraceStyle::Curly,
+                        BRACE_STYLE_ROUNDED_INDEX => BraceStyle::Rounded,
+                        _ => BraceStyle::Square,
+                    };
                 }
             ));
 
@@ -1812,14 +1807,13 @@ impl RnSettingsPanel {
             ));
     }
 
-    /// The corner radius of a bracket is only one of the glyphs a stroke can snap to: it follows
-    /// whether shapes are recognized at all, and whether either gesture snaps to a rounded bracket.
+    /// The corner radius is only one of the representations a parenthesis can be drawn in: it
+    /// follows whether shapes are recognized at all, and whether a parenthesis has rounded corners.
     fn refresh_bracket_corner_radius_sensitivity(&self, appwindow: &RnAppWindow) {
         let gestures = appwindow.engine_config().read().gestures.clone();
         self.imp().gestures_bracket_corner_radius_row.set_sensitive(
             gestures.shape_recognition_enabled
-                && (gestures.bracket_style == ParenthesisStyle::Rounded
-                    || gestures.brace_style == BraceStyle::Rounded),
+                && gestures.bracket_style == ParenthesisStyle::Rounded,
         );
     }
 
