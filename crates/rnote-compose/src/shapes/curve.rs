@@ -76,6 +76,24 @@ impl Shapeable for Curve {
 /// The length of the handle that makes a cubic trace a quarter of a circle.
 const QUARTER_ARC_HANDLE: f64 = 0.552_284_749_830_793_4;
 
+/// The share of a curly brace's depth its tips turn over.
+///
+/// The body of the brace runs that far from the vertical of its tips, and the cusp takes the rest
+/// of the depth.
+const CURLY_TIP_SHARE: f64 = 0.5;
+
+/// How long the arms of a curly brace are, relative to the part of its depth that is the cusp.
+const CURLY_ARM_RATIO: f64 = 1.6;
+
+/// The angle (radians) an arm of a curly brace arrives at its cusp with, to the body.
+///
+/// The two arms meet at twice that angle from the body, so the cusp is a point of about 70
+/// degrees, as it is in type.
+const CURLY_APEX_ANGLE: f64 = 55.0 * std::f64::consts::PI / 180.0;
+
+/// The share of an arm its control points are set at, from its ends.
+const CURLY_ARM_HANDLE: f64 = 0.65;
+
 impl Curve {
     /// A bracket from `start` to `end`: a straight body rounded into short tips at both ends.
     ///
@@ -132,6 +150,101 @@ impl Curve {
             });
         }
         cubics.push(end_corner);
+
+        Some(Self { cubics })
+    }
+
+    /// A curly brace from `start` to `end`, its cusp `depth` away from the chord on the side
+    /// `outward` points to.
+    ///
+    /// The ends are the tips: each turns a quarter of a circle toward the cusp and into a straight
+    /// body, which runs half the depth to the side of the chord between the tips. The cusp is a
+    /// point in the middle of the body, reached by two arms that leave the body along it and meet
+    /// at [`CURLY_APEX_ANGLE`] to it — the shape of the brace as it is set in type.
+    ///
+    /// The depth is measured from the tips to the cusp and is at most half the chord, and the arms
+    /// are cut short of the tips, so that the body never folds into itself.
+    /// `None` when the ends coincide or the depth vanishes.
+    pub fn new_curly_brace(
+        start: Vector2,
+        end: Vector2,
+        depth: f64,
+        outward: Vector2,
+    ) -> Option<Self> {
+        let chord_vec = end - start;
+        let chord = chord_vec.length();
+        if chord < f64::EPSILON || depth <= f64::EPSILON {
+            return None;
+        }
+
+        let direction = chord_vec / chord;
+        let mut normal = Vector2::new(-direction.y, direction.x);
+        if normal.dot(outward) < 0.0 {
+            normal = -normal;
+        }
+
+        let depth = depth.min(chord * 0.5);
+        let tip = depth * CURLY_TIP_SHARE;
+        let middle = chord * 0.5;
+        let arm = ((depth - tip) * CURLY_ARM_RATIO).min(middle - tip);
+        if arm <= f64::EPSILON || tip <= f64::EPSILON {
+            return None;
+        }
+
+        let at = |along: f64, across: f64| start + direction * along + normal * across;
+        let handle = QUARTER_ARC_HANDLE * tip;
+        let arm_handle = CURLY_ARM_HANDLE * arm;
+        let apex = at(middle, depth);
+        let apex_vector = Vector2::new(CURLY_APEX_ANGLE.cos(), CURLY_APEX_ANGLE.sin());
+
+        let straight = |from: Vector2, to: Vector2| CubicBezier {
+            start: from,
+            cp1: from.lerp(to, 1.0 / 3.0),
+            cp2: from.lerp(to, 2.0 / 3.0),
+            end: to,
+        };
+
+        let top_tip = CubicBezier {
+            start,
+            cp1: start + normal * handle,
+            cp2: at(tip - handle, tip),
+            end: at(tip, tip),
+        };
+        let top_body = straight(at(tip, tip), at(middle - arm, tip));
+        let top_arm = CubicBezier {
+            start: at(middle - arm, tip),
+            cp1: at(middle - arm + arm_handle, tip),
+            cp2: apex
+                - direction * (apex_vector.x * arm_handle)
+                - normal * (apex_vector.y * arm_handle),
+            end: apex,
+        };
+        let bottom_arm = CubicBezier {
+            start: apex,
+            cp1: apex + direction * (apex_vector.x * arm_handle)
+                - normal * (apex_vector.y * arm_handle),
+            cp2: at(middle + arm - arm_handle, tip),
+            end: at(middle + arm, tip),
+        };
+        let bottom_body = straight(at(middle + arm, tip), at(chord - tip, tip));
+        let bottom_tip = CubicBezier {
+            start: at(chord - tip, tip),
+            cp1: at(chord - tip + handle, tip),
+            cp2: end + normal * handle,
+            end,
+        };
+
+        let mut cubics = Vec::with_capacity(6);
+        cubics.push(top_tip);
+        if (top_body.end - top_body.start).length() > f64::EPSILON {
+            cubics.push(top_body);
+        }
+        cubics.push(top_arm);
+        cubics.push(bottom_arm);
+        if (bottom_body.end - bottom_body.start).length() > f64::EPSILON {
+            cubics.push(bottom_body);
+        }
+        cubics.push(bottom_tip);
 
         Some(Self { cubics })
     }
@@ -238,5 +351,69 @@ mod tests {
             let offset = *point - Vector2::new(100.0, 150.0);
             assert!((offset.length() - 50.0).abs() < 0.5, "point {point:?}");
         }
+    }
+
+    #[test]
+    fn curly_brace_has_a_straight_body_and_a_cusp_half_way_out() {
+        let start = Vector2::new(100.0, 100.0);
+        let end = Vector2::new(100.0, 300.0);
+        let depth = 36.0;
+        let brace = Curve::new_curly_brace(start, end, depth, Vector2::new(1.0, 0.0))
+            .expect("a curly brace");
+
+        let sampled = brace.sampled(64);
+        // The ends stay where they were drawn.
+        assert!((sampled[0] - start).length() < 1e-9);
+        assert!((*sampled.last().unwrap() - end).length() < 1e-9);
+
+        // The body runs straight half the depth to the side of the tips. The arms leave it towards
+        // the cusp from the middle, so only the stretch between the tips and the arms is a body.
+        let tip = depth * CURLY_TIP_SHARE;
+        for point in sampled.iter().filter(|point| {
+            (130.0..165.0).contains(&point.y) || (235.0..270.0).contains(&point.y)
+        }) {
+            assert!((point.x - (100.0 + tip)).abs() < 0.5, "body at {point:?}");
+        }
+
+        // The cusp is the deepest point of the brace, in the middle of its height.
+        let apex = sampled.iter().fold(sampled[0], |deepest, point| {
+            if point.x > deepest.x { *point } else { deepest }
+        });
+        assert!((apex.x - (100.0 + depth)).abs() < 0.5, "apex at {apex:?}");
+        assert!((apex.y - 200.0).abs() < 0.5, "apex at {apex:?}");
+    }
+
+    #[test]
+    fn curly_brace_cusp_is_a_point_and_not_a_rounded_bend() {
+        let brace = Curve::new_curly_brace(
+            Vector2::new(100.0, 100.0),
+            Vector2::new(100.0, 300.0),
+            36.0,
+            Vector2::new(1.0, 0.0),
+        )
+        .expect("a curly brace");
+
+        // The two arms meet at the cusp with different tangents: a corner, not a smooth bend.
+        let top_arm = &brace.cubics[2];
+        let bottom_arm = &brace.cubics[3];
+        let arriving = top_arm.end - top_arm.cp2;
+        let leaving = bottom_arm.cp1 - bottom_arm.start;
+        let turn = arriving.normalize().angle_to(leaving.normalize()).abs();
+        assert!(turn > 60.0_f64.to_radians(), "the cusp turns {turn} rad");
+    }
+
+    #[test]
+    fn curly_brace_curls_to_the_side_it_is_asked_for() {
+        let start = Vector2::new(100.0, 100.0);
+        let end = Vector2::new(100.0, 300.0);
+        let right = Curve::new_curly_brace(start, end, 36.0, Vector2::new(1.0, 0.0))
+            .expect("a curly brace");
+        let left = Curve::new_curly_brace(start, end, 36.0, Vector2::new(-1.0, 0.0))
+            .expect("a curly brace");
+
+        let right_deepest = right.sampled(16).iter().fold(f64::MIN, |x, p| x.max(p.x));
+        let left_deepest = left.sampled(16).iter().fold(f64::MAX, |x, p| x.min(p.x));
+        assert!((right_deepest - 136.0).abs() < 0.5, "{right_deepest}");
+        assert!((left_deepest - 64.0).abs() < 0.5, "{left_deepest}");
     }
 }

@@ -3,7 +3,7 @@ use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
 use rnote_compose::Transformable;
-use rnote_compose::shaperecognition::BracketStyle;
+use rnote_compose::shaperecognition::{BracketKind, BracketStyle, CURLY_DEPTH_RATIO};
 use rnote_compose::shapes::cubbez::cubbez_calc;
 use rnote_compose::shapes::{
     CubicBezier, Curve, Ellipse, Line, QuadraticBezier, Rectangle, Shape, Shapeable,
@@ -11,6 +11,9 @@ use rnote_compose::shapes::{
 
 /// The extent a shape keeps at least while it is adjusted, so that it can't collapse into nothing.
 const MIN_EXTENT: f64 = 1.0;
+
+/// How many points of each cubic of a brace are sampled to find its cusp.
+const CURLY_DEPTH_SAMPLES: usize = 16;
 
 /// Adjusting a recognized shape with the pen that drew it, while that pen is still down.
 ///
@@ -50,6 +53,8 @@ enum AdjustKind {
     BracketEnd(BracketEnd),
     /// The end of the rounded bracket the pen rested at follows it, its other end stays fixed.
     RoundedBracketEnd(RoundedBracketEnd),
+    /// The end of the curly brace the pen rested at follows it, its other end stays fixed.
+    CurlyBraceEnd(CurlyBraceEnd),
     /// The shape is scaled between the pen and the corner of its bounds opposite to it.
     ScaleFromPivot {
         pivot: Vector2,
@@ -62,17 +67,16 @@ impl ShapeAdjust {
     ///
     /// `bracket` tells a canonical bracket from an ordinary open curve, which look alike but are
     /// adjusted by different parts of themselves.
-    pub(crate) fn new(
-        recognized: Shape,
-        start_pos: Vector2,
-        bracket: Option<BracketStyle>,
-    ) -> Self {
+    pub(crate) fn new(recognized: Shape, start_pos: Vector2, bracket: Option<BracketKind>) -> Self {
         let kind = match &recognized {
-            Shape::CubicBezier(cubic) if bracket == Some(BracketStyle::Arc) => {
+            Shape::CubicBezier(cubic) if bracket == Some(BracketKind::Round(BracketStyle::Arc)) => {
                 AdjustKind::BracketEnd(BracketEnd::new(cubic, start_pos))
             }
-            Shape::Curve(curve) if bracket == Some(BracketStyle::Rounded) => {
+            Shape::Curve(curve) if bracket == Some(BracketKind::Round(BracketStyle::Rounded)) => {
                 AdjustKind::RoundedBracketEnd(RoundedBracketEnd::new(curve, start_pos))
+            }
+            Shape::Curve(curve) if bracket == Some(BracketKind::Curly) => {
+                AdjustKind::CurlyBraceEnd(CurlyBraceEnd::new(curve, start_pos))
             }
             Shape::Line(_) => AdjustKind::LineEnd,
             Shape::Rectangle(rectangle) => AdjustKind::RectangleCorner {
@@ -160,6 +164,9 @@ impl ShapeAdjust {
             }
             (Shape::Curve(curve), AdjustKind::RoundedBracketEnd(bracket)) => {
                 Shape::Curve(bracket.adjusted(offset).unwrap_or_else(|| curve.clone()))
+            }
+            (Shape::Curve(curve), AdjustKind::CurlyBraceEnd(brace)) => {
+                Shape::Curve(brace.adjusted(offset).unwrap_or_else(|| curve.clone()))
             }
             (Shape::CubicBezier(cubic), AdjustKind::CubicBend) => Shape::CubicBezier(CubicBezier {
                 cp1: cubic.cp1 + offset,
@@ -349,6 +356,95 @@ impl RoundedBracketEnd {
     }
 }
 
+/// A curly brace adjusted by the end of it the pen rested at.
+///
+/// The other end stays where it is. The brace keeps the share of its height its depth takes, so it
+/// stays as slim and as pointed as it was recognized when it is dragged, and it keeps opening to
+/// the side of its chord it did.
+#[derive(Debug, Clone)]
+struct CurlyBraceEnd {
+    /// The end that stays where it is.
+    fixed_end: Vector2,
+    /// The end that follows the pen, as the brace was recognized.
+    dragged_end: Vector2,
+    /// Whether the dragged end is the `end` of the curve rather than its `start`.
+    dragged_is_end: bool,
+    /// The depth of the brace, relative to its height, from its tips to its cusp.
+    depth_ratio: f64,
+    /// The side of the chord the cusp points to, as a unit vector.
+    outward: Vector2,
+}
+
+impl CurlyBraceEnd {
+    fn new(curve: &Curve, pen_pos: Vector2) -> Self {
+        let start = curve
+            .cubics
+            .first()
+            .map_or(Vector2::ZERO, |cubic| cubic.start);
+        let end = curve.cubics.last().map_or(Vector2::ZERO, |cubic| cubic.end);
+
+        let chord_vec = end - start;
+        let chord = chord_vec.length();
+        let height = (end.y - start.y).abs();
+        let (depth_ratio, outward) = if chord > f64::EPSILON && height > f64::EPSILON {
+            let direction = chord_vec / chord;
+            let normal = Vector2::new(-direction.y, direction.x);
+            // The cusp is the deepest point of the brace: the arms meet at it, and nothing else
+            // of the brace is further from the chord.
+            let deepest =
+                curve
+                    .sampled(CURLY_DEPTH_SAMPLES)
+                    .into_iter()
+                    .fold(start, |deepest, point| {
+                        if normal.dot(point - start).abs() > normal.dot(deepest - start).abs() {
+                            point
+                        } else {
+                            deepest
+                        }
+                    });
+            let depth = normal.dot(deepest - start);
+            (
+                (depth.abs() / height).min(0.5),
+                if depth < 0.0 { -normal } else { normal },
+            )
+        } else {
+            (CURLY_DEPTH_RATIO, Vector2::new(1.0, 0.0))
+        };
+
+        let dragged_is_end = pen_pos.distance(end) <= pen_pos.distance(start);
+        let (fixed_end, dragged_end) = if dragged_is_end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        Self {
+            fixed_end,
+            dragged_end,
+            dragged_is_end,
+            depth_ratio,
+            outward,
+        }
+    }
+
+    /// The brace with the dragged end at the offset from where it was recognized.
+    ///
+    /// `None` when the height is gone.
+    fn adjusted(&self, offset: Vector2) -> Option<Curve> {
+        let moved = self.dragged_end + offset;
+        let height = (moved.y - self.fixed_end.y).abs();
+        if height < MIN_EXTENT {
+            return None;
+        }
+        let (start, end) = if self.dragged_is_end {
+            (self.fixed_end, moved)
+        } else {
+            (moved, self.fixed_end)
+        };
+        Curve::new_curly_brace(start, end, self.depth_ratio * height, self.outward)
+    }
+}
+
 /// The scale for one axis that grows the given extent by the offset, keeping the minimum extent.
 fn axis_scale(start_extent: f64, signed_offset: f64) -> f64 {
     if start_extent < MIN_EXTENT {
@@ -506,7 +602,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::CubicBezier(bracket),
             Vector2::new(100.0, 200.0),
-            Some(BracketStyle::Arc),
+            Some(BracketKind::Round(BracketStyle::Arc)),
         );
 
         // Stretching the lower end down keeps the upper end, and the bulge keeps its share of the
@@ -566,7 +662,7 @@ mod tests {
         let adjust = ShapeAdjust::new(
             Shape::Curve(bracket),
             Vector2::new(100.0, 200.0),
-            Some(BracketStyle::Rounded),
+            Some(BracketKind::Round(BracketStyle::Rounded)),
         );
 
         // Stretching the lower end down keeps the upper end, and the corners keep their share of
@@ -599,6 +695,53 @@ mod tests {
             .iter()
             .fold(f64::MAX, |x, point| x.min(point.x));
         assert!(deepest < 100.0, "the bracket lost its side");
+    }
+
+    #[test]
+    fn curly_brace_end_follows_pen_and_keeps_its_side() {
+        // A brace from (100, 100) to (100, 300), its cusp to the right.
+        let brace = Curve::new_curly_brace(
+            Vector2::new(100.0, 100.0),
+            Vector2::new(100.0, 300.0),
+            36.0,
+            Vector2::new(1.0, 0.0),
+        )
+        .expect("a curly brace");
+        // The pen rests at the lower end.
+        let adjust = ShapeAdjust::new(
+            Shape::Curve(brace),
+            Vector2::new(100.0, 300.0),
+            Some(BracketKind::Curly),
+        );
+
+        // Stretching the lower end down keeps the upper end, and the cusp keeps its share of the
+        // height: 36 of 200 is 18%, so 72 of 400.
+        let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(100.0, 500.0)) else {
+            panic!("expected a curve");
+        };
+        assert_eq!(
+            adjusted.cubics.first().unwrap().start,
+            Vector2::new(100.0, 100.0)
+        );
+        assert_eq!(
+            adjusted.cubics.last().unwrap().end,
+            Vector2::new(100.0, 500.0)
+        );
+        let deepest = adjusted
+            .sampled(32)
+            .iter()
+            .fold(f64::MIN, |x, point| x.max(point.x));
+        assert!((deepest - 172.0).abs() < 0.5, "the cusp at {deepest}");
+
+        // Dragging the end across keeps the brace opening to the side it did.
+        let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(20.0, 300.0)) else {
+            panic!("expected a curve");
+        };
+        let deepest = adjusted
+            .sampled(32)
+            .iter()
+            .fold(f64::MIN, |x, point| x.max(point.x));
+        assert!(deepest > 100.0, "the brace lost its side: {deepest}");
     }
 
     #[test]

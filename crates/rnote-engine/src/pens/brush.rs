@@ -1498,7 +1498,8 @@ mod preview_draw {
         let node = snapshot.to_node().expect("the canvas draws to a node");
         let renderer = gtk4::gsk::CairoRenderer::new();
         renderer.realize(None).expect("the cairo renderer realizes");
-        let viewport = gtk4::graphene::Rect::new(0., 0., CANVAS_SIZE[0] as f32, CANVAS_SIZE[1] as f32);
+        let viewport =
+            gtk4::graphene::Rect::new(0., 0., CANVAS_SIZE[0] as f32, CANVAS_SIZE[1] as f32);
         let texture = renderer.render_texture(&node, Some(&viewport));
         renderer.unrealize();
         image::load_from_memory(&texture.save_to_png_bytes())
@@ -1538,9 +1539,7 @@ mod preview_draw {
 
         for zoom in [1., 2., 0.5] {
             let mut engine = engine_with_view_of(center, zoom);
-            let key = engine
-                .store
-                .insert_stroke(red_image_stroke(center), None);
+            let key = engine.store.insert_stroke(red_image_stroke(center), None);
             engine.store.set_previewing(&[key], true);
 
             let frame = render_canvas(&engine);
@@ -1576,9 +1575,7 @@ mod preview_draw {
         let frame = render_canvas(&engine);
         // the right extremum of the ellipse, where the camera puts it
         let right = center + Vector2::new(radii[0], 0.);
-        let on_surface = (right * zoom
-            - (center * zoom - CANVAS_SIZE * 0.5))
-            .round();
+        let on_surface = (right * zoom - (center * zoom - CANVAS_SIZE * 0.5)).round();
         let mut darkest = 255;
         for dx in -2..=2 {
             for dy in -2..=2 {
