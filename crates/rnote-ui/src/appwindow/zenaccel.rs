@@ -26,31 +26,50 @@ impl RnAppWindow {
     /// The controller only fires where GTK's own accelerator matching cannot: a
     /// keyval the active layout spells otherwise. Everything else is left to the
     /// accelerator, so a layout that already works keeps working and the action
-    /// is never activated twice.
+    /// is never activated twice. A held key does not activate it either: the
+    /// action toggles, and its repeats would turn zen straight back off.
     pub(crate) fn setup_zen_accel_keycodes(&self) {
         let controller = EventControllerKey::builder()
             .name("zen_accel_keycode_controller")
             .propagation_phase(PropagationPhase::Capture)
             .build();
+        // A key held down delivers a press every repeat delay, and the action
+        // toggles: the repeat would turn zen straight back off. Remember the
+        // press already handled and ignore its repeats until the key is released.
+        let held = std::rc::Rc::new(std::cell::Cell::new(None::<(u32, gdk::ModifierType)>));
+        let held_released = held.clone();
+        controller.connect_key_released(move |_, _, keycode, _| {
+            if held_released.get().is_some_and(|(kc, _)| kc == keycode) {
+                held_released.set(None);
+            }
+        });
         controller.connect_key_pressed(clone!(
             #[weak(rename_to = appwindow)]
             self,
+            #[strong]
+            held,
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |_, keyval, keycode, state| {
                 let Some(settings) = appwindow.app().app_settings() else {
                     return glib::Propagation::Proceed;
                 };
+                let previous = held.get();
+                let mut fire: Option<&str> = None;
+                let mut shortcut_key = false;
+                // `activate_action` takes the action's full name: a window's actions
+                // live in the `win` group (`add_action` inserts them there), and the
+                // prefix is not added for the caller.
                 for (accel_key, keycode_key, action) in [
                     (
                         ZEN_ACCEL_ACTIVE_MONITOR,
                         ZEN_ACCEL_ACTIVE_MONITOR_KEYCODE,
-                        "zen-mode-active-monitor",
+                        "win.zen-mode-active-monitor",
                     ),
                     (
                         ZEN_ACCEL_ALL_MONITORS,
                         ZEN_ACCEL_ALL_MONITORS_KEYCODE,
-                        "zen-mode-all-monitors",
+                        "win.zen-mode-all-monitors",
                     ),
                 ] {
                     let accel = RnApp::zen_accel(Some(&settings), accel_key);
@@ -58,13 +77,29 @@ impl RnAppWindow {
                         continue;
                     };
                     let recorded = recorded_keycode(&settings, keycode_key);
-                    if combination_matches(accel, recorded, keyval, keycode, state) {
-                        // An action window that went away has nothing to report.
-                        let _ = WidgetExt::activate_action(&appwindow, action, None);
-                        return glib::Propagation::Stop;
+                    if combination_matches(accel, recorded, keyval, keycode, state) && fire.is_none()
+                    {
+                        fire = Some(action);
                     }
+                    shortcut_key |= is_combination_key(accel, recorded, keycode, state);
                 }
-                glib::Propagation::Proceed
+                if fire.is_none() && !shortcut_key {
+                    return glib::Propagation::Proceed;
+                }
+                // The repeat of a press already handled is swallowed for the
+                // accelerator's own match too, so the action fires once per press.
+                // The released key clears the mark.
+                if previous == Some((keycode, state)) {
+                    return glib::Propagation::Stop;
+                }
+                held.set(Some((keycode, state)));
+                let Some(action) = fire else {
+                    // The keyval is the accelerator's: GTK activates it itself.
+                    return glib::Propagation::Proceed;
+                };
+                // An action window that went away has nothing to report.
+                let _ = WidgetExt::activate_action(&appwindow, action, None);
+                glib::Propagation::Stop
             }
         ));
         self.add_controller(controller);
@@ -87,7 +122,7 @@ fn combination_matches(
     keycode: u32,
     state: gdk::ModifierType,
 ) -> bool {
-    let (accel_keyval, accel_mods) = accel;
+    let (accel_keyval, _) = accel;
 
     // GTK resolves this event on its own when the keyval is the accelerator's.
     if keyval == accel_keyval {
@@ -98,6 +133,21 @@ fn combination_matches(
     if is_ascii_keyval(keyval) && is_ascii_keyval(accel_keyval) {
         return false;
     }
+    is_combination_key(accel, recorded, keycode, state)
+}
+
+/// Whether `keycode`, with the combination's modifiers pressed, is the key the
+/// combination names - regardless of what the active layout types on it.
+///
+/// This is the key whose repeats the window has to swallow: it is the shortcut
+/// even where the keyval match is GTK's to make.
+fn is_combination_key(
+    accel: (gdk::Key, gdk::ModifierType),
+    recorded: u32,
+    keycode: u32,
+    state: gdk::ModifierType,
+) -> bool {
+    let (accel_keyval, accel_mods) = accel;
     if state & combination_modifiers() != accel_mods & combination_modifiers() {
         return false;
     }
