@@ -41,7 +41,6 @@ impl RnAppWindow {
                 let Some(settings) = appwindow.app().app_settings() else {
                     return glib::Propagation::Proceed;
                 };
-                let offset = keycode_offset();
                 for (accel_key, keycode_key, action) in [
                     (
                         ZEN_ACCEL_ACTIVE_MONITOR,
@@ -59,7 +58,7 @@ impl RnAppWindow {
                         continue;
                     };
                     let recorded = recorded_keycode(&settings, keycode_key);
-                    if combination_matches(accel, recorded, keyval, keycode, state, offset) {
+                    if combination_matches(accel, recorded, keyval, keycode, state) {
                         // An action window that went away has nothing to report.
                         let _ = WidgetExt::activate_action(&appwindow, action, None);
                         return glib::Propagation::Stop;
@@ -75,8 +74,7 @@ impl RnAppWindow {
 /// Whether a key event is the combination by its keycode.
 ///
 /// `accel` is the parsed combination, `recorded` the keycode the settings panel
-/// saw when the combination was recorded (`0` when there is none), `offset` the
-/// platform's keycode offset.
+/// saw when the combination was recorded (`0` when there is none).
 ///
 /// The keycode of a combination that names a letter or a digit is known from the
 /// US-QWERTY positions, so a recorded keycode only serves a key the table does
@@ -88,7 +86,6 @@ fn combination_matches(
     keyval: gdk::Key,
     keycode: u32,
     state: gdk::ModifierType,
-    offset: u32,
 ) -> bool {
     let (accel_keyval, accel_mods) = accel;
 
@@ -105,8 +102,7 @@ fn combination_matches(
         return false;
     }
 
-    let expected =
-        us_keycode(accel_keyval, offset).or_else(|| (recorded > 1).then_some(recorded));
+    let expected = us_keycode(accel_keyval).or_else(|| (recorded > 1).then_some(recorded));
     expected == Some(keycode)
 }
 
@@ -131,7 +127,7 @@ fn is_ascii_keyval(keyval: gdk::Key) -> bool {
 /// combination names: `<Ctrl><Shift>f` is the F key, wherever the layout puts
 /// its own letters. `None` for a key the table does not carry; such a key keeps
 /// being matched by keyval alone, exactly as before.
-fn us_keycode(keyval: gdk::Key, offset: u32) -> Option<u32> {
+fn us_keycode(keyval: gdk::Key) -> Option<u32> {
     let position = match keyval.to_unicode()?.to_ascii_lowercase() {
         'q' => 16,
         'w' => 17,
@@ -171,17 +167,14 @@ fn us_keycode(keyval: gdk::Key, offset: u32) -> Option<u32> {
         '0' => 11,
         _ => return None,
     };
-    Some(position + offset)
+    Some(position + KEYCODE_OFFSET)
 }
 
-/// GDK reports the keycode the platform's own: the evdev code on Wayland, the X
-/// keycode on X11, which is the evdev code plus eight.
-fn keycode_offset() -> u32 {
-    match gdk::Display::default() {
-        Some(display) if display.name().starts_with("wayland") => 0,
-        _ => 8,
-    }
-}
+/// How GDK numbers the keycode of a key event against the evdev position the
+/// table names: both backends report the X keycode, the evdev code plus eight.
+/// Measured on this session: `gdk::Display::map_keyval(GDK_KEY_f)` answers
+/// keycode 41, which is evdev 33 plus eight.
+const KEYCODE_OFFSET: u32 = 8;
 
 /// Whether the compiled schema carries the key. A schema that predates the key
 /// (an install that installs the app without installing its schema) leaves the
@@ -242,9 +235,8 @@ mod tests {
             ctrl_shift_f(),
             0,
             keyval(CYRILLIC_EF),
-            33,
-            ctrl_shift(),
-            0
+            41,
+            ctrl_shift()
         ));
     }
 
@@ -255,9 +247,8 @@ mod tests {
             ctrl_shift_f(),
             0,
             keyval(LATIN_UPPER_F),
-            33,
-            ctrl_shift(),
-            0
+            41,
+            ctrl_shift()
         ));
     }
 
@@ -269,9 +260,8 @@ mod tests {
             ctrl_shift_f(),
             0,
             keyval(LATIN_U),
-            33,
-            ctrl_shift(),
-            0
+            41,
+            ctrl_shift()
         ));
     }
 
@@ -281,9 +271,8 @@ mod tests {
             ctrl_shift_f(),
             0,
             keyval(CYRILLIC_EF),
-            34,
-            ctrl_shift(),
-            0
+            42,
+            ctrl_shift()
         ));
     }
 
@@ -293,17 +282,15 @@ mod tests {
             ctrl_shift_f(),
             0,
             keyval(CYRILLIC_EF),
-            33,
-            gdk::ModifierType::CONTROL_MASK,
-            0
+            41,
+            gdk::ModifierType::CONTROL_MASK
         ));
         assert!(!combination_matches(
             ctrl_shift_f(),
             0,
             keyval(CYRILLIC_EF),
-            33,
-            ctrl_shift() | gdk::ModifierType::ALT_MASK,
-            0
+            41,
+            ctrl_shift() | gdk::ModifierType::ALT_MASK
         ));
     }
 
@@ -313,30 +300,23 @@ mod tests {
             ctrl_shift_f(),
             0,
             keyval(CYRILLIC_EF),
-            33,
-            ctrl_shift() | gdk::ModifierType::LOCK_MASK,
-            0
+            41,
+            ctrl_shift() | gdk::ModifierType::LOCK_MASK
         ));
     }
 
     #[test]
-    fn the_platform_offset_lands_on_the_same_key() {
-        // X11 reports the evdev keycode plus eight.
-        assert!(combination_matches(
-            ctrl_shift_f(),
-            0,
-            keyval(CYRILLIC_EF),
-            41,
-            ctrl_shift(),
-            8
-        ));
+    fn the_table_names_the_keycode_the_event_carries() {
+        // GDK numbers the keycode as X11 does, the evdev position plus eight,
+        // so the bare evdev 33 of the F key must not match.
+        assert_eq!(us_keycode(keyval(LATIN_F)), Some(41));
+        assert_eq!(us_keycode(keyval(CYRILLIC_EF)), None);
         assert!(!combination_matches(
             ctrl_shift_f(),
             0,
             keyval(CYRILLIC_EF),
             33,
-            ctrl_shift(),
-            8
+            ctrl_shift()
         ));
     }
 
@@ -346,9 +326,9 @@ mod tests {
         // the only thing that can match it.
         let accel = (keyval(0x6e6), ctrl_shift());
 
-        assert!(!combination_matches(accel, 0, keyval(LATIN_UPPER_F), 33, ctrl_shift(), 0));
-        assert!(combination_matches(accel, 33, keyval(LATIN_UPPER_F), 33, ctrl_shift(), 0));
-        assert!(!combination_matches(accel, 33, keyval(LATIN_UPPER_F), 34, ctrl_shift(), 0));
+        assert!(!combination_matches(accel, 0, keyval(LATIN_UPPER_F), 41, ctrl_shift()));
+        assert!(combination_matches(accel, 41, keyval(LATIN_UPPER_F), 41, ctrl_shift()));
+        assert!(!combination_matches(accel, 41, keyval(LATIN_UPPER_F), 42, ctrl_shift()));
     }
 
     #[test]
@@ -356,19 +336,17 @@ mod tests {
         // The setting was edited by hand, the recorded keycode is the old key's.
         assert!(!combination_matches(
             ctrl_shift_f(),
-            37,
+            45,
             keyval(CYRILLIC_EF),
-            37,
-            ctrl_shift(),
-            0
+            45,
+            ctrl_shift()
         ));
         assert!(combination_matches(
             ctrl_shift_f(),
-            37,
+            45,
             keyval(CYRILLIC_EF),
-            33,
-            ctrl_shift(),
-            0
+            41,
+            ctrl_shift()
         ));
     }
 }
