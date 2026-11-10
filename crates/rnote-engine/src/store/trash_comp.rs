@@ -10,6 +10,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// The share of a stroke's ink a scribble has to cover for the stroke to be erased.
+///
+/// A scribble stroke is recognized from its own shape alone, and handwriting can pass that test:
+/// a cursive "д" drawn with a bowl and a descender loop has the turns and the length of a
+/// scratch-out. What it does not do is cover the stroke next to it, so erasing on the first
+/// touched hitbox would take the neighbour with it. A real scratch-out runs over the ink it
+/// means to erase and covers most of it.
+const SCRIBBLE_COVERAGE_RATIO: f64 = 0.5;
+
+/// The fewest ink tiles a scribble has to cover, whatever the share.
+///
+/// A stroke short enough to have only a tile or two is erased when the scribble covers it, not
+/// when one of its tiles is grazed: half of two tiles is one tile, which a letter written tight
+/// against it touches.
+const SCRIBBLE_COVERAGE_MIN_TILES: usize = 2;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, rename = "trash_component")]
 pub struct TrashComponent {
@@ -184,7 +200,8 @@ impl StrokeStore {
     ///
     /// Used for the scribble gesture: the strokes the scribble actually went over are trashed, not
     /// everything inside its bounds, so scratching out a word between two others only takes that
-    /// word. Ticks and numbers of coordinate system axes are erased individually.
+    /// word. A stroke has to be covered, not merely touched: see [`SCRIBBLE_COVERAGE_RATIO`].
+    /// Ticks and numbers of coordinate system axes are erased individually.
     ///
     /// Returns how many strokes were trashed or modified, and the keys of the modified strokes,
     /// which need to update their rendering.
@@ -255,11 +272,25 @@ impl StrokeStore {
                     return false;
                 }
 
-                stroke.hitboxes().into_iter().any(|hitbox| {
-                    hitting_hitboxes
-                        .iter()
-                        .any(|hitting_hitbox| hitting_hitbox.intersects(&hitbox))
-                })
+                // Only a stroke the scribble covered is erased. A stroke it merely touches at its
+                // edge is not: a letter written tight against another one grazes it, and a
+                // scribble stroke misrecognized from such a letter would otherwise take the
+                // neighbour down with it.
+                let hitboxes = stroke.hitboxes();
+                if hitboxes.is_empty() {
+                    return false;
+                }
+                let covered = hitboxes
+                    .iter()
+                    .filter(|hitbox| {
+                        hitting_hitboxes
+                            .iter()
+                            .any(|hitting_hitbox| hitting_hitbox.intersects(hitbox))
+                    })
+                    .count();
+
+                covered as f64 >= hitboxes.len() as f64 * SCRIBBLE_COVERAGE_RATIO
+                    && covered >= SCRIBBLE_COVERAGE_MIN_TILES.min(hitboxes.len())
             })
             .collect::<Vec<StrokeKey>>();
         hit_keys.extend(axis_trashed_keys);
@@ -458,6 +489,25 @@ mod tests {
         key
     }
 
+    /// Insert a stroke through the given points.
+    fn insert_path(
+        store: &mut StrokeStore,
+        points: impl IntoIterator<Item = Vector2>,
+    ) -> StrokeKey {
+        let path =
+            PenPath::try_from_elements(points.into_iter().map(|p| Element::new(p, 0.5))).unwrap();
+        let key = store.insert_stroke(
+            Stroke::BrushStroke(BrushStroke::from_penpath(
+                path,
+                Style::Smooth(SmoothOptions::default()),
+            )),
+            None,
+        );
+        store.update_geometry_for_stroke(key);
+
+        key
+    }
+
     #[test]
     fn trashes_only_the_strokes_that_were_scribbled_over() {
         let mut store = StrokeStore::default();
@@ -488,5 +538,74 @@ mod tests {
 
         assert_eq!(trashed, 0);
         assert_eq!(store.trashed(highlighted), Some(false));
+    }
+
+    /// A "д" drawn like a "g": a bowl and a descender loop under it, the shape that passes the
+    /// scribble thresholds on its own. Its left side runs down to `(102, 150)`, a pen width from
+    /// the neighbouring stroke at `x = 100`.
+    fn letter_d_points() -> Vec<Vector2> {
+        let (cx, cy, r) = (127.0, 150.0, 25.0);
+        let bowl = (0..=48).map(|i| {
+            let angle = std::f64::consts::FRAC_PI_2 - (i as f64 / 48.0) * std::f64::consts::TAU;
+            Vector2::new(cx + r * angle.cos(), cy + r * angle.sin())
+        });
+        let loop_tail = [
+            (cx + 20.0, 172.0),
+            (cx + 14.0, 178.0),
+            (cx + 6.0, 174.0),
+            (cx + 10.0, 166.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| Vector2::new(x, y));
+
+        bowl.chain(loop_tail).collect()
+    }
+
+    #[test]
+    fn keeps_a_stroke_a_letter_merely_touches() {
+        // A letter written tight against a neighbour grazes its ink edge. It is not the
+        // scratch-out gesture, and even misrecognized it must not take the neighbour with it.
+        let mut store = StrokeStore::default();
+        let neighbour = insert_path(
+            &mut store,
+            (0..=10).map(|i| Vector2::new(100.0, 120.0 + 3.0 * i as f64)),
+        );
+        let letter = insert_path(&mut store, letter_d_points());
+        let viewport = Aabb::new(Vector2::new(-500.0, -500.0), Vector2::new(1000.0, 1000.0));
+
+        let (trashed, _, _) = store.trash_strokes_hit_by(letter, viewport);
+
+        assert_eq!(trashed, 0);
+        assert_eq!(store.trashed(neighbour), Some(false));
+    }
+
+    #[test]
+    fn trashes_a_stroke_a_scratch_out_covers() {
+        // A scratch-out runs over the whole stroke, not only past its edge.
+        let mut store = StrokeStore::default();
+        let scribbled_over = insert_path(
+            &mut store,
+            (0..=10).map(|i| Vector2::new(100.0, 120.0 + 3.0 * i as f64)),
+        );
+        let scribble = insert_path(
+            &mut store,
+            (0..5).flat_map(|pass| {
+                (0..=10).map(move |i| {
+                    let t = i as f64 / 10.0;
+                    let x = if pass % 2 == 0 {
+                        90.0 + t * 80.0
+                    } else {
+                        170.0 - t * 80.0
+                    };
+                    Vector2::new(x, 118.0 + 8.0 * pass as f64)
+                })
+            }),
+        );
+        let viewport = Aabb::new(Vector2::new(-500.0, -500.0), Vector2::new(1000.0, 1000.0));
+
+        let (trashed, _, _) = store.trash_strokes_hit_by(scribble, viewport);
+
+        assert_eq!(trashed, 1);
+        assert_eq!(store.trashed(scribbled_over), Some(true));
     }
 }
