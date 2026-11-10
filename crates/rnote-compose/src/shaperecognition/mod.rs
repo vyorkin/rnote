@@ -197,12 +197,16 @@ const CURLY_CUSP_WINDOW: f64 = 0.06;
 
 /// The turn (radians) a curly brace's cusp has to make over that window.
 ///
-/// A parenthesis is a smooth bend and turns no more than [`CURVE_MAX_TURN`] at any point; a hand
-/// rarely puts a turn this sharp anywhere but at the point of a brace.
-const CURLY_CUSP_MIN_TURN: f64 = 50.0 * std::f64::consts::PI / 180.0;
+/// A parenthesis is a smooth bend and turns no more than [`CURVE_MAX_TURN`] at any point, while a
+/// hand rarely puts a turn this sharp anywhere but at the point of a brace. A brace drawn with a
+/// soft point still turns some fifty degrees there.
+const CURLY_CUSP_MIN_TURN: f64 = 45.0 * std::f64::consts::PI / 180.0;
 
-/// How far from the middle of the stroke, as a share of its length, its cusp may sit.
-const CURLY_CUSP_MAX_OFFSET: f64 = 0.2;
+/// How far up or down the height a curly brace's cusp may sit, as a share from either end.
+///
+/// A brace's point is at the middle of its height, not at the middle of its length: the two tips
+/// of a hand-drawn brace are rarely as long as each other.
+const CURLY_CUSP_EDGE_SHARE: f64 = 0.3;
 
 /// The deepest a curly brace's cusp may be drawn, relative to its chord.
 ///
@@ -719,17 +723,23 @@ fn recognize_curly_brace(points: &[Vector2], zoom: f64) -> Option<Shape> {
         return None;
     }
 
-    // The tips curl back over the chord, which a `V` with the same point does not.
-    let tips_turn = turn_through(&resampled[..hook]).abs() >= CURLY_TIP_MIN_TURN
-        && turn_through(&resampled[resampled.len() - hook..]).abs() >= CURLY_TIP_MIN_TURN;
-    if !tips_turn {
+    // One tip curls back over the chord: a `V` runs straight into its point at both ends. The other
+    // end of a brace is often the long tail the pen swept out and lifted from, and does not curl.
+    let tip_turn = turn_through(&resampled[..hook])
+        .abs()
+        .max(turn_through(&resampled[resampled.len() - hook..]).abs());
+    if tip_turn < CURLY_TIP_MIN_TURN {
         return None;
     }
 
-    // The cusp is the one sharp turn of the stroke, and a brace turns at its point in the middle:
-    // a stroke that turns sharply at one of its ends is a hook or a letter.
+    // The cusp is the one sharp turn of the stroke, and a brace turns at its point in the middle of
+    // its height: a stroke that turns sharply at one of its ends is a hook or a letter.
     let mut cusp: Option<(usize, f64)> = None;
     for index in window..body.len() - window {
+        let share = (body[index].y - start.y) / (end.y - start.y);
+        if !(CURLY_CUSP_EDGE_SHARE..=1.0 - CURLY_CUSP_EDGE_SHARE).contains(&share) {
+            continue;
+        }
         let turn = turn_through(&body[index - window..=index + window]).abs();
         if cusp.is_none_or(|(_, sharpest)| turn > sharpest) {
             cusp = Some((index, turn));
@@ -737,10 +747,6 @@ fn recognize_curly_brace(points: &[Vector2], zoom: f64) -> Option<Shape> {
     }
     let (index, turn) = cusp?;
     if turn < CURLY_CUSP_MIN_TURN {
-        return None;
-    }
-    let offset = index as f64 / (body.len() - 1) as f64;
-    if (offset - 0.5).abs() > CURLY_CUSP_MAX_OFFSET {
         return None;
     }
 
@@ -2187,6 +2193,102 @@ mod tests {
             recognized.and_then(|recognized| recognized.bracket) != Some(BracketKind::Curly),
             "a hooked stroke is not a curly brace"
         );
+    }
+
+    #[test]
+    fn a_brace_with_one_curled_tip_and_a_long_tail_snaps() {
+        // A brace as it is written by hand: a tail the pen swept out at the bottom and lifted
+        // from, the cusp, and a curled tip at the top. Only the tip is a hook — the tail is nearly
+        // straight, and a brace is not a `V` at both ends.
+        let drawn = vec![
+            (17.0, 101.0),
+            (20.0, 100.0),
+            (23.0, 99.0),
+            (26.0, 98.0),
+            (29.0, 97.0),
+            (32.0, 96.0),
+            (35.0, 94.0),
+            (35.0, 91.0),
+            (34.0, 88.0),
+            (33.0, 85.0),
+            (31.0, 82.0),
+            (29.0, 79.0),
+            (28.0, 76.0),
+            (27.0, 73.0),
+            (27.0, 70.0),
+            (28.0, 67.0),
+            (26.0, 65.0),
+            (23.0, 65.0),
+            (20.0, 65.0),
+            (17.0, 64.0),
+            (17.0, 61.0),
+            (17.0, 58.0),
+            (18.0, 55.0),
+            (19.0, 52.0),
+            (20.0, 49.0),
+            (20.0, 46.0),
+            (21.0, 43.0),
+            (21.0, 40.0),
+            (20.0, 37.0),
+            (19.0, 34.0),
+            (16.0, 32.0),
+            (13.0, 32.0),
+            (10.0, 32.0),
+            (7.0, 33.0),
+            (6.0, 34.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| Vector2::new(x, y));
+        let path = pen_path_from_points(with_resting_tail(drawn));
+        let recognized = recognize_shape_with_kind(&path, 1.0, false).expect("recognized");
+        assert_eq!(recognized.bracket, Some(BracketKind::Curly));
+    }
+
+    #[test]
+    fn a_brace_whose_cusp_sits_above_the_middle_of_its_length_snaps() {
+        // The same hand, another brace: the curled tip is short and the tail long, so the cusp sits
+        // above the middle of the stroke though it is at the middle of the height.
+        let drawn = vec![
+            (248.0, 28.0),
+            (251.0, 27.0),
+            (254.0, 28.0),
+            (255.0, 31.0),
+            (255.0, 34.0),
+            (255.0, 37.0),
+            (255.0, 40.0),
+            (254.0, 43.0),
+            (254.0, 46.0),
+            (254.0, 49.0),
+            (256.0, 52.0),
+            (259.0, 53.0),
+            (262.0, 54.0),
+            (261.0, 57.0),
+            (261.0, 60.0),
+            (261.0, 63.0),
+            (262.0, 66.0),
+            (263.0, 69.0),
+            (264.0, 72.0),
+            (266.0, 75.0),
+            (268.0, 78.0),
+            (269.0, 81.0),
+            (270.0, 84.0),
+            (270.0, 87.0),
+            (269.0, 90.0),
+            (266.0, 92.0),
+            (263.0, 92.0),
+            (260.0, 93.0),
+            (257.0, 93.0),
+            (254.0, 94.0),
+            (251.0, 94.0),
+            (248.0, 95.0),
+            (245.0, 95.0),
+            (244.0, 95.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| Vector2::new(x, y));
+        let path = pen_path_from_points(with_resting_tail(drawn));
+        let recognized = recognize_shape_with_kind(&path, 1.0, false).expect("recognized");
+        assert_eq!(recognized.bracket, Some(BracketKind::Curly));
     }
 
     #[test]

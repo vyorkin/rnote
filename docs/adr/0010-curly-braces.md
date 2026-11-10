@@ -37,10 +37,13 @@ opening to the side of its chord it did.
 Recognition, `recognize_curly_brace`, is judged before the bracket, and requires:
 
 - the chord upright within `BRACKET_MAX_TILT`, and the height at least `BRACKET_MIN_HEIGHT_SURFACE`;
-- a turn of at least 50° over a window of 6% of the stroke at each side, and that turn in the
-  middle 40% of the stroke — the cusp, where a brace turns and nothing else does;
-- the outer 15% at each end turning by at least 30°: the tips curl over the chord, and a stroke
-  that runs straight to its end is a `V`, whose point would otherwise pass for a cusp;
+- a turn of at least 45° over a window of 6% of the stroke at each side, and that turn at the
+  middle of the height, between 30% and 70% of it — the cusp, where a brace turns and nothing
+  else does. The middle is measured by height, not by length: the two ends of a brace are drawn to
+  different lengths, and the hand often sweeps the lower one out into a long straight tail;
+- one of the outer 15% ends turning by at least 30°: a tip curls over the chord, and a stroke that
+  runs straight to both its ends is a `V`, whose point would otherwise pass for a cusp. One curled
+  tip is enough — the other end is frequently that long tail;
 - the cusp at least `BRACKET_MIN_DEPTH_SURFACE` off the chord, and no deeper than 60% of it: a
   stroke that wraps further bends back towards itself, which is a hook.
 
@@ -56,7 +59,7 @@ does not matter.
 - A brace written as an S snaps even though its bulges are on both sides of the chord, which the
   bracket gate of ADR 0009 refuses: the cusp signature does not look at the sides of the bulge, and
   the tips are what tell a brace from a `V`.
-- A parenthesis keeps its snap: its bend never turns 50° over that window, and its ends do not curl
+- A parenthesis keeps its snap: its bend never turns 45° over that window, and its ends do not curl
   as sharply as a brace's tips do within the outer 15% of the stroke.
 - A brace drawn with a soft point is not a brace to the recognizer, and the round bracket gate may
   take it if its bulge is monotone: it snaps to a curly-less bracket. The sharp turn is the whole
