@@ -27,6 +27,18 @@ close it.
   combinations, not the defaults. An unparsable stored value falls back to the schema default and
   then to a compiled-in one, so a settings file written for an older install cannot leave the
   shortcuts unbound.
+- Those accelerators are also watched by keycode. A GTK accelerator names a keyval, and a keyval
+  belongs to the layout that is active: with `ru` on, `Ctrl`+`Shift`+`F` types `А`, so the
+  combination matched nothing and zen stayed out of reach until the layout was switched back - which
+  the user does with `Ctrl`+`Shift`+`Space`, on the shortcut's own modifiers. The keycode does not
+  depend on the layout, so each window watches the two combinations' keycodes in a capture-phase
+  controller and activates the action when the keyval match cannot happen. The panel records the
+  keycode next to the combination (two `-keycode` integer settings), so a combination naming a
+  Cyrillic letter has a key to match at all. The keycode is known from the US-QWERTY positions for a
+  letter or a digit, so a recorded one only serves a keyval the table does not carry: an edited
+  setting cannot make the wrong key fire. The controller stands down wherever GTK's matching already
+  works - the keyval is the accelerator's, or the layout spells both in ASCII - so a layout that
+  worked keeps working and the action is never activated twice.
 - Entering zen hides `main_header` and `tabbar` and fullscreens the window. Hiding only the widgets
   would leave the window borderless anyway, because the header is the client-side decoration; the
   compositor's fullscreen makes that state deliberate instead of a stranded window.

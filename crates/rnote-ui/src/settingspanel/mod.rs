@@ -9,6 +9,10 @@ pub(crate) use penshortcutrow::RnPenShortcutRow;
 use rnote_compose::ext::Vector2Ext;
 
 // Imports
+use crate::appwindow::zenaccel::{
+    ZEN_ACCEL_ACTIVE_MONITOR, ZEN_ACCEL_ACTIVE_MONITOR_KEYCODE, ZEN_ACCEL_ALL_MONITORS,
+    ZEN_ACCEL_ALL_MONITORS_KEYCODE, recorded_keycode, set_recorded_keycode,
+};
 use crate::{RnAppWindow, RnIconPicker, RnUnitEntry};
 use adw::prelude::*;
 use gettextrs::{gettext, pgettext};
@@ -90,6 +94,8 @@ fn setup_zen_accel_row(
     settings: &gtk4::gio::Settings,
     key: &'static str,
     other_key: &'static str,
+    keycode_key: &'static str,
+    other_keycode_key: &'static str,
     ZenAccelRow {
         popover,
         capture,
@@ -135,7 +141,7 @@ fn setup_zen_accel_row(
         // key would resolve as an accelerator.
         #[upgrade_or]
         glib::Propagation::Stop,
-        move |_, keyval, _, state| {
+        move |_, keyval, keycode, state| {
             if keyval == gdk::Key::Escape {
                 popover.popdown();
                 return glib::Propagation::Stop;
@@ -165,15 +171,20 @@ fn setup_zen_accel_row(
             }
 
             let previous = settings.string(key).to_string();
+            // The keycode goes with the combination: it is what keeps the
+            // shortcut alive in a layout that spells the key otherwise.
+            let previous_keycode = recorded_keycode(&settings, keycode_key);
             // The two zen modes must stay on different combinations, so a
             // combination the other mode holds trades places with it.
-            if settings.string(other_key).as_str() == accel
-                && settings.set_string(other_key, &previous).is_err()
-            {
-                prompt.set_label(&gettext("The shortcut could not be saved"));
-                return glib::Propagation::Stop;
+            if settings.string(other_key).as_str() == accel {
+                if settings.set_string(other_key, &previous).is_err() {
+                    prompt.set_label(&gettext("The shortcut could not be saved"));
+                    return glib::Propagation::Stop;
+                }
+                set_recorded_keycode(&settings, other_keycode_key, previous_keycode);
             }
             if settings.set_string(key, &accel).is_ok() {
+                set_recorded_keycode(&settings, keycode_key, keycode);
                 popover.popdown();
             } else {
                 prompt.set_label(&gettext("The shortcut could not be saved"));
@@ -1004,14 +1015,18 @@ impl RnSettingsPanel {
 
         setup_zen_accel_row(
             &settings,
-            "zen-accel-active-monitor",
-            "zen-accel-all-monitors",
+            ZEN_ACCEL_ACTIVE_MONITOR,
+            ZEN_ACCEL_ALL_MONITORS,
+            ZEN_ACCEL_ACTIVE_MONITOR_KEYCODE,
+            ZEN_ACCEL_ALL_MONITORS_KEYCODE,
             active_monitor_row,
         );
         setup_zen_accel_row(
             &settings,
-            "zen-accel-all-monitors",
-            "zen-accel-active-monitor",
+            ZEN_ACCEL_ALL_MONITORS,
+            ZEN_ACCEL_ACTIVE_MONITOR,
+            ZEN_ACCEL_ALL_MONITORS_KEYCODE,
+            ZEN_ACCEL_ACTIVE_MONITOR_KEYCODE,
             all_monitors_row,
         );
     }

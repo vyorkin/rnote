@@ -170,6 +170,11 @@ impl ObjectImpl for RnAppWindow {
         obj.watch_zen_span_monitors();
         super::span::repair_stranded_zen_bar();
 
+        // The zen accelerators are keyed by keyval, which the active layout
+        // spells: the keycode watch keeps them working in a layout that does not
+        // type their letters.
+        obj.setup_zen_accel_keycodes();
+
         // Zen mode is entered together with fullscreen: hiding the header in a windowed
         // state would leave the window with no buttons and nothing to drag. Leaving
         // fullscreen with F11 therefore leaves zen too, or the window would stay without

@@ -3,6 +3,7 @@ mod actions;
 mod appsettings;
 mod imp;
 mod span;
+pub(crate) mod zenaccel;
 
 // Imports
 use crate::{
