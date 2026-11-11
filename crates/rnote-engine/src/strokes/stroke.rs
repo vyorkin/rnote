@@ -442,7 +442,11 @@ impl Stroke {
         };
         let image = Image::try_from_encoded_bytes(&bytes)?;
 
-        Ok(Stroke::BitmapImage(BitmapImage { image, rectangle }))
+        Ok(Stroke::BitmapImage(BitmapImage {
+            image,
+            rectangle,
+            ..Default::default()
+        }))
     }
 
     pub fn from_xopptext(

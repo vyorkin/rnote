@@ -6,6 +6,7 @@ use image::ImageReader;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
 use p2d::math::Vector2;
 use piet::RenderContext;
+use rayon::prelude::*;
 use rnote_compose::Transformable;
 use rnote_compose::ext::{AabbExt, DAffine2Ext};
 use rnote_compose::shapes::{Rectangle, Shapeable};
@@ -125,6 +126,115 @@ impl From<image::DynamicImage> for Image {
     }
 }
 
+/// Per-image adjustments.
+///
+/// The original image data is never modified, the adjusted image is
+/// derived from it whenever it is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename = "image_adjustments")]
+pub struct ImageAdjustments {
+    /// Invert the rgb channels, keeping the alpha channel.
+    #[serde(rename = "invert_colors")]
+    pub invert_colors: bool,
+    /// Make the background (the color sampled from the image border) transparent.
+    #[serde(rename = "remove_background")]
+    pub remove_background: Option<BackgroundRemoval>,
+}
+
+impl Default for ImageAdjustments {
+    fn default() -> Self {
+        Self {
+            invert_colors: false,
+            remove_background: None,
+        }
+    }
+}
+
+impl ImageAdjustments {
+    /// True if no adjustment is enabled.
+    pub fn is_default(&self) -> bool {
+        !self.invert_colors && self.remove_background.is_none()
+    }
+
+    /// Applies the adjustments to the given image.
+    ///
+    /// The background is removed first, then the colors are inverted.
+    pub fn apply(&self, image: &Image) -> Image {
+        let mut adjusted = image.clone();
+        if let Some(background_removal) = self.remove_background {
+            adjusted = adjusted.with_transparent_background(background_removal);
+        }
+        if self.invert_colors {
+            adjusted = adjusted.with_inverted_colors();
+        }
+        adjusted
+    }
+}
+
+/// Options for making the background of an image transparent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename = "background_removal")]
+pub struct BackgroundRemoval {
+    /// Max-channel rgb distance (0..=1) that still counts as background.
+    #[serde(rename = "tolerance")]
+    pub tolerance: f64,
+    /// Width of the alpha ramp (0..=1) after the tolerance.
+    #[serde(rename = "feather")]
+    pub feather: f64,
+}
+
+impl Default for BackgroundRemoval {
+    fn default() -> Self {
+        Self {
+            tolerance: BACKGROUND_TOLERANCE_DEFAULT,
+            feather: BACKGROUND_FEATHER_DEFAULT,
+        }
+    }
+}
+
+/// Background noise (distance of the border pixels from their median) above which
+/// the background is considered to be not uniform and is not removed.
+const BACKGROUND_NOISE_MAX: f64 = 0.10;
+const BACKGROUND_TOLERANCE_MIN: f64 = 0.04;
+const BACKGROUND_TOLERANCE_MAX: f64 = 0.20;
+const BACKGROUND_TOLERANCE_DEFAULT: f64 = 0.07;
+const BACKGROUND_FEATHER_DEFAULT: f64 = 0.04;
+
+/// Returns true if the rgb channels of any pixel exceed its alpha channel.
+///
+/// Such data is straight alpha, even though all images are declared to be
+/// premultiplied (images decoded from encoded image files are not premultiplied).
+fn is_straight_alpha(data: &[u8]) -> bool {
+    data.as_chunks::<4>()
+        .0
+        .iter()
+        .any(|px| px[3] != 255 && (px[0] > px[3] || px[1] > px[3] || px[2] > px[3]))
+}
+
+/// The rgb channels of a pixel, not premultiplied by its alpha channel.
+fn straight_rgb(px: &[u8], is_straight: bool) -> [u8; 3] {
+    let a = px[3];
+    if is_straight || a == 0 || a == 255 {
+        [px[0], px[1], px[2]]
+    } else {
+        let unpremultiply =
+            |c: u8| -> u8 { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
+        [
+            unpremultiply(px[0]),
+            unpremultiply(px[1]),
+            unpremultiply(px[2]),
+        ]
+    }
+}
+
+/// The max-channel distance of two rgb colors.
+fn max_channel_distance(a: [u8; 3], b: [u8; 3]) -> u8 {
+    let distance = |x: u8, y: u8| (x as i16 - y as i16).unsigned_abs() as u8;
+    distance(a[0], b[0])
+        .max(distance(a[1], b[1]))
+        .max(distance(a[2], b[2]))
+}
+
 impl Drawable for Image {
     /// Draw itself on a [piet::RenderContext].
     ///
@@ -181,6 +291,156 @@ impl Image {
             ))
         } else {
             Ok(())
+        }
+    }
+
+    /// Samples the background color from the image border.
+    ///
+    /// Returns the sampled color and the border noise (0..=1), or `None` if the
+    /// border is mostly transparent or not uniform.
+    fn background_key(&self) -> Option<([u8; 3], f64)> {
+        if self.assert_valid().is_err() {
+            return None;
+        }
+
+        let width = self.pixel_width as usize;
+        let height = self.pixel_height as usize;
+        let data = self.data.as_ref();
+        let is_straight = is_straight_alpha(data);
+
+        let pixel_at = |x: usize, y: usize| -> [u8; 4] {
+            let i = (y * width + x) * 4;
+            let px = &data[i..i + 4];
+            let [r, g, b] = straight_rgb(px, is_straight);
+            [r, g, b, px[3]]
+        };
+
+        let mut border = Vec::with_capacity(2 * (width + height));
+        for x in 0..width {
+            border.push(pixel_at(x, 0));
+            if height > 1 {
+                border.push(pixel_at(x, height - 1));
+            }
+        }
+        for y in 1..height.saturating_sub(1) {
+            border.push(pixel_at(0, y));
+            if width > 1 {
+                border.push(pixel_at(width - 1, y));
+            }
+        }
+
+        let border_len = border.len();
+        let opaque: Vec<[u8; 4]> = border.into_iter().filter(|px| px[3] != 0).collect();
+        // A mostly transparent border means the background is already transparent.
+        if opaque.is_empty() || 2 * opaque.len() < border_len {
+            return None;
+        }
+
+        let median = |channel: usize| -> u8 {
+            let mut values: Vec<u8> = opaque.iter().map(|px| px[channel]).collect();
+            values.sort_unstable();
+            values[values.len() / 2]
+        };
+        let key = [median(0), median(1), median(2)];
+
+        let mut distances: Vec<u8> = opaque
+            .iter()
+            .map(|px| max_channel_distance([px[0], px[1], px[2]], key))
+            .collect();
+        distances.sort_unstable();
+        let noise = distances[distances.len() * 3 / 4] as f64 / 255.0;
+
+        if noise > BACKGROUND_NOISE_MAX {
+            return None;
+        }
+
+        Some((key, noise))
+    }
+
+    /// Detects whether the background can be made transparent and returns the
+    /// detected options, or `None` if it can not.
+    pub fn detect_background(&self) -> Option<BackgroundRemoval> {
+        let (_, noise) = self.background_key()?;
+
+        Some(BackgroundRemoval {
+            tolerance: (noise * 2.0 + 5.0 / 255.0)
+                .clamp(BACKGROUND_TOLERANCE_MIN, BACKGROUND_TOLERANCE_MAX),
+            feather: BACKGROUND_FEATHER_DEFAULT,
+        })
+    }
+
+    /// Returns a copy of the image with the background made transparent.
+    ///
+    /// The background color is sampled from the image border, pixels within the
+    /// tolerance become fully transparent and the ones just outside it are faded
+    /// out over the feather width.
+    pub fn with_transparent_background(&self, options: BackgroundRemoval) -> Image {
+        let Some((key, _)) = self.background_key() else {
+            return self.clone();
+        };
+
+        let is_straight = is_straight_alpha(self.data.as_ref());
+        let tolerance = (options.tolerance.clamp(0.0, 1.0) * 255.0).round() as i32;
+        let feather = ((options.feather.clamp(0.0, 1.0) * 255.0).round() as i32).max(1);
+
+        let mut data = self.data.as_ref().to_vec();
+        data.par_chunks_exact_mut(4).for_each(|px| {
+            let alpha = px[3];
+            if alpha == 0 {
+                return;
+            }
+
+            let distance = max_channel_distance(straight_rgb(px, is_straight), key) as i32;
+            let factor = if distance <= tolerance {
+                0.0f32
+            } else if distance >= tolerance + feather {
+                return;
+            } else {
+                (distance - tolerance) as f32 / feather as f32
+            };
+
+            let scale = |channel: u8| (channel as f32 * factor).round().clamp(0.0, 255.0) as u8;
+            px[0] = scale(px[0]);
+            px[1] = scale(px[1]);
+            px[2] = scale(px[2]);
+            px[3] = scale(alpha);
+        });
+
+        Image {
+            data: glib::Bytes::from_owned(data),
+            ..self.clone()
+        }
+    }
+
+    /// Returns a copy of the image with the rgb channels inverted.
+    ///
+    /// The alpha channel is kept, transparent pixels stay transparent.
+    pub fn with_inverted_colors(&self) -> Image {
+        if self.assert_valid().is_err() {
+            return self.clone();
+        }
+
+        let is_straight = is_straight_alpha(self.data.as_ref());
+        let mut data = self.data.as_ref().to_vec();
+        data.par_chunks_exact_mut(4).for_each(|px| {
+            if is_straight {
+                if px[3] == 0 {
+                    return;
+                }
+                px[0] = 255 - px[0];
+                px[1] = 255 - px[1];
+                px[2] = 255 - px[2];
+            } else {
+                // Premultiplied: (255 - straight_color) * alpha = alpha - channel.
+                px[0] = px[3].saturating_sub(px[0]);
+                px[1] = px[3].saturating_sub(px[1]);
+                px[2] = px[3].saturating_sub(px[2]);
+            }
+        });
+
+        Image {
+            data: glib::Bytes::from_owned(data),
+            ..self.clone()
         }
     }
 
@@ -388,4 +648,203 @@ pub(super) fn convert_image_bgra_to_rgba(_width: u32, _height: u32, mut bytes: V
         src[3] = alpha;
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_image(pixels: &[[u8; 4]], width: u32) -> Image {
+        assert!(width > 0 && pixels.len() % width as usize == 0);
+        let height = pixels.len() as u32 / width;
+        let data = pixels.iter().flatten().copied().collect::<Vec<u8>>();
+
+        Image {
+            data: glib::Bytes::from_owned(data),
+            rectangle: Rectangle::from_p2d_aabb(Aabb::new(
+                Vector2::ZERO,
+                Vector2::new(width as f64, height as f64),
+            )),
+            pixel_width: width,
+            pixel_height: height,
+            memory_format: ImageMemoryFormat::R8g8b8a8Premultiplied,
+        }
+    }
+
+    fn image_pixels(image: &Image) -> Vec<[u8; 4]> {
+        image
+            .data
+            .chunks_exact(4)
+            .map(|px| [px[0], px[1], px[2], px[3]])
+            .collect()
+    }
+
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    const RED: [u8; 4] = [255, 0, 0, 255];
+
+    #[test]
+    fn invert_opaque_colors() {
+        let image = test_image(
+            &[
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [10, 20, 30, 255],
+            ],
+            2,
+        );
+
+        assert_eq!(
+            image_pixels(&image.with_inverted_colors()),
+            vec![
+                [0, 255, 255, 255],
+                [255, 0, 255, 255],
+                [255, 255, 0, 255],
+                [245, 235, 225, 255]
+            ]
+        );
+    }
+
+    #[test]
+    fn invert_premultiplied_colors_keeps_alpha_invariant() {
+        let image = test_image(&[[128, 64, 32, 128]], 1);
+
+        assert_eq!(
+            image_pixels(&image.with_inverted_colors()),
+            vec![[0, 64, 96, 128]]
+        );
+    }
+
+    #[test]
+    fn invert_transparent_pixels_stays_transparent() {
+        let image = test_image(&[[0, 0, 0, 0]], 1);
+
+        assert_eq!(
+            image_pixels(&image.with_inverted_colors()),
+            vec![[0, 0, 0, 0]]
+        );
+    }
+
+    #[test]
+    fn invert_twice_is_identity() {
+        let image = test_image(&[[128, 64, 32, 128], [255, 0, 0, 255]], 2);
+        let original = image_pixels(&image);
+
+        let twice = image.with_inverted_colors().with_inverted_colors();
+
+        assert_eq!(image_pixels(&twice), original);
+    }
+
+    #[test]
+    fn invert_straight_alpha_colors() {
+        // Straight alpha data (the rgb channel exceeds the alpha channel).
+        let image = test_image(&[[255, 0, 0, 128]], 1);
+
+        assert_eq!(
+            image_pixels(&image.with_inverted_colors()),
+            vec![[0, 255, 255, 128]]
+        );
+    }
+
+    #[test]
+    fn detect_background_of_uniform_border() {
+        let image = test_image(
+            &[WHITE, WHITE, WHITE, WHITE, RED, WHITE, WHITE, WHITE, WHITE],
+            3,
+        );
+
+        let detected = image
+            .detect_background()
+            .expect("background should be detected");
+
+        assert!(detected.tolerance >= BACKGROUND_TOLERANCE_MIN);
+        assert!(detected.tolerance <= BACKGROUND_TOLERANCE_MAX);
+    }
+
+    #[test]
+    fn remove_background_makes_uniform_border_transparent() {
+        let image = test_image(
+            &[WHITE, WHITE, WHITE, WHITE, RED, WHITE, WHITE, WHITE, WHITE],
+            3,
+        );
+        let options = image.detect_background().unwrap();
+
+        let pixels = image_pixels(&image.with_transparent_background(options));
+
+        assert_eq!(
+            pixels,
+            vec![
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                RED,
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0]
+            ]
+        );
+    }
+
+    #[test]
+    fn remove_background_skips_already_transparent_border() {
+        let image = test_image(
+            &[
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                RED,
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+            3,
+        );
+
+        assert_eq!(image.detect_background(), None);
+    }
+
+    #[test]
+    fn remove_background_skips_non_uniform_border() {
+        let image = test_image(
+            &[[255, 255, 255, 255], [0, 0, 0, 255], [0, 0, 0, 255], WHITE],
+            2,
+        );
+
+        assert_eq!(image.detect_background(), None);
+    }
+
+    #[test]
+    fn adjustments_apply_background_before_inverting() {
+        let image = test_image(
+            &[WHITE, WHITE, WHITE, WHITE, RED, WHITE, WHITE, WHITE, WHITE],
+            3,
+        );
+        let adjustments = ImageAdjustments {
+            invert_colors: true,
+            remove_background: image.detect_background(),
+        };
+
+        let pixels = image_pixels(&adjustments.apply(&image));
+
+        assert_eq!(pixels[0], [0, 0, 0, 0]);
+        assert_eq!(pixels[4], [0, 255, 255, 255]);
+        // The original image is not modified.
+        assert_eq!(image_pixels(&image)[4], RED);
+    }
+
+    #[test]
+    fn default_adjustments_keep_the_image() {
+        let image = test_image(&[[10, 20, 30, 255]], 1);
+        let adjustments = ImageAdjustments::default();
+
+        assert!(adjustments.is_default());
+        assert_eq!(
+            image_pixels(&adjustments.apply(&image)),
+            image_pixels(&image)
+        );
+    }
 }

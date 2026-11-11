@@ -5,6 +5,7 @@ use crate::Drawable;
 use crate::Image;
 use crate::document::Format;
 use crate::engine::import::{PdfImportPageSpacing, PdfImportPrefs};
+use crate::image::{BackgroundRemoval, ImageAdjustments};
 use anyhow::anyhow;
 use hayro::{hayro_interpret, hayro_syntax, vello_cpu};
 use kurbo::Shape;
@@ -19,16 +20,27 @@ use rnote_compose::shapes::Shapeable;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename = "bitmapimage")]
 pub struct BitmapImage {
-    /// The bitmap image.
+    /// The original bitmap image.
     ///
     /// The bounds field of the image should not be used to determine the stroke bounds.
     /// Use rectangle.bounds() instead.
     #[serde(rename = "image")]
     pub image: Image,
+    /// Adjustments applied on top of the original image, kept per image.
+    #[serde(
+        rename = "adjustments",
+        default,
+        skip_serializing_if = "ImageAdjustments::is_default"
+    )]
+    pub adjustments: ImageAdjustments,
+    /// The adjusted image, derived from the original one and cached.
+    #[serde(skip)]
+    pub(crate) adjusted_image: OnceLock<Image>,
     #[serde(rename = "rectangle")]
     pub rectangle: Rectangle,
 }
@@ -37,6 +49,8 @@ impl Default for BitmapImage {
     fn default() -> Self {
         Self {
             image: Image::default(),
+            adjustments: ImageAdjustments::default(),
+            adjusted_image: OnceLock::new(),
             rectangle: Rectangle::default(),
         }
     }
@@ -48,16 +62,17 @@ impl Content for BitmapImage {
 
 impl Drawable for BitmapImage {
     fn draw(&self, cx: &mut impl piet::RenderContext, _image_scale: f64) -> anyhow::Result<()> {
-        let piet_image_format = piet::ImageFormat::from(self.image.memory_format);
+        let image = self.effective_image();
+        let piet_image_format = piet::ImageFormat::from(image.memory_format);
 
         cx.save().map_err(|e| anyhow::anyhow!("{e:?}"))?;
         cx.transform(self.rectangle.affine.to_kurbo());
 
         let piet_image = cx
             .make_image(
-                self.image.pixel_width as usize,
-                self.image.pixel_height as usize,
-                &self.image.data,
+                image.pixel_width as usize,
+                image.pixel_height as usize,
+                &image.data,
                 piet_image_format,
             )
             .map_err(|e| {
@@ -100,6 +115,27 @@ impl Transformable for BitmapImage {
 }
 
 impl BitmapImage {
+    /// The image with the adjustments applied.
+    pub fn effective_image(&self) -> &Image {
+        if self.adjustments.is_default() {
+            &self.image
+        } else {
+            self.adjusted_image
+                .get_or_init(|| self.adjustments.apply(&self.image))
+        }
+    }
+
+    /// Sets the adjustments, dropping the cached adjusted image.
+    pub fn set_adjustments(&mut self, adjustments: ImageAdjustments) {
+        self.adjustments = adjustments;
+        self.adjusted_image.take();
+    }
+
+    /// Detects the background options from the original image.
+    pub fn detect_background(&self) -> Option<BackgroundRemoval> {
+        self.image.detect_background()
+    }
+
     pub fn from_image_bytes(
         bytes: &[u8],
         pos: Vector2,
@@ -123,7 +159,11 @@ impl BitmapImage {
             affine: transform,
         };
 
-        Ok(Self { image, rectangle })
+        Ok(Self {
+            image,
+            rectangle,
+            ..Default::default()
+        })
     }
 
     pub fn from_pdf_bytes(

@@ -340,6 +340,103 @@ impl StrokeStore {
         widget_flags
     }
 
+    /// Toggle the color inversion of the given bitmap images.
+    ///
+    /// If all given images are already inverted, the inversion is turned off,
+    /// otherwise it is turned on. Other strokes are ignored.
+    pub(crate) fn toggle_bitmap_images_invert_colors(&mut self, keys: &[StrokeKey]) -> WidgetFlags {
+        let bitmap_keys = self.bitmap_image_keys(keys);
+        if bitmap_keys.is_empty() {
+            return WidgetFlags::default();
+        }
+
+        let turn_off = bitmap_keys.iter().all(|&key| {
+            matches!(
+                self.get_stroke_ref(key),
+                Some(Stroke::BitmapImage(bitmap_image)) if bitmap_image.adjustments.invert_colors
+            )
+        });
+        let invert_colors = !turn_off;
+
+        let mut changed_keys = Vec::new();
+        bitmap_keys.iter().for_each(|&key| {
+            if let Some(Stroke::BitmapImage(bitmap_image)) = self.get_stroke_mut(key) {
+                let mut adjustments = bitmap_image.adjustments;
+                if adjustments.invert_colors != invert_colors {
+                    adjustments.invert_colors = invert_colors;
+                    bitmap_image.set_adjustments(adjustments);
+                    changed_keys.push(key);
+                }
+            }
+        });
+
+        self.finish_bitmap_adjustments(&changed_keys)
+    }
+
+    /// Toggle making the background of the given bitmap images transparent.
+    ///
+    /// If all given images already have a transparent background, it is restored,
+    /// otherwise it is removed. Images whose background can not be detected are
+    /// left unchanged. Other strokes are ignored.
+    pub(crate) fn toggle_bitmap_images_background(&mut self, keys: &[StrokeKey]) -> WidgetFlags {
+        let bitmap_keys = self.bitmap_image_keys(keys);
+        if bitmap_keys.is_empty() {
+            return WidgetFlags::default();
+        }
+
+        let turn_off = bitmap_keys.iter().all(|&key| {
+            matches!(
+                self.get_stroke_ref(key),
+                Some(Stroke::BitmapImage(bitmap_image))
+                    if bitmap_image.adjustments.remove_background.is_some()
+            )
+        });
+
+        let mut changed_keys = Vec::new();
+        bitmap_keys.iter().for_each(|&key| {
+            if let Some(Stroke::BitmapImage(bitmap_image)) = self.get_stroke_mut(key) {
+                let mut adjustments = bitmap_image.adjustments;
+                if turn_off {
+                    if adjustments.remove_background.is_some() {
+                        adjustments.remove_background = None;
+                        bitmap_image.set_adjustments(adjustments);
+                        changed_keys.push(key);
+                    }
+                } else if adjustments.remove_background.is_none()
+                    && let Some(background_removal) = bitmap_image.detect_background()
+                {
+                    adjustments.remove_background = Some(background_removal);
+                    bitmap_image.set_adjustments(adjustments);
+                    changed_keys.push(key);
+                }
+            }
+        });
+
+        self.finish_bitmap_adjustments(&changed_keys)
+    }
+
+    fn bitmap_image_keys(&self, keys: &[StrokeKey]) -> Vec<StrokeKey> {
+        keys.iter()
+            .copied()
+            .filter(|&key| matches!(self.get_stroke_ref(key), Some(Stroke::BitmapImage(_))))
+            .collect()
+    }
+
+    fn finish_bitmap_adjustments(&mut self, changed_keys: &[StrokeKey]) -> WidgetFlags {
+        let mut widget_flags = WidgetFlags::default();
+
+        if changed_keys.is_empty() {
+            return widget_flags;
+        }
+
+        self.set_rendering_dirty_for_strokes(changed_keys);
+
+        widget_flags.redraw = true;
+        widget_flags.store_modified = true;
+
+        widget_flags
+    }
+
     /// Change the fill color of the given keys.
     ///
     /// The strokes then need to update their rendering.
@@ -598,7 +695,11 @@ impl StrokeStore {
                 let stroke = self.stroke_components.get(key)?;
 
                 // A stroke that only reaches into the selection by a part of it is selected too.
-                if stroke.hitboxes().iter().any(|hitbox| aabb.intersects(hitbox)) {
+                if stroke
+                    .hitboxes()
+                    .iter()
+                    .any(|hitbox| aabb.intersects(hitbox))
+                {
                     return Some(key);
                 }
 
@@ -766,10 +867,12 @@ impl StrokeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image::ImageMemoryFormat;
     use crate::strokes::BrushStroke;
     use rnote_compose::PenPath;
-    use rnote_compose::ext::AabbExt;
     use rnote_compose::Style;
+    use rnote_compose::ext::AabbExt;
+    use rnote_compose::shapes::Rectangle;
     use rnote_compose::style::smooth::SmoothOptions;
 
     /// Insert a horizontal stroke at the given height, reaching from `x_start` to `x_end`.
@@ -797,10 +900,7 @@ mod tests {
     }
 
     fn viewport() -> Aabb {
-        Aabb::new(
-            Vector2::new(-1000.0, -1000.0),
-            Vector2::new(1000.0, 1000.0),
-        )
+        Aabb::new(Vector2::new(-1000.0, -1000.0), Vector2::new(1000.0, 1000.0))
     }
 
     #[test]
@@ -816,8 +916,7 @@ mod tests {
                 .into_iter()
                 .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5)),
         );
-        let selection =
-            Aabb::new_positive(Vector2::new(150.0, 100.0), Vector2::new(250.0, 300.0));
+        let selection = Aabb::new_positive(Vector2::new(150.0, 100.0), Vector2::new(250.0, 300.0));
 
         let selected = store.strokes_hitboxes_intersecting_aabb(selection, viewport());
 
@@ -838,13 +937,120 @@ mod tests {
             [250.0, 300.0],
             [150.0, 300.0],
         ]
-            .into_iter()
-            .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5))
-            .collect::<Vec<Element>>();
+        .into_iter()
+        .map(|[x, y]| Element::new(Vector2::new(x, y), 0.5))
+        .collect::<Vec<Element>>();
 
         let selected = store.strokes_hitboxes_intersecting_path_polygon(&path, viewport());
 
         assert_eq!(selected, vec![fully_inside, crossing]);
         assert!(!selected.contains(&outside));
+    }
+
+    fn bitmap_image(pixels: &[[u8; 4]], width: u32) -> crate::strokes::BitmapImage {
+        let height = pixels.len() as u32 / width;
+        let data = pixels.iter().flatten().copied().collect::<Vec<u8>>();
+        let bounds = Aabb::new(Vector2::ZERO, Vector2::new(width as f64, height as f64));
+
+        crate::strokes::BitmapImage {
+            image: crate::Image {
+                data: glib::Bytes::from_owned(data),
+                rectangle: Rectangle::from_p2d_aabb(bounds),
+                pixel_width: width,
+                pixel_height: height,
+                memory_format: crate::image::ImageMemoryFormat::R8g8b8a8Premultiplied,
+            },
+            rectangle: Rectangle::from_p2d_aabb(bounds),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bitmap_image_adjustments_toggle_per_image() {
+        let mut store = StrokeStore::default();
+        let white_red_border = bitmap_image(
+            &[
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+                [255, 0, 0, 255],
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+                [255, 255, 255, 255],
+            ],
+            3,
+        );
+        let key = store.insert_stroke(Stroke::BitmapImage(white_red_border), None);
+        store.update_geometry_for_stroke(key);
+
+        // Inverting on.
+        let flags = store.toggle_bitmap_images_invert_colors(&[key]);
+        assert!(flags.store_modified);
+        let Some(Stroke::BitmapImage(image)) = store.get_stroke_ref(key) else {
+            panic!("expected a bitmap image");
+        };
+        assert!(image.adjustments.invert_colors);
+        let data = image.effective_image().data.as_ref();
+        assert_eq!(&data[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&data[16..20], &[0, 255, 255, 255]);
+
+        // Inverting off again restores the original pixels.
+        let flags = store.toggle_bitmap_images_invert_colors(&[key]);
+        assert!(flags.store_modified);
+        let Some(Stroke::BitmapImage(image)) = store.get_stroke_ref(key) else {
+            panic!("expected a bitmap image");
+        };
+        assert!(!image.adjustments.invert_colors);
+        let data = image.effective_image().data.as_ref();
+        assert_eq!(&data[0..4], &[255, 255, 255, 255]);
+        assert_eq!(&data[16..20], &[255, 0, 0, 255]);
+
+        // Removing the detected background.
+        let flags = store.toggle_bitmap_images_background(&[key]);
+        assert!(flags.store_modified);
+        let Some(Stroke::BitmapImage(image)) = store.get_stroke_ref(key) else {
+            panic!("expected a bitmap image");
+        };
+        assert!(image.adjustments.remove_background.is_some());
+        let data = image.effective_image().data.as_ref();
+        assert_eq!(&data[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&data[16..20], &[255, 0, 0, 255]);
+
+        // Restoring the background.
+        let flags = store.toggle_bitmap_images_background(&[key]);
+        assert!(flags.store_modified);
+        let Some(Stroke::BitmapImage(image)) = store.get_stroke_ref(key) else {
+            panic!("expected a bitmap image");
+        };
+        assert!(image.adjustments.remove_background.is_none());
+        assert_eq!(
+            &image.effective_image().data.as_ref()[0..4],
+            &[255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn bitmap_image_adjustments_ignore_other_strokes() {
+        let mut store = StrokeStore::default();
+        let line = insert_line(&mut store, 0.0, 0.0, 100.0);
+        let image = bitmap_image(&[[255, 255, 255, 255]], 1);
+        let image_key = store.insert_stroke(Stroke::BitmapImage(image), None);
+        store.update_geometry_for_stroke(image_key);
+
+        let flags = store.toggle_bitmap_images_invert_colors(&[line]);
+        assert!(!flags.store_modified);
+        assert!(!flags.redraw);
+
+        let flags = store.toggle_bitmap_images_invert_colors(&[line, image_key]);
+        assert!(flags.store_modified);
+        let Some(Stroke::BitmapImage(image)) = store.get_stroke_ref(image_key) else {
+            panic!("expected a bitmap image");
+        };
+        assert!(image.adjustments.invert_colors);
+        let Some(Stroke::BrushStroke(_)) = store.get_stroke_ref(line) else {
+            panic!("expected the line to stay a brush stroke");
+        };
     }
 }

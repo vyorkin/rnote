@@ -96,6 +96,26 @@
           </object>
         </child>
         <child>
+          <object class="GtkButton" id="selection_image_invert_colors_button">
+            <property name="tooltip_text" translatable="yes">Invert Colors of the Selected Images</property>
+            <property name="action-name">win.selection-image-invert-colors</property>
+            <property name="icon-name">selection-image-invert-colors-symbolic</property>
+            <style>
+              <class name="flat" />
+            </style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="selection_image_remove_background_button">
+            <property name="tooltip_text" translatable="yes">Make the Background of the Selected Images Transparent</property>
+            <property name="action-name">win.selection-image-remove-background</property>
+            <property name="icon-name">selection-image-remove-background-symbolic</property>
+            <style>
+              <class name="flat" />
+            </style>
+          </object>
+        </child>
+        <child>
           <object class="GtkButton" id="selection_duplicate_button">
             <property name="tooltip_text" translatable="yes">Duplicate Selection</property>
             <property name="action-name">win.selection-duplicate</property>

@@ -91,6 +91,12 @@ impl RnAppWindow {
         self.add_action(&action_selection_duplicate);
         let action_selection_invert_color = gio::SimpleAction::new("selection-invert-color", None);
         self.add_action(&action_selection_invert_color);
+        let action_selection_image_invert_colors =
+            gio::SimpleAction::new("selection-image-invert-colors", None);
+        self.add_action(&action_selection_image_invert_colors);
+        let action_selection_image_remove_background =
+            gio::SimpleAction::new("selection-image-remove-background", None);
+        self.add_action(&action_selection_image_remove_background);
         let action_selection_select_all = gio::SimpleAction::new("selection-select-all", None);
         self.add_action(&action_selection_select_all);
         let action_selection_deselect_all = gio::SimpleAction::new("selection-deselect-all", None);
@@ -384,10 +390,11 @@ impl RnAppWindow {
                 // even when it names the pen already in hand, hence it runs before the style
                 // comparison below.
                 if canvas.engine_ref().penholder.is_handling_text_input() {
-                    let (_, widget_flags) =
-                        canvas
-                            .engine_mut()
-                            .handle_pen_event(PenEvent::Cancel, None, Instant::now());
+                    let (_, widget_flags) = canvas.engine_mut().handle_pen_event(
+                        PenEvent::Cancel,
+                        None,
+                        Instant::now(),
+                    );
                     appwindow.handle_widget_flags(widget_flags, &canvas);
                 }
                 // don't change the style if the current style with override is already the same
@@ -554,6 +561,32 @@ impl RnAppWindow {
                     return;
                 };
                 let widget_flags = canvas.engine_mut().invert_selection_colors();
+                appwindow.handle_widget_flags(widget_flags, &canvas);
+            }
+        ));
+
+        // invert colors of the selected bitmap images
+        action_selection_image_invert_colors.connect_activate(clone!(
+            #[weak(rename_to=appwindow)]
+            self,
+            move |_, _| {
+                let Some(canvas) = appwindow.active_tab_canvas() else {
+                    return;
+                };
+                let widget_flags = canvas.engine_mut().toggle_selection_image_invert_colors();
+                appwindow.handle_widget_flags(widget_flags, &canvas);
+            }
+        ));
+
+        // make the background of the selected bitmap images transparent
+        action_selection_image_remove_background.connect_activate(clone!(
+            #[weak(rename_to=appwindow)]
+            self,
+            move |_, _| {
+                let Some(canvas) = appwindow.active_tab_canvas() else {
+                    return;
+                };
+                let widget_flags = canvas.engine_mut().toggle_selection_image_background();
                 appwindow.handle_widget_flags(widget_flags, &canvas);
             }
         ));
@@ -1090,11 +1123,19 @@ impl RnAppWindow {
         ));
 
         // Clipboard copy
-        action_clipboard_copy.connect_activate(clone!(#[weak(rename_to=appwindow)] self, move |_, _| {
-            glib::spawn_future_local(clone!(#[weak] appwindow, async move {
-                appwindow.copy_clipboard_content().await;
-            }));
-        }));
+        action_clipboard_copy.connect_activate(clone!(
+            #[weak(rename_to=appwindow)]
+            self,
+            move |_, _| {
+                glib::spawn_future_local(clone!(
+                    #[weak]
+                    appwindow,
+                    async move {
+                        appwindow.copy_clipboard_content().await;
+                    }
+                ));
+            }
+        ));
 
         // Clipboard cut
         action_clipboard_cut.connect_activate(clone!(#[weak(rename_to=appwindow)] self, move |_, _| {
@@ -1279,7 +1320,9 @@ impl RnAppWindow {
                 return;
             }
             Err(e) => {
-                error!("Awaiting fetched clipboard content failed in clipboard-copy action, Err: {e:?}");
+                error!(
+                    "Awaiting fetched clipboard content failed in clipboard-copy action, Err: {e:?}"
+                );
                 return;
             }
         };

@@ -558,8 +558,7 @@ impl Engine {
 
     /// Drop the held-key pen style immediately, even in the middle of a stroke.
     pub fn reset_pen_style_hold(&mut self) -> WidgetFlags {
-        self.penholder
-            .reset_hold_style(&mut engine_view_mut!(self))
+        self.penholder.reset_hold_style(&mut engine_view_mut!(self))
     }
 
     /// Clear every temporary pen style and switch to `pen_style` in one step.
@@ -874,6 +873,22 @@ impl Engine {
     pub fn invert_selection_colors(&mut self) -> WidgetFlags {
         self.store
             .invert_color_brightness(&self.store.selection_keys_as_rendered())
+            | self.record(Instant::now())
+            | self.update_content_rendering_current_viewport()
+    }
+
+    /// Toggle the color inversion of the selected bitmap images.
+    pub fn toggle_selection_image_invert_colors(&mut self) -> WidgetFlags {
+        self.store
+            .toggle_bitmap_images_invert_colors(&self.store.selection_keys_as_rendered())
+            | self.record(Instant::now())
+            | self.update_content_rendering_current_viewport()
+    }
+
+    /// Toggle making the background of the selected bitmap images transparent.
+    pub fn toggle_selection_image_background(&mut self) -> WidgetFlags {
+        self.store
+            .toggle_bitmap_images_background(&self.store.selection_keys_as_rendered())
             | self.record(Instant::now())
             | self.update_content_rendering_current_viewport()
     }
