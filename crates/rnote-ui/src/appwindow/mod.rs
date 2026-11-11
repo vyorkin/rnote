@@ -840,7 +840,7 @@ impl RnAppWindow {
         Ok(file_imported)
     }
 
-    /// Cycles the line style of the active pen, solid → dotted → dashed → solid, or the reverse
+    /// Cycles the line style of the active pen, solid → dashed → dotted → solid, or the reverse
     /// when `backwards` is set.
     ///
     /// Pens whose current style has no line at all (the textured brush, a rough shape, a
@@ -1222,12 +1222,12 @@ fn focus_is_text_editable(focus: Option<Widget>) -> bool {
 /// is set.
 fn next_line_style(line_style: LineStyle, backwards: bool) -> LineStyle {
     match (line_style, backwards) {
-        (LineStyle::Solid, false) => LineStyle::Dotted,
-        (LineStyle::Dotted, false) => LineStyle::Dashed,
-        (LineStyle::Dashed, false) => LineStyle::Solid,
-        (LineStyle::Solid, true) => LineStyle::Dashed,
-        (LineStyle::Dotted, true) => LineStyle::Solid,
-        (LineStyle::Dashed, true) => LineStyle::Dotted,
+        (LineStyle::Solid, false) => LineStyle::Dashed,
+        (LineStyle::Dashed, false) => LineStyle::Dotted,
+        (LineStyle::Dotted, false) => LineStyle::Solid,
+        (LineStyle::Solid, true) => LineStyle::Dotted,
+        (LineStyle::Dashed, true) => LineStyle::Solid,
+        (LineStyle::Dotted, true) => LineStyle::Dashed,
     }
 }
 
@@ -1237,12 +1237,12 @@ mod tests {
 
     #[test]
     fn line_style_cycle_wraps_both_ways() {
-        assert_eq!(next_line_style(LineStyle::Solid, false), LineStyle::Dotted);
-        assert_eq!(next_line_style(LineStyle::Dotted, false), LineStyle::Dashed);
-        assert_eq!(next_line_style(LineStyle::Dashed, false), LineStyle::Solid);
+        assert_eq!(next_line_style(LineStyle::Solid, false), LineStyle::Dashed);
+        assert_eq!(next_line_style(LineStyle::Dashed, false), LineStyle::Dotted);
+        assert_eq!(next_line_style(LineStyle::Dotted, false), LineStyle::Solid);
 
-        assert_eq!(next_line_style(LineStyle::Solid, true), LineStyle::Dashed);
-        assert_eq!(next_line_style(LineStyle::Dotted, true), LineStyle::Solid);
-        assert_eq!(next_line_style(LineStyle::Dashed, true), LineStyle::Dotted);
+        assert_eq!(next_line_style(LineStyle::Solid, true), LineStyle::Dotted);
+        assert_eq!(next_line_style(LineStyle::Dashed, true), LineStyle::Solid);
+        assert_eq!(next_line_style(LineStyle::Dotted, true), LineStyle::Dashed);
     }
 }
