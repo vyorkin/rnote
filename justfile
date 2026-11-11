@@ -246,7 +246,7 @@ build-slopnote:
         --repo={{ flatpak_repo_folder }} \
         --force-clean \
         {{ slopnote_flatpak_app_folder }} \
-        build-aux/ch.andrinwinzap.Slopnote.yaml
+        build-aux/io.github.vyorkin.Slopnote.yaml
 
 # Slopnote: install (or update) the built flatpak for the current user.
 install-slopnote:
@@ -255,4 +255,4 @@ install-slopnote:
         --install \
         --force-clean \
         {{ slopnote_flatpak_app_folder }} \
-        build-aux/ch.andrinwinzap.Slopnote.yaml
+        build-aux/io.github.vyorkin.Slopnote.yaml

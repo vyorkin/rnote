@@ -1,6 +1,6 @@
 ---
 
-id: ch.andrinwinzap.Slopnote
+id: io.github.vyorkin.Slopnote
 runtime: org.gnome.Platform
 runtime-version: "50"
 sdk: org.gnome.Sdk

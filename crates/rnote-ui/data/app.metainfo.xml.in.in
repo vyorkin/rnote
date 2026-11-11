@@ -83,7 +83,7 @@
   <url type="donation">@APP_DONATE_URL@</url>
   <url type="vcs-browser">@APP_REPO_URL@</url>
   <developer_name translatable="no">@APP_AUTHOR_NAME@</developer_name>
-  <update_contact>mail@andrinwinzap.ch</update_contact>
+  <update_contact>vasiliy.yorkin@gmail.com</update_contact>
   <content_rating type="oars-1.0" />
 
   <provides>

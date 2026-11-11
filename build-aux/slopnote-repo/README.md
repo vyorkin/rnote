@@ -9,7 +9,7 @@ Once it has run, the app is installed with:
 
 ```sh
 flatpak remote-add --if-not-exists slopnote https://slopnote.andrinwinzap.ch/slopnote.flatpakrepo
-flatpak install slopnote ch.andrinwinzap.Slopnote
+flatpak install slopnote io.github.vyorkin.Slopnote
 ```
 
 ## How a publish goes

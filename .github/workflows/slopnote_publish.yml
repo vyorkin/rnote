@@ -18,7 +18,7 @@ concurrency:
     cancel-in-progress: false
 
 env:
-    MANIFEST: build-aux/ch.andrinwinzap.Slopnote.yaml
+    MANIFEST: build-aux/io.github.vyorkin.Slopnote.yaml
     RUNTIME_VERSION: "50"
     RUST_EXTENSION_VERSION: "25.08"
 
@@ -73,9 +73,9 @@ jobs:
               uses: actions/cache@v4
               with:
                   path: .flatpak-builder
-                  key: flatpak-builder-${{ hashFiles('build-aux/ch.andrinwinzap.Slopnote.yaml') }}-${{ github.sha }}
+                  key: flatpak-builder-${{ hashFiles('build-aux/io.github.vyorkin.Slopnote.yaml') }}-${{ github.sha }}
                   restore-keys: |
-                      flatpak-builder-${{ hashFiles('build-aux/ch.andrinwinzap.Slopnote.yaml') }}-
+                      flatpak-builder-${{ hashFiles('build-aux/io.github.vyorkin.Slopnote.yaml') }}-
                       flatpak-builder-
 
             - name: Import the signing key
@@ -110,9 +110,9 @@ jobs:
                   [Flatpak Repo]
                   Title=Slopnote
                   Url=${{ vars.SLOPNOTE_REPO_URL }}/repo
-                  Homepage=https://github.com/andrinwinzap/slopnote
-                  Comment=Andrin's own build of Rnote
-                  Description=Rnote with the features from Andrin's fork
+                  Homepage=https://github.com/vyorkin/rnote
+                  Comment=Slopnote, a personal fork of Rnote
+                  Description=Rnote with extra gesture, pen and toolbar features
                   GPGKey=$(cat key.base64)
                   EOF
                   rm key.base64
@@ -174,6 +174,6 @@ jobs:
                       echo
                       echo '```'
                       echo "flatpak remote-add --if-not-exists slopnote ${REPO_URL}/slopnote.flatpakrepo"
-                      echo "flatpak install slopnote ch.andrinwinzap.Slopnote"
+                      echo "flatpak install slopnote io.github.vyorkin.Slopnote"
                       echo '```'
                   } >> "$GITHUB_STEP_SUMMARY"

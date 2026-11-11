@@ -23,13 +23,13 @@ win_installer_name = get_option('win-installer-name')
 app_name = 'rnote'
 app_name_capitalized = 'Slopnote'
 cli_name = 'rnote-cli'
-base_id = 'ch.andrinwinzap.Slopnote'
-app_website = 'https://github.com/andrinwinzap/slopnote'
-app_repo_url = 'https://github.com/andrinwinzap/slopnote'
-app_issues_url = 'https://github.com/andrinwinzap/slopnote/issues'
-app_support_url = 'https://github.com/andrinwinzap/slopnote/discussions'
+base_id = 'io.github.vyorkin.Slopnote'
+app_website = 'https://github.com/vyorkin/rnote'
+app_repo_url = 'https://github.com/vyorkin/rnote'
+app_issues_url = 'https://github.com/vyorkin/rnote/issues'
+app_support_url = 'https://github.com/vyorkin/rnote/issues'
 app_donate_url = 'https://rnote.flxzt.net/#support'
-app_author_name = 'Andrin Winzap'
+app_author_name = 'Vasiliy Yorkin'
 app_authors = run_command(
     'cat',
     meson.project_source_root() / 'AUTHORS',

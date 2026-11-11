@@ -40,7 +40,18 @@ It is built from this repository on every push to `main`, and published as a fla
 
 ```sh
 flatpak remote-add --if-not-exists slopnote https://slopnote.andrinwinzap.ch/slopnote.flatpakrepo
-flatpak install slopnote ch.andrinwinzap.Slopnote
+flatpak install slopnote io.github.vyorkin.Slopnote
+```
+
+The app id used to be `ch.andrinwinzap.Slopnote`, so flatpak treats the new build as a separate app.
+To carry an existing install over once, settings included (do the `mv` before the new app is
+started for the first time):
+
+```sh
+flatpak install slopnote io.github.vyorkin.Slopnote
+dconf dump /ch/andrinwinzap/Slopnote/ | dconf load /io/github/vyorkin/Slopnote/
+mv ~/.var/app/ch.andrinwinzap.Slopnote ~/.var/app/io.github.vyorkin.Slopnote
+flatpak uninstall ch.andrinwinzap.Slopnote
 ```
 
 Rnote is licensed under the GPL-3.0, and so is this fork.
