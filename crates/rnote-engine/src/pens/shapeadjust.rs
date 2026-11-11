@@ -56,7 +56,8 @@ enum AdjustKind {
     /// The end of a straight-bodied bracket the pen rested at follows it, its other end stays
     /// fixed.
     ///
-    /// A rounded bracket and a square one are both such a body; only the corners differ.
+    /// An elliptical bracket, a rounded one and a square one are all such a body: one depth away
+    /// from its chord; only the ends differ.
     BracketBodyEnd(BracketBodyEnd),
     /// The end of the curly brace the pen rested at follows it, its other end stays fixed.
     BraceEnd(BraceEnd),
@@ -76,6 +77,13 @@ impl ShapeAdjust {
         let kind = match (&recognized, bracket) {
             (Shape::CubicBezier(cubic), Some(BracketKind::Parenthesis(ParenthesisStyle::Arc))) => {
                 AdjustKind::BracketEnd(BracketEnd::new(cubic, start_pos))
+            }
+            (Shape::Curve(curve), Some(BracketKind::Parenthesis(ParenthesisStyle::Elliptical))) => {
+                AdjustKind::BracketBodyEnd(BracketBodyEnd::new(
+                    curve,
+                    start_pos,
+                    BracketBody::Elliptical,
+                ))
             }
             (Shape::Curve(curve), Some(BracketKind::Parenthesis(ParenthesisStyle::Rounded))) => {
                 AdjustKind::BracketBodyEnd(BracketBodyEnd::new(
@@ -297,17 +305,20 @@ impl BracketEnd {
 /// How the body of a straight-bodied bracket is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BracketBody {
+    /// A body with no corner at all: one smooth bow, deepest in the middle.
+    Elliptical,
     /// A body rounded into short tips at its ends.
     Rounded,
     /// A body with a sharp corner at each end.
     Square,
 }
 
-/// The end of a straight-bodied bracket that follows the pen, while the bracket keeps its shape.
+/// The end of a slim bracket that follows the pen, while the bracket keeps its shape.
 ///
-/// The other end stays where it is. The bracket keeps the share of its height its body is offset
-/// by — the corner radius of a rounded bracket, the arm of a square one — so it stays as round or
-/// as sharp as it was recognized when it is dragged, and it keeps opening to the side it did.
+/// The other end stays where it is. The bracket keeps the share of its height its deepest point is
+/// offset by — the depth of an elliptical bracket, the corner radius of a rounded one, the arm of a
+/// square one — so it stays as slim, as round or as sharp as it was recognized when it is dragged,
+/// and it keeps opening to the side it did.
 #[derive(Debug, Clone)]
 struct BracketBodyEnd {
     /// The end that stays where it is.
@@ -316,8 +327,8 @@ struct BracketBodyEnd {
     dragged_end: Vector2,
     /// Whether the dragged end is the `end` of the curve rather than its `start`.
     dragged_is_end: bool,
-    /// The offset of the body from the chord, relative to the height: the corner radius of a
-    /// rounded bracket, the arm of a square one.
+    /// The offset of the deepest point from the chord, relative to the height: the depth of an
+    /// elliptical bracket, the corner radius of a rounded one, the arm of a square one.
     depth_ratio: f64,
     /// The side of the chord the body runs on, as a unit vector.
     outward: Vector2,
@@ -332,7 +343,7 @@ impl BracketBodyEnd {
             .first()
             .map_or(Vector2::ZERO, |cubic| cubic.start);
         let end = curve.cubics.last().map_or(Vector2::ZERO, |cubic| cubic.end);
-        // The first segment ends where the straight body begins, its offset from the chord.
+        // The first segment ends at the deepest point of the bracket, its offset from the chord.
         let corner_end = curve.cubics.first().map_or(start, |cubic| cubic.end);
 
         let chord_vec = end - start;
@@ -379,6 +390,9 @@ impl BracketBodyEnd {
         let depth = self.depth_ratio * height;
 
         match self.body {
+            BracketBody::Elliptical => {
+                Curve::new_elliptical_bracket(start, end, depth, self.outward)
+            }
             BracketBody::Rounded => Curve::new_rounded_bracket(start, end, depth, self.outward),
             BracketBody::Square => Curve::new_square_bracket(start, end, depth, self.outward),
         }
@@ -734,6 +748,57 @@ mod tests {
         {
             assert!((point.x - 60.0).abs() < 0.5, "body at {point:?}");
         }
+
+        // The end dragged the other way keeps the bracket on its side of the tips.
+        let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(100.0, 100.0)) else {
+            panic!("expected a curve");
+        };
+        let deepest = adjusted
+            .sampled(64)
+            .iter()
+            .fold(f64::MAX, |x, point| x.min(point.x));
+        assert!(deepest < 100.0, "the bracket lost its side");
+    }
+
+    #[test]
+    fn elliptical_bracket_end_follows_pen_and_keeps_the_shape() {
+        // An elliptical bracket from (100, 100) to (100, 200), its bow 20 to the left: the depth
+        // takes a fifth of the height.
+        let bracket = Curve::new_elliptical_bracket(
+            Vector2::new(100.0, 100.0),
+            Vector2::new(100.0, 200.0),
+            20.0,
+            Vector2::new(-1.0, 0.0),
+        )
+        .expect("a bracket");
+        // The pen rests at the lower end.
+        let adjust = ShapeAdjust::new(
+            Shape::Curve(bracket),
+            Vector2::new(100.0, 200.0),
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Elliptical)),
+        );
+
+        // Stretching the lower end down keeps the upper end, and the depth keeps its share of the
+        // height: 20 of 100 is a fifth, so 40 of 200. The bow stays smooth and deepest in the
+        // middle.
+        let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(100.0, 300.0)) else {
+            panic!("expected a curve");
+        };
+        assert_eq!(
+            adjusted.cubics.first().unwrap().start,
+            Vector2::new(100.0, 100.0)
+        );
+        assert_eq!(
+            adjusted.cubics.last().unwrap().end,
+            Vector2::new(100.0, 300.0)
+        );
+        let sampled = adjusted.sampled(128);
+        let apex = sampled
+            .iter()
+            .min_by(|a, b| a.x.total_cmp(&b.x))
+            .expect("sampled points");
+        assert!((apex.x - 60.0).abs() < 0.5, "apex at {apex:?}");
+        assert!((apex.y - 200.0).abs() < 1.0, "apex at {apex:?}");
 
         // The end dragged the other way keeps the bracket on its side of the tips.
         let Shape::Curve(adjusted) = adjust.adjusted(Vector2::new(100.0, 100.0)) else {

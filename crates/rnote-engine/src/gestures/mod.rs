@@ -37,7 +37,8 @@ pub struct GestureConfig {
     /// How a held stroke that is a curly brace is drawn.
     #[serde(rename = "brace_style")]
     pub brace_style: BraceStyle,
-    /// The corner radius of a rounded parenthesis, relative to its height.
+    /// The corner radius of a rounded parenthesis, and the depth of an elliptical one, relative to
+    /// its height.
     #[serde(rename = "bracket_corner_radius_ratio")]
     pub bracket_corner_radius_ratio: f64,
     /// Whether a closed loop around ink selects it and switches to the selector.

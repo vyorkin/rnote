@@ -658,11 +658,12 @@ gets disabled.</property>
                     <child>
                       <object class="AdwComboRow" id="gestures_bracket_style_row">
                         <property name="title" translatable="yes">Round Bracket Shape</property>
-                        <property name="tooltip-text" translatable="yes">An arc bulges as deeply as it was drawn, a rounded parenthesis keeps a straight body with rounded corners, a square bracket has a straight body with a right angle at each end. A stroke drawn with a sharp corner at each end is a square bracket whatever is chosen here</property>
+                        <property name="tooltip-text" translatable="yes">An arc bulges as deeply as it was drawn, an elliptical parenthesis is one smooth bow of a set depth, a rounded parenthesis keeps a straight body with rounded corners, a square bracket has a straight body with a right angle at each end. A stroke drawn with a sharp corner at each end is a square bracket whatever is chosen here</property>
                         <property name="model">
                           <object class="GtkStringList">
                             <items>
                               <item translatable="yes">Arc</item>
+                              <item translatable="yes">Elliptical</item>
                               <item translatable="yes">Rounded corners</item>
                               <item translatable="yes">Square corners</item>
                             </items>
@@ -687,8 +688,8 @@ gets disabled.</property>
                     </child>
                     <child>
                       <object class="AdwSpinRow" id="gestures_bracket_corner_radius_row">
-                        <property name="title" translatable="yes">Bracket Corner Radius (%)</property>
-                        <property name="tooltip-text" translatable="yes">How much of its height a rounded parenthesis spends on its corners. A larger radius makes the parenthesis rounder, a smaller one makes it straighter</property>
+                        <property name="title" translatable="yes">Bracket Depth (%)</property>
+                        <property name="tooltip-text" translatable="yes">How deep a slim parenthesis stands from the vertical of its tips, as a share of its height: the corners of a rounded parenthesis and the bow of an elliptical one. A larger share makes the parenthesis rounder, a smaller one makes it straighter</property>
                         <property name="numeric">true</property>
                         <property name="digits">0</property>
                         <property name="adjustment">

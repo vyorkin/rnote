@@ -37,10 +37,12 @@ use std::cell::RefCell;
 
 /// The item of the round bracket shape row that makes an arc parenthesis.
 const PARENTHESIS_STYLE_ARC_INDEX: u32 = 0;
+/// The item of the round bracket shape row that makes an elliptical parenthesis.
+const PARENTHESIS_STYLE_ELLIPTICAL_INDEX: u32 = 1;
 /// The item of the round bracket shape row that makes a parenthesis with rounded corners.
-const PARENTHESIS_STYLE_ROUNDED_INDEX: u32 = 1;
+const PARENTHESIS_STYLE_ROUNDED_INDEX: u32 = 2;
 /// The item of the round bracket shape row that makes a square bracket.
-const PARENTHESIS_STYLE_SQUARE_INDEX: u32 = 2;
+const PARENTHESIS_STYLE_SQUARE_INDEX: u32 = 3;
 /// The item of the curly brace shape row that makes the curly brace of type.
 const BRACE_STYLE_CURLY_INDEX: u32 = 0;
 /// The item of the curly brace shape row that makes a curly brace with rounded corners.
@@ -1759,6 +1761,7 @@ impl RnSettingsPanel {
                     appwindow.engine_config().write().gestures.bracket_style = match row.selected()
                     {
                         PARENTHESIS_STYLE_ARC_INDEX => ParenthesisStyle::Arc,
+                        PARENTHESIS_STYLE_ELLIPTICAL_INDEX => ParenthesisStyle::Elliptical,
                         PARENTHESIS_STYLE_SQUARE_INDEX => ParenthesisStyle::Square,
                         _ => ParenthesisStyle::Rounded,
                     };
@@ -1823,12 +1826,16 @@ impl RnSettingsPanel {
     }
 
     /// The corner radius is only one of the representations a parenthesis can be drawn in: it
-    /// follows whether shapes are recognized at all, and whether a parenthesis has rounded corners.
+    /// follows whether shapes are recognized at all, and whether a parenthesis is drawn as a slim
+    /// one — an elliptical or a rounded one.
     fn refresh_bracket_corner_radius_sensitivity(&self, appwindow: &RnAppWindow) {
         let gestures = appwindow.engine_config().read().gestures.clone();
         self.imp().gestures_bracket_corner_radius_row.set_sensitive(
             gestures.shape_recognition_enabled
-                && gestures.bracket_style == ParenthesisStyle::Rounded,
+                && matches!(
+                    gestures.bracket_style,
+                    ParenthesisStyle::Elliptical | ParenthesisStyle::Rounded
+                ),
         );
     }
 
@@ -1870,6 +1877,7 @@ impl RnSettingsPanel {
         imp.gestures_bracket_style_row
             .set_selected(match gestures.bracket_style {
                 ParenthesisStyle::Arc => PARENTHESIS_STYLE_ARC_INDEX,
+                ParenthesisStyle::Elliptical => PARENTHESIS_STYLE_ELLIPTICAL_INDEX,
                 ParenthesisStyle::Rounded => PARENTHESIS_STYLE_ROUNDED_INDEX,
                 ParenthesisStyle::Square => PARENTHESIS_STYLE_SQUARE_INDEX,
             });

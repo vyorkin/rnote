@@ -282,6 +282,59 @@ impl Curve {
         Some(Self { cubics })
     }
 
+    /// An elliptical bracket from `start` to `end`: one smooth bow, deepest in the middle.
+    ///
+    /// The bracket is half of the ellipse whose chord is the diameter between the ends and whose
+    /// middle stands `depth` away from the chord on the side `outward` points to. It has no
+    /// straight body and no corner: the curvature is largest at the ends, where the tips turn out
+    /// of the chord, and smallest in the middle. The tips stay where the ends are, so the bracket
+    /// is as deep as `depth`.
+    ///
+    /// Each half is a quarter of the ellipse, traced by one cubic. The depth is at most half the
+    /// chord. `None` when the ends coincide or the depth vanishes.
+    pub fn new_elliptical_bracket(
+        start: Vector2,
+        end: Vector2,
+        depth: f64,
+        outward: Vector2,
+    ) -> Option<Self> {
+        let chord_vec = end - start;
+        let chord = chord_vec.length();
+        if chord < f64::EPSILON || depth <= f64::EPSILON {
+            return None;
+        }
+
+        let direction = chord_vec / chord;
+        let mut normal = Vector2::new(-direction.y, direction.x);
+        if normal.dot(outward) < 0.0 {
+            normal = -normal;
+        }
+
+        let depth = depth.min(chord * 0.5);
+        let apex = (start + end) * 0.5 + normal * depth;
+        // The handles of a cubic that traces a quarter of an ellipse: one along the chord and one
+        // across it, each the quarter-arc share of the semi-axis it belongs to.
+        let along = QUARTER_ARC_HANDLE * chord * 0.5;
+        let across = QUARTER_ARC_HANDLE * depth;
+
+        Some(Self {
+            cubics: vec![
+                CubicBezier {
+                    start,
+                    cp1: start + normal * across,
+                    cp2: apex - direction * along,
+                    end: apex,
+                },
+                CubicBezier {
+                    start: apex,
+                    cp1: apex + direction * along,
+                    cp2: end + normal * across,
+                    end,
+                },
+            ],
+        })
+    }
+
     /// A square bracket from `start` to `end`: a straight body with a sharp corner at each end.
     ///
     /// The body runs parallel to the chord between the ends, `depth` away from it on the side
@@ -612,6 +665,47 @@ mod tests {
                 "the corner turns {turn} rad"
             );
         }
+    }
+
+    #[test]
+    fn elliptical_bracket_is_a_smooth_half_ellipse() {
+        let start = Vector2::new(100.0, 100.0);
+        let end = Vector2::new(100.0, 400.0);
+        let depth = 36.0;
+        let bracket = Curve::new_elliptical_bracket(start, end, depth, Vector2::new(-1.0, 0.0))
+            .expect("an elliptical bracket");
+
+        // Two quarters of the ellipse, and no straight segment anywhere.
+        assert_eq!(bracket.cubics.len(), 2);
+        let sampled = bracket.sampled(128);
+        assert!((sampled[0] - start).length() < 1e-9);
+        assert!((*sampled.last().unwrap() - end).length() < 1e-9);
+
+        // Every point is on the ellipse of half the height the long way and the depth the short
+        // way, so the bracket is smoothly bowed all along and not straightened in the middle.
+        for point in &sampled {
+            let offset = *point - Vector2::new(100.0, 250.0);
+            let on_ellipse = (offset.x / depth).powi(2) + (offset.y / 150.0).powi(2);
+            assert!(
+                (on_ellipse - 1.0).abs() < 1e-2,
+                "point {point:?} off the ellipse"
+            );
+        }
+        let deepest = sampled.iter().fold(f64::MAX, |x, point| x.min(point.x));
+        assert!((deepest - 64.0).abs() < 0.01, "deepest at {deepest}");
+        // A quarter way down the bracket it is already most of the depth out: the bow is not a
+        // straight body one depth to the side, as a rounded bracket's is.
+        let quarter = sampled
+            .iter()
+            .min_by(|a, b| (a.y - 190.0).abs().total_cmp(&(b.y - 190.0).abs()))
+            .unwrap();
+        assert!((quarter.x - 67.0).abs() < 0.2, "quarter at {quarter:?}");
+
+        // The tips leave the chord at a right angle, as the corners of a rounded bracket do.
+        let arriving = bracket.cubics[0].cp1 - bracket.cubics[0].start;
+        assert!(arriving.normalize().dot(Vector2::new(0.0, 1.0)).abs() < 1e-9);
+        let leaving = bracket.cubics[1].end - bracket.cubics[1].cp2;
+        assert!(leaving.normalize().dot(Vector2::new(0.0, 1.0)).abs() < 1e-9);
     }
 
     #[test]

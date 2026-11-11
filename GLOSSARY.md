@@ -83,14 +83,26 @@ The depth of a bracket's bend, the largest distance between its stroke and the c
 _Avoid_: curve depth, sagitta
 
 **Canonical bracket**:
-A bracket whose ends lie on one vertical line, in one of its two shapes: an arc bracket, whose
-deepest point is at the middle of its height and whose bend is a circular arc, or a rounded bracket.
+A bracket whose ends lie on one vertical line, in one of its shapes: an arc bracket, whose deepest
+point is at the middle of its height and whose bend is a circular arc; an elliptical bracket, one
+smooth half-ellipse bow; a rounded bracket; or a square bracket.
 _Avoid_: neat bracket, clean bracket
+
+**Elliptical bracket**:
+A canonical bracket drawn as half of an ellipse whose chord is the diameter between its ends: no
+straight body and no corner, its depth a share of its height, not the drawn bulge.
+_Avoid_: smooth bracket, oval bracket, curved bracket
 
 **Rounded bracket**:
 A canonical bracket whose body is straight at one corner radius from the vertical of its ends, turned
 out into a short tip at each end. Its radius is a share of its height, not the drawn bulge.
 _Avoid_: straight bracket, stadium bracket
+
+**Square bracket**:
+A canonical bracket whose body is straight at a fixed depth from the vertical of its ends, turned out
+into an arm at a right angle at each end. A stroke drawn with a sharp corner at each end is one
+whatever the parenthesis shape is set to.
+_Avoid_: box bracket
 
 **Curly brace**:
 A bracket drawn as one stroke with a cusp in the middle of its height, `{` or `}`.

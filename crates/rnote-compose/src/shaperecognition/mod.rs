@@ -157,11 +157,14 @@ const BRACKET_MAX_APEX_OFFSET: f64 = 0.2;
 /// stroke bends most, not the one point of it that happens to be first.
 const BRACKET_DEPTH_PLATEAU_SHARE: f64 = 0.05;
 
-/// The corner radius of a rounded bracket, relative to its height: the default.
+/// The corner radius of a rounded bracket and the depth of an elliptical one, relative to its
+/// height: the default.
 pub const BRACKET_CORNER_RADIUS_RATIO_DEFAULT: f64 = 0.12;
-/// The smallest corner radius of a rounded bracket, relative to its height.
+/// The smallest corner radius of a rounded bracket, or depth of an elliptical one, relative to its
+/// height.
 pub const BRACKET_CORNER_RADIUS_RATIO_MIN: f64 = 0.02;
-/// The largest corner radius of a rounded bracket, relative to its height.
+/// The largest corner radius of a rounded bracket, or depth of an elliptical one, relative to its
+/// height.
 ///
 /// A corner of half the height leaves no body at all: the bracket is then a half circle.
 pub const BRACKET_CORNER_RADIUS_RATIO_MAX: f64 = 0.4;
@@ -243,12 +246,16 @@ const CURLY_TIP_MIN_TURN: f64 = 30.0 * std::f64::consts::PI / 180.0;
 /// How a stroke recognized as a round parenthesis is drawn.
 ///
 /// The gesture always gives a bracket; the style picks which representation of it it gets, the way
-/// the parenthesis is set: round, round with a straight body, or square.
+/// the parenthesis is set: round, as one smooth bow, round with a straight body, or square.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParenthesisStyle {
     /// A circular arc between the ends, as deep as the stroke was drawn.
     #[serde(rename = "arc")]
     Arc,
+    /// A half ellipse between the ends: one smooth bow with no corner, its depth a fixed share of
+    /// its height.
+    #[serde(rename = "elliptical")]
+    Elliptical,
     /// A straight body rounded into short tips at its ends, its depth a fixed share of its height.
     #[serde(rename = "rounded")]
     Rounded,
@@ -746,11 +753,12 @@ impl BracketStroke {
 ///
 /// The stroke is drawn in one sweep, deepest in the middle of its height — a smooth bend or a
 /// straight body turned out at its ends. What it becomes depends on [`BracketOptions::style`]: an
-/// arc keeps the drawn bulge, the sagitta of the circular arc the bracket is snapped to; a rounded
-/// parenthesis has a straight body, its depth the configured share of the height, turned out into
-/// short tips at the ends; a square bracket has the same straight body, its depth a fixed share of
-/// the height, turned out at right angles. A stroke drawn with a sharp corner at its ends is a
-/// square bracket whichever style is set, with a gesture of its own, and never reaches this.
+/// arc keeps the drawn bulge, the sagitta of the circular arc the bracket is snapped to; an
+/// elliptical parenthesis is one smooth half ellipse, its depth the configured share of the height;
+/// a rounded parenthesis has a straight body of the same depth, turned out into short tips at the
+/// ends; a square bracket has that straight body, its depth a fixed share of the height, turned out
+/// at right angles. A stroke drawn with a sharp corner at its ends is a square bracket whichever
+/// style is set, with a gesture of its own, and never reaches this.
 ///
 /// The bulge is the largest distance between the stroke and its chord.
 fn recognize_bracket(
@@ -768,6 +776,16 @@ fn recognize_bracket(
         return None;
     }
 
+    // How deep a slim parenthesis is drawn, out of the height it covers and never out of the bulge
+    // the hand happened to give it: the corner radius of a rounded one, the depth of an elliptical
+    // one.
+    let depth = || {
+        options.corner_radius_ratio.clamp(
+            BRACKET_CORNER_RADIUS_RATIO_MIN,
+            BRACKET_CORNER_RADIUS_RATIO_MAX,
+        ) * stroke.height
+    };
+
     match options.style {
         ParenthesisStyle::Arc => {
             let arc = CubicBezier::new_circular_arc(
@@ -778,15 +796,20 @@ fn recognize_bracket(
             )?;
             Some((Shape::CubicBezier(arc), BracketKind::from(options.style)))
         }
+        ParenthesisStyle::Elliptical => {
+            let bracket = Curve::new_elliptical_bracket(
+                stroke.canonical_start,
+                stroke.canonical_end,
+                depth(),
+                stroke.outward,
+            )?;
+            Some((Shape::Curve(bracket), BracketKind::from(options.style)))
+        }
         ParenthesisStyle::Rounded => {
-            let radius = options.corner_radius_ratio.clamp(
-                BRACKET_CORNER_RADIUS_RATIO_MIN,
-                BRACKET_CORNER_RADIUS_RATIO_MAX,
-            ) * stroke.height;
             let bracket = Curve::new_rounded_bracket(
                 stroke.canonical_start,
                 stroke.canonical_end,
-                radius,
+                depth(),
                 stroke.outward,
             )?;
             Some((Shape::Curve(bracket), BracketKind::from(options.style)))
@@ -3148,6 +3171,42 @@ mod tests {
                 assert!((point.x - 55.0).abs() < 0.5, "body at {point:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_smooth_parenthesis_becomes_an_elliptical_bracket() {
+        // A deep bow, as the parenthesis gesture is often drawn. It is snapped to one smooth half
+        // ellipse of the depth the setting names, not to the depth it was bowed with.
+        let points =
+            parenthesis_points(Vector2::new(100.0, 100.0), Vector2::new(100.0, 400.0), 60.0);
+        let recognized = recognize_with_style(points, ParenthesisStyle::Elliptical, 0.12)
+            .expect("a tall parenthesis is recognized");
+        assert_eq!(
+            recognized.bracket,
+            Some(BracketKind::Parenthesis(ParenthesisStyle::Elliptical))
+        );
+
+        let Shape::Curve(curve) = recognized.shape else {
+            panic!("expected a curve");
+        };
+        let sampled = curve.sampled(128);
+        // The ends stay where they were drawn, the whole height.
+        assert!((sampled[0] - Vector2::new(100.0, 100.0)).length() < 0.01);
+        assert!((*sampled.last().unwrap() - Vector2::new(100.0, 400.0)).length() < 0.01);
+        // The bow is deepest in the middle of the height, 12% of the height to the side.
+        let apex = sampled
+            .iter()
+            .min_by(|a, b| a.x.total_cmp(&b.x))
+            .expect("sampled points");
+        assert!((apex.x - 64.0).abs() < 0.5, "apex at {apex:?}");
+        assert!((apex.y - 250.0).abs() < 1.0, "apex at {apex:?}");
+        // A quarter way down it is already most of the depth out: the bow is smooth, not a straight
+        // body a corner away.
+        let quarter = sampled
+            .iter()
+            .min_by(|a, b| (a.y - 190.0).abs().total_cmp(&(b.y - 190.0).abs()))
+            .expect("sampled points");
+        assert!((quarter.x - 67.0).abs() < 1.0, "quarter at {quarter:?}");
     }
 
     #[test]
