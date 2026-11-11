@@ -2,7 +2,8 @@
 
 ## Status
 
-accepted (2026-11-04); amended (2026-11-05): docking is opt-in, see ADR 0005.
+accepted (2026-11-04); amended (2026-11-05): docking is opt-in, see
+[0012](0012-toolbars-float-unless-the-drop-docks.md).
 
 ## Context
 

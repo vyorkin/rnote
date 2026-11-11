@@ -92,6 +92,15 @@ A canonical bracket whose body is straight at one corner radius from the vertica
 out into a short tip at each end. Its radius is a share of its height, not the drawn bulge.
 _Avoid_: straight bracket, stadium bracket
 
+**Curly brace**:
+A bracket drawn as one stroke with a cusp in the middle of its height, `{` or `}`.
+_Avoid_: brace (when the curly one is meant), squiggle
+
+**Cusp**:
+The sharp turn at the middle of a brace's height. The side it points to is the glyph: left is `{`,
+right is `}`.
+_Avoid_: point, notch
+
 **Bracket snap**:
 Draw-and-Hold replacing an upright parenthesis stroke — its chord within `BRACKET_MAX_TILT` of the
 vertical — with a canonical bracket of the same height, in the bracket shape the gesture settings
@@ -112,6 +121,11 @@ Draw-and-Hold replacing a curve stroke with a smooth curve at the same ends: a s
 bend becomes one quadratic, a stroke with more keeps a chain of cubic segments through the same
 path.
 _Avoid_: curve fit, spline snap
+
+**Ellipse fit**:
+Draw-and-Hold replacing a closed stroke with a circle or an ellipse fitted to the points the pen
+drew, kept at the center and orientation it drew them.
+_Avoid_: ideal circle, shape completion
 
 ## Pens
 
@@ -145,3 +159,14 @@ _Avoid_: toolbar state, panel arrangement
 A floating toolbar's place, kept as fractions of its travel range so that a window resize keeps
 its relative place instead of a pixel coordinate.
 _Avoid_: saved coordinates, pixel position
+
+## Views
+
+**Zen mode**:
+A window mode that hides the window chrome — header bar and tab bar — and keeps the canvas and the
+toolbars.
+_Avoid_: distraction-free mode, immersive mode, fullscreen
+
+**Zen variant**:
+The area a zen window covers: the monitor it is on, or the whole desktop area.
+_Avoid_: zen scope, zen span

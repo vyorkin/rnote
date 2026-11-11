@@ -6,7 +6,7 @@ accepted (2026-11-05)
 
 ## Context
 
-Dragging a toolbar near a window edge always docked it (ADR 0002), which turned a request to place
+Dragging a toolbar near a window edge always docked it ([0002](0002-toolbar-docking.md)), which turned a request to place
 two toolbars next to each other into a dock and a shrunken canvas. Docking was a side effect of a
 plain drag, not a choice.
 

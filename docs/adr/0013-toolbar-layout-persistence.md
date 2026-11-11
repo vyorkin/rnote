@@ -7,7 +7,7 @@ accepted (2026-11-05)
 ## Context
 
 ADR 0002 stored only a dock name per toolbar panel in GSettings, so a floating toolbar always came
-back to its default corner. ADR 0005 made floating the normal state, which makes an arrangement of
+back to its default corner. ADR 0012 made floating the normal state, which makes an arrangement of
 two toolbars placed side by side worth keeping. Windows are independent of each other while a
 session runs, but the settings they share are global.
 
