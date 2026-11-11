@@ -31,7 +31,7 @@ Everything below the line is upstream's README, and it describes the app as it i
 All of this was vibe coded: written with an AI coding assistant, and it shows in places.
 Expect rough edges, and don't trust it with notes you can't afford to lose.
 Rnote's maintainers don't accept AI-generated contributions, so none of it is going upstream.
-If something is broken here, [report it here](https://github.com/andrinwinzap/slopnote/issues) and not to them.
+If something is broken here, [report it in this fork's issues](https://github.com/vyorkin/rnote/issues) and not to Rnote's maintainers.
 
 **Installing it**
 

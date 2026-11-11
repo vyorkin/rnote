@@ -6,6 +6,8 @@ Issues and specs for this repo live as GitHub issues in **`vyorkin/rnote`** (the
 
 This clone has three remotes (`origin` = `vyorkin/rnote`, `slopnote` = `andrinwinzap/slopnote`, `upstream` = `flxzt/rnote`), and `gh` resolves them to **`upstream`**: a bare `gh issue ...` run here reads and writes issues in `flxzt/rnote`, not in this fork. Every command below passes `--repo vyorkin/rnote`; keep it.
 
+**No issue and no pull request is ever created in `flxzt/rnote` or `andrinwinzap/slopnote`.** Those two are read-only sources here: bug reports, feature requests and patches all land in `vyorkin/rnote`.
+
 ## Conventions
 
 - **Create an issue**: `gh issue create --repo vyorkin/rnote --title "..." --body "..."`. Use a heredoc for multi-line bodies.

@@ -12,6 +12,8 @@ The current core maintainers of the project are:
 # Contribute Bug Reports & Feature Requests
 
 File a bug report or feature request directly through the GitHub web UI by clicking on `Repository->Issues->New Issue`.
+In this fork the repository is [vyorkin/rnote](https://github.com/vyorkin/rnote): no issue and no pull request is filed in
+`flxzt/rnote` or `andrinwinzap/slopnote`.
 Choose between the different existing templates and please fill them out completely as requested.
 If not filled with these details or the issue is clearly created with low amounts of effort, maintainers are free to
 close it without further reason.
