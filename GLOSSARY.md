@@ -21,7 +21,7 @@ A gesture reported by the stylus hardware itself, such as a barrel button or a s
 _Avoid_: device trick
 
 **Scribble-to-Erase**:
-A pen gesture that erases the ink under a dense back-and-forth stroke.
+A pen gesture that erases the ink and the typed text under a dense back-and-forth stroke.
 _Avoid_: Scratch-to-Erase, scribble erase
 
 **Circle-to-Lasso**:

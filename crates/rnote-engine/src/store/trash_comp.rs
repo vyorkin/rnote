@@ -203,6 +203,10 @@ impl StrokeStore {
     /// word. A stroke has to be covered, not merely touched: see [`SCRIBBLE_COVERAGE_RATIO`].
     /// Ticks and numbers of coordinate system axes are erased individually.
     ///
+    /// Typed text is erased too, but it is one block that cannot be split, so its ink tiles are its
+    /// line boxes: the same share of them has to be covered, which for a two-line block means a
+    /// scratch across both lines and, for a paragraph, most of its lines.
+    ///
     /// Returns how many strokes were trashed or modified, and the keys of the modified strokes,
     /// which need to update their rendering.
     pub(crate) fn trash_strokes_hit_by(
@@ -261,9 +265,9 @@ impl StrokeStore {
                     return false;
                 }
                 match stroke.as_ref() {
-                    Stroke::BrushStroke(_) | Stroke::ShapeStroke(_) => {}
-                    // Ignore the same strokes the eraser ignores.
-                    Stroke::TextStroke(_) | Stroke::VectorImage(_) | Stroke::BitmapImage(_) => {
+                    Stroke::BrushStroke(_) | Stroke::ShapeStroke(_) | Stroke::TextStroke(_) => {}
+                    // Images are content, not ink, and the eraser ignores them too.
+                    Stroke::VectorImage(_) | Stroke::BitmapImage(_) => {
                         return false;
                     }
                 }
@@ -464,6 +468,8 @@ impl StrokeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strokes::TextStroke;
+    use crate::strokes::textstroke::TextStyle;
     use p2d::math::Vector2;
     use rnote_compose::Style;
     use rnote_compose::penpath::Element;
@@ -506,6 +512,87 @@ mod tests {
         store.update_geometry_for_stroke(key);
 
         key
+    }
+
+    /// Insert a text stroke with the given text, its upper left corner at `pos`.
+    fn insert_text(store: &mut StrokeStore, text: &str, pos: Vector2) -> StrokeKey {
+        let mut text_style = TextStyle::default();
+        text_style.font_size = 16.0;
+        let key = store.insert_stroke(
+            Stroke::TextStroke(TextStroke::new(text.to_string(), pos, text_style)),
+            None,
+        );
+        store.update_geometry_for_stroke(key);
+
+        key
+    }
+
+    /// A scratch-out: passes that each run from one corner of the given rect to the other.
+    fn scratch_points(min: Vector2, max: Vector2, passes: usize) -> Vec<Vector2> {
+        (0..passes)
+            .flat_map(|pass| {
+                (0..=20).map(move |i| {
+                    let t = i as f64 / 20.0;
+                    let x = if pass % 2 == 0 { t } else { 1.0 - t };
+                    Vector2::new(min.x + x * (max.x - min.x), min.y + t * (max.y - min.y))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trashes_a_text_stroke_a_scratch_out_covers() {
+        // Typed text is erased by the same gesture as ink, so a scratch across a block of it takes
+        // the whole block: text cannot be split, unlike a brush stroke.
+        let mut store = StrokeStore::default();
+        let text = insert_text(
+            &mut store,
+            "first line\nsecond line",
+            Vector2::new(100.0, 100.0),
+        );
+        let bounds = store.get_stroke_ref(text).unwrap().bounds();
+        let scribble = insert_path(
+            &mut store,
+            scratch_points(
+                bounds.mins - Vector2::splat(10.0),
+                bounds.maxs + Vector2::splat(10.0),
+                5,
+            ),
+        );
+        let viewport = Aabb::new(Vector2::new(-500.0, -500.0), Vector2::new(1000.0, 1000.0));
+
+        let (trashed, _, _) = store.trash_strokes_hit_by(scribble, viewport);
+
+        assert_eq!(trashed, 1);
+        assert_eq!(store.trashed(text), Some(true));
+    }
+
+    #[test]
+    fn keeps_a_text_stroke_a_scratch_out_crosses_one_line_of() {
+        // The block's line boxes are its ink tiles, so a scratch that stays in the band of one line
+        // of a paragraph does not cover the block.
+        let mut store = StrokeStore::default();
+        let text = insert_text(
+            &mut store,
+            "first line\nsecond line\nthird line",
+            Vector2::new(100.0, 100.0),
+        );
+        let bounds = store.get_stroke_ref(text).unwrap().bounds();
+        let line_height = bounds.extents().y / 3.0;
+        let scribble = insert_path(
+            &mut store,
+            scratch_points(
+                Vector2::new(bounds.mins.x - 10.0, bounds.mins.y + 0.25 * line_height),
+                Vector2::new(bounds.maxs.x + 10.0, bounds.mins.y + 0.75 * line_height),
+                5,
+            ),
+        );
+        let viewport = Aabb::new(Vector2::new(-500.0, -500.0), Vector2::new(1000.0, 1000.0));
+
+        let (trashed, _, _) = store.trash_strokes_hit_by(scribble, viewport);
+
+        assert_eq!(trashed, 0);
+        assert_eq!(store.trashed(text), Some(false));
     }
 
     #[test]

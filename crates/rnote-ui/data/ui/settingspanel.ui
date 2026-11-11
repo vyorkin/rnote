@@ -523,7 +523,7 @@ gets disabled.</property>
                     <child>
                       <object class="AdwExpanderRow" id="gestures_scribbleerase_row">
                         <property name="title" translatable="yes">Scribble to Erase</property>
-                        <property name="subtitle" translatable="yes">Scribble over pen ink to erase it. Typed text and highlighter ink are not erased</property>
+                        <property name="subtitle" translatable="yes">Scribble over pen ink or typed text to erase it. Highlighter ink is not erased</property>
                         <property name="show-enable-switch">true</property>
                         <child>
                           <object class="AdwSpinRow" id="gestures_scribbleerase_min_turns_row">

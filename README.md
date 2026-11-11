@@ -23,7 +23,7 @@ Everything below the line is upstream's README, and it describes the app as it i
 
 - A ruler: a straight edge on the canvas that strokes snap to. It can be moved and rotated with two fingers, the scroll wheel or the pen on its angle dial, and it snaps to common angles
 - Automatic shape completion: hold the pen still at the end of a stroke to turn it into a line, curve, bracket, circle, rectangle or polygon, and keep dragging to adjust the result
-- Scratch to erase: scribble over strokes to erase them, with adjustable thresholds
+- Scratch to erase: scribble over ink and typed text to erase them, with adjustable thresholds
 - Unit markings on coordinate systems, and shapes that get wider the harder you press
 
 **Please read this first**
