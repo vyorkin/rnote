@@ -658,7 +658,7 @@ gets disabled.</property>
                     <child>
                       <object class="AdwComboRow" id="gestures_bracket_style_row">
                         <property name="title" translatable="yes">Round Bracket Shape</property>
-                        <property name="subtitle" translatable="yes">How a held stroke drawn as a parenthesis is drawn. An arc bulges as deeply as it was drawn, a rounded parenthesis keeps a straight body with rounded corners, a square bracket has a straight body with a right angle at each end. A stroke drawn with a sharp corner at each end is a square bracket whatever is chosen here</property>
+                        <property name="tooltip-text" translatable="yes">An arc bulges as deeply as it was drawn, a rounded parenthesis keeps a straight body with rounded corners, a square bracket has a straight body with a right angle at each end. A stroke drawn with a sharp corner at each end is a square bracket whatever is chosen here</property>
                         <property name="model">
                           <object class="GtkStringList">
                             <items>
@@ -673,7 +673,7 @@ gets disabled.</property>
                     <child>
                       <object class="AdwComboRow" id="gestures_brace_style_row">
                         <property name="title" translatable="yes">Curly Brace Shape</property>
-                        <property name="subtitle" translatable="yes">How a held stroke drawn as a curly brace is drawn: as the brace is set in type, with the cusp turned over a fillet so it has no sharp point, or with a right angle at each tip and a right-angled tab at the cusp</property>
+                        <property name="tooltip-text" translatable="yes">As the brace is set in type, with the cusp turned over a fillet so it has no sharp point, or with a right angle at each tip and a right-angled tab at the cusp</property>
                         <property name="model">
                           <object class="GtkStringList">
                             <items>
