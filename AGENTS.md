@@ -11,3 +11,14 @@ The five default canonical labels (`needs-triage`, `needs-info`, `ready-for-agen
 ### Domain docs
 
 Single-context: root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain.md`.
+
+## Repo gates
+
+Run these before opening a PR, from the meson build folder (`just setup-dev` once, if `_mesonbuild` is missing):
+
+- `just fmt-check`
+- `just check`
+- `just lint`
+- `just test`
+
+`CONTRIBUTING.md` documents the same commands; `just test` expects `cargo-nextest`.
