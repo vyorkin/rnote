@@ -33,22 +33,21 @@ Expect rough edges, and don't trust it with notes you can't afford to lose.
 Rnote's maintainers don't accept AI-generated contributions, so none of it is going upstream.
 If something is broken here, [report it in this fork's issues](https://github.com/vyorkin/rnote/issues) and not to Rnote's maintainers.
 
-**Installing it**
+**Building it**
 
 Slopnote has its own app id, so it installs next to Rnote without touching it or its settings.
-It is built from this repository on every push to `main`, and published as a flatpak:
+It builds as a flatpak from this repository:
 
 ```sh
-flatpak remote-add --if-not-exists slopnote https://slopnote.andrinwinzap.ch/slopnote.flatpakrepo
-flatpak install slopnote io.github.vyorkin.Slopnote
+just build-slopnote
+just install-slopnote
 ```
 
 The app id used to be `ch.andrinwinzap.Slopnote`, so flatpak treats the new build as a separate app.
-To carry an existing install over once, settings included (do the `mv` before the new app is
-started for the first time):
+Settings from an install of the old id carry over with (do the `mv` before the new app is started for
+the first time):
 
 ```sh
-flatpak install slopnote io.github.vyorkin.Slopnote
 dconf dump /ch/andrinwinzap/Slopnote/ | dconf load /io/github/vyorkin/Slopnote/
 mv ~/.var/app/ch.andrinwinzap.Slopnote ~/.var/app/io.github.vyorkin.Slopnote
 flatpak uninstall ch.andrinwinzap.Slopnote
