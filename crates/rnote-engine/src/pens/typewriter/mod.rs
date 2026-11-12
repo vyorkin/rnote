@@ -337,15 +337,10 @@ impl PenBehaviour for Typewriter {
                     if let Some(Stroke::TextStroke(textstroke)) =
                         engine_view.store.get_stroke_ref(*stroke_key)
                     {
-                        engine_view.config.pens_config.typewriter_config.text_style =
-                            textstroke.text_style.clone();
-                        engine_view
-                            .config
-                            .pens_config
-                            .typewriter_config
-                            .text_style
-                            .ranged_text_attributes
-                            .clear();
+                        sync_text_style_from_stroke(
+                            &mut engine_view.config.pens_config.typewriter_config.text_style,
+                            &textstroke.text_style,
+                        );
                         engine_view
                             .config
                             .pens_config
@@ -367,15 +362,10 @@ impl PenBehaviour for Typewriter {
                     if let Some(Stroke::TextStroke(textstroke)) =
                         engine_view.store.get_stroke_ref(*stroke_key)
                     {
-                        engine_view.config.pens_config.typewriter_config.text_style =
-                            textstroke.text_style.clone();
-                        engine_view
-                            .config
-                            .pens_config
-                            .typewriter_config
-                            .text_style
-                            .ranged_text_attributes
-                            .clear();
+                        sync_text_style_from_stroke(
+                            &mut engine_view.config.pens_config.typewriter_config.text_style,
+                            &textstroke.text_style,
+                        );
                         engine_view
                             .config
                             .pens_config
@@ -561,6 +551,20 @@ impl PenBehaviour for Typewriter {
         }
         receiver
     }
+}
+
+// Adopt the font styling of the text stroke that is being edited.
+//
+// The color is kept from `text_style`: it is the ink the typewriter types in, chosen in the
+// toolbar, and typing into a text stroke must not silently replace it. New characters that
+// don't inherit it are colored with it instead, see `TextStroke::color_text_in_range()`.
+fn sync_text_style_from_stroke(text_style: &mut TextStyle, stroke_text_style: &TextStyle) {
+    text_style.font_family = stroke_text_style.font_family.clone();
+    text_style.font_size = stroke_text_style.font_size;
+    text_style.font_weight = stroke_text_style.font_weight;
+    text_style.font_style = stroke_text_style.font_style;
+    text_style.alignment = stroke_text_style.alignment;
+    text_style.ranged_text_attributes.clear();
 }
 
 // Update the cursors to valid positions and new text length.
@@ -762,10 +766,15 @@ impl Typewriter {
                     if let Some(Stroke::TextStroke(textstroke)) =
                         engine_view.store.get_stroke_mut(*stroke_key)
                     {
+                        let insert_pos = cursor.cur_cursor().min(selection_cursor.cur_cursor());
                         textstroke.replace_text_between_selection_cursors(
                             cursor,
                             selection_cursor,
                             text.as_str(),
+                        );
+                        textstroke.color_text_in_range(
+                            insert_pos..insert_pos + text.len(),
+                            text_style.color,
                         );
                         engine_view.store.update_geometry_for_stroke(*stroke_key);
                         engine_view.store.regenerate_rendering_for_stroke(
@@ -792,7 +801,12 @@ impl Typewriter {
                     if let Some(Stroke::TextStroke(textstroke)) =
                         engine_view.store.get_stroke_mut(*stroke_key)
                     {
+                        let insert_pos = cursor.cur_cursor();
                         textstroke.insert_text_after_cursor(text.as_str(), cursor);
+                        textstroke.color_text_in_range(
+                            insert_pos..insert_pos + text.len(),
+                            text_style.color,
+                        );
                         engine_view.store.update_geometry_for_stroke(*stroke_key);
                         engine_view.store.regenerate_rendering_for_stroke(
                             *stroke_key,

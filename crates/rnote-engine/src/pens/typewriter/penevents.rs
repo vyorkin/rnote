@@ -686,9 +686,13 @@ impl Typewriter {
                                             finished: true,
                                         };
                                     } else {
-                                        textstroke.insert_text_after_cursor(
-                                            keychar.to_string().as_str(),
-                                            cursor,
+                                        let insert_pos = cursor.cur_cursor();
+                                        let typed_text = keychar.to_string();
+                                        textstroke
+                                            .insert_text_after_cursor(typed_text.as_str(), cursor);
+                                        textstroke.color_text_in_range(
+                                            insert_pos..insert_pos + typed_text.len(),
+                                            text_style.color,
                                         );
                                         update_stroke(engine_view.store, keychar.is_whitespace());
                                     }
@@ -714,7 +718,12 @@ impl Typewriter {
                                     }
                                 }
                                 KeyboardKey::HorizontalTab => {
+                                    let insert_pos = cursor.cur_cursor();
                                     textstroke.insert_text_after_cursor("\t", cursor);
+                                    textstroke.color_text_in_range(
+                                        insert_pos..insert_pos + "\t".len(),
+                                        text_style.color,
+                                    );
                                     update_stroke(engine_view.store, false);
 
                                     EventResult {
@@ -724,7 +733,12 @@ impl Typewriter {
                                     }
                                 }
                                 KeyboardKey::CarriageReturn | KeyboardKey::Linefeed => {
+                                    let insert_pos = cursor.cur_cursor();
                                     textstroke.insert_text_after_cursor("\n", cursor);
+                                    textstroke.color_text_in_range(
+                                        insert_pos..insert_pos + "\n".len(),
+                                        text_style.color,
+                                    );
                                     update_stroke(engine_view.store, true);
 
                                     EventResult {
@@ -1227,7 +1241,12 @@ impl Typewriter {
                         if let Some(Stroke::TextStroke(textstroke)) =
                             engine_view.store.get_stroke_mut(*stroke_key)
                         {
+                            let insert_pos = cursor.cur_cursor();
                             textstroke.insert_text_after_cursor(&text, cursor);
+                            textstroke.color_text_in_range(
+                                insert_pos..insert_pos + text.len(),
+                                text_style.color,
+                            );
                             engine_view.store.update_geometry_for_stroke(*stroke_key);
                             engine_view.store.regenerate_rendering_for_stroke(
                                 *stroke_key,
@@ -1270,10 +1289,15 @@ impl Typewriter {
                         if let Some(Stroke::TextStroke(textstroke)) =
                             engine_view.store.get_stroke_mut(*stroke_key)
                         {
+                            let insert_pos = cursor.cur_cursor().min(selection_cursor.cur_cursor());
                             textstroke.replace_text_between_selection_cursors(
                                 cursor,
                                 selection_cursor,
                                 text.as_str(),
+                            );
+                            textstroke.color_text_in_range(
+                                insert_pos..insert_pos + text.len(),
+                                text_style.color,
                             );
                             engine_view.store.update_geometry_for_stroke(*stroke_key);
                             engine_view.store.regenerate_rendering_for_stroke(
@@ -1585,6 +1609,102 @@ mod tests {
         assert_eq!(propagation, EventPropagation::Stop);
         assert!(!engine.penholder.is_handling_text_input());
         assert!(texts(&engine).is_empty());
+    }
+
+    /// The color chosen in the toolbar is the ink typed into a text box: opening a box must not
+    /// replace it with the boxes color, and the typed characters take the chosen color instead of
+    /// recoloring the existing text.
+    #[test]
+    fn typed_text_takes_the_chosen_color() {
+        use rnote_compose::Color;
+
+        let white = Color::new(1.0, 1.0, 1.0, 1.0);
+        let magenta = Color::new(1.0, 0.0, 0.72, 1.0);
+
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        press(&mut engine, 'h', &[], now);
+
+        // The box was written in white, then the session was left.
+        engine.with_view_mut(|view| {
+            let keys = view.store.stroke_keys_unordered();
+            for key in keys {
+                if let Some(Stroke::TextStroke(textstroke)) = view.store.get_stroke_mut(key) {
+                    textstroke.text_style.color = white;
+                }
+            }
+        });
+        let _ = engine.handle_pen_event(PenEvent::Cancel, None, now);
+
+        // The color is picked in the toolbar with nothing being edited.
+        engine.with_view_mut(|view| view.config.pens_config.set_all_stroke_colors(magenta));
+
+        // Clicking the existing box opens it for editing.
+        let _ = engine.handle_pen_event(
+            PenEvent::Down {
+                element: Element::new(Vector2::new(100.0, 100.0), Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            now,
+        );
+        assert!(
+            engine.penholder.is_handling_text_input(),
+            "the click must open the text box"
+        );
+        let ink =
+            engine.with_view_mut(|view| view.config.pens_config.typewriter_config.text_style.color);
+        assert_eq!(ink, magenta, "opening a box must keep the chosen color");
+
+        press(&mut engine, 'i', &[], now);
+        press(&mut engine, 'j', &[], now);
+
+        let (text, box_color, colors, attrs) = engine.with_view_mut(|view| {
+            let textstroke = view
+                .store
+                .stroke_keys_unordered()
+                .into_iter()
+                .find_map(|key| match view.store.get_stroke_ref(key) {
+                    Some(Stroke::TextStroke(textstroke)) => Some(textstroke),
+                    _ => None,
+                })
+                .unwrap();
+            let colors = textstroke
+                .text
+                .char_indices()
+                .map(|(index, _)| textstroke.text_color_at(index))
+                .collect::<Vec<_>>();
+            (
+                textstroke.text.clone(),
+                textstroke.text_style.color,
+                colors,
+                textstroke.text_style.ranged_text_attributes.len(),
+            )
+        });
+        assert_eq!(
+            text.chars().count(),
+            3,
+            "both keys are typed into the box, got {text:?}"
+        );
+        assert_eq!(box_color, white, "existing text keeps the boxes color");
+        for (index, ch) in text.char_indices() {
+            if ch == 'h' {
+                assert_eq!(
+                    colors[index], white,
+                    "the 'h' written before keeps its color"
+                );
+            } else {
+                assert_eq!(
+                    colors[index], magenta,
+                    "typed {ch:?} takes the chosen color, text {text:?}"
+                );
+            }
+        }
+        assert_eq!(
+            attrs, 1,
+            "typing keeps a single color range instead of one per character"
+        );
     }
 
     #[test]

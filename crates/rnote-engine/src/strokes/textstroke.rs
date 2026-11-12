@@ -583,6 +583,47 @@ impl TextStroke {
         *cursor = GraphemeCursor::new(cursor.cur_cursor() + text.len(), self.text.len(), true);
     }
 
+    /// The color the character at the given byte index is rendered in.
+    ///
+    /// The last ranged color attribute covering the index wins, else the strokes color is returned.
+    pub fn text_color_at(&self, index: usize) -> Color {
+        self.text_style
+            .ranged_text_attributes
+            .iter()
+            .filter(|attr| attr.range.start <= index && index < attr.range.end)
+            .filter_map(|attr| match &attr.attribute {
+                TextAttribute::TextColor(color) => Some(*color),
+                _ => None,
+            })
+            .last()
+            .unwrap_or(self.text_style.color)
+    }
+
+    /// Render the text in the given range in `color`, leaving text that already renders in it untouched.
+    ///
+    /// An attribute of the same color ending right before the range is extended instead of adding
+    /// a new one, so typing keeps a single range instead of one range per character.
+    pub fn color_text_in_range(&mut self, range: Range<usize>, color: Color) {
+        if range.is_empty() || self.text_color_at(range.start) == color {
+            return;
+        }
+
+        if let Some(preceding_attr) = self
+            .text_style
+            .ranged_text_attributes
+            .iter_mut()
+            .find(|attr| {
+                attr.range.end == range.start
+                    && matches!(&attr.attribute, TextAttribute::TextColor(attr_color) if *attr_color == color)
+            })
+        {
+            preceding_attr.range.end = range.end;
+            return;
+        }
+
+        self.replace_attr_for_range(range, TextAttribute::TextColor(color));
+    }
+
     pub fn remove_grapheme_before_cursor(&mut self, cursor: &mut GraphemeCursor) {
         if !self.text.is_empty() && self.text.len() >= cursor.cur_cursor() {
             let cur_pos = cursor.cur_cursor();
