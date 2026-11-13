@@ -26,6 +26,17 @@ const SCRIBBLE_COVERAGE_RATIO: f64 = 0.5;
 /// against it touches.
 const SCRIBBLE_COVERAGE_MIN_TILES: usize = 2;
 
+/// How much bigger, by the diagonal of its bounds, a stroke has to be than the scribble for the
+/// scribble to erase it by crossing it instead of covering half of it.
+///
+/// A stroke much bigger than the scribble cannot be covered by it: scratching across the arc of an
+/// enclosing ellipse or across a long line touches only a fraction of its ink, and asking for half
+/// of it would ask for scratching along the whole outline. Half coverage is what keeps a scratch
+/// over a word from taking the letter beside it, a guard that only means something between things
+/// of comparable size. A stroke that outgrows the scribble this much is erased where the scribble
+/// crosses it.
+const SCRIBBLE_OUTGROW_FACTOR: f64 = 2.0;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, rename = "trash_component")]
 pub struct TrashComponent {
@@ -200,7 +211,9 @@ impl StrokeStore {
     ///
     /// Used for the scribble gesture: the strokes the scribble actually went over are trashed, not
     /// everything inside its bounds, so scratching out a word between two others only takes that
-    /// word. A stroke has to be covered, not merely touched: see [`SCRIBBLE_COVERAGE_RATIO`].
+    /// word. A stroke has to be covered, not merely touched: see [`SCRIBBLE_COVERAGE_RATIO`]. A
+    /// stroke much bigger than the scribble is the exception — it cannot be covered, so it is
+    /// erased where the scribble crosses it: see [`SCRIBBLE_OUTGROW_FACTOR`].
     /// Ticks and numbers of coordinate system axes are erased individually.
     ///
     /// Typed text is erased too, but it is one block that cannot be split, so its ink tiles are its
@@ -221,6 +234,7 @@ impl StrokeStore {
         };
         let hitting_bounds = hitting_stroke.bounds();
         let hitting_hitboxes = hitting_stroke.hitboxes();
+        let hitting_extents_len = hitting_bounds.extents().length();
 
         let candidate_keys = self
             .stroke_keys_as_rendered_intersecting_bounds(viewport)
@@ -264,15 +278,17 @@ impl StrokeStore {
                 {
                     return false;
                 }
-                match stroke.as_ref() {
-                    Stroke::BrushStroke(_) | Stroke::ShapeStroke(_) | Stroke::TextStroke(_) => {}
+                let is_text = match stroke.as_ref() {
+                    Stroke::BrushStroke(_) | Stroke::ShapeStroke(_) => false,
+                    Stroke::TextStroke(_) => true,
                     // Images are content, not ink, and the eraser ignores them too.
                     Stroke::VectorImage(_) | Stroke::BitmapImage(_) => {
                         return false;
                     }
-                }
+                };
                 // First check the bounds, avoiding unnecessary work
-                if !hitting_bounds.intersects(&stroke.bounds()) {
+                let stroke_bounds = stroke.bounds();
+                if !hitting_bounds.intersects(&stroke_bounds) {
                     return false;
                 }
 
@@ -292,6 +308,20 @@ impl StrokeStore {
                             .any(|hitting_hitbox| hitting_hitbox.intersects(hitbox))
                     })
                     .count();
+
+                // A stroke much bigger than the scribble cannot be covered by it: scratching
+                // across the arc of an enclosing ellipse touches a few of its tiles and no more.
+                // Half coverage guards against taking a neighbour beside the crossed-out word,
+                // which only applies between things of comparable size, so for a stroke that
+                // outgrows the scribble crossing it is enough. Typed text is left out: its tiles
+                // are line boxes, and a paragraph must not go because one line was crossed.
+                let outgrows_scribble = !is_text
+                    && hitting_extents_len > f64::EPSILON
+                    && stroke_bounds.extents().length()
+                        >= SCRIBBLE_OUTGROW_FACTOR * hitting_extents_len;
+                if outgrows_scribble {
+                    return covered >= 1;
+                }
 
                 covered as f64 >= hitboxes.len() as f64 * SCRIBBLE_COVERAGE_RATIO
                     && covered >= SCRIBBLE_COVERAGE_MIN_TILES.min(hitboxes.len())
@@ -694,5 +724,52 @@ mod tests {
 
         assert_eq!(trashed, 1);
         assert_eq!(store.trashed(scribbled_over), Some(true));
+    }
+
+    #[test]
+    fn trashes_an_enclosing_outline_a_scratch_out_crosses() {
+        // An outline much bigger than the scratch-out cannot be covered by it: a scratch across
+        // the arc of an ellipse covers a few percent of its ink. Crossing it out is what deletes
+        // it, or a big shape could only be deleted by scratching along its whole circumference.
+        let mut store = StrokeStore::default();
+        let ellipse = insert_path(
+            &mut store,
+            (0..=360).map(|i| {
+                let a = i as f64 / 360.0 * std::f64::consts::TAU;
+                Vector2::new(354.0 + 346.0 * a.cos(), 162.0 + 92.0 * a.sin())
+            }),
+        );
+        let scribble = insert_path(
+            &mut store,
+            scratch_points(Vector2::new(340.0, 15.0), Vector2::new(530.0, 95.0), 6),
+        );
+        let viewport = Aabb::new(Vector2::new(-500.0, -500.0), Vector2::new(1000.0, 1000.0));
+
+        let (trashed, _, _) = store.trash_strokes_hit_by(scribble, viewport);
+
+        assert_eq!(trashed, 1);
+        assert_eq!(store.trashed(ellipse), Some(true));
+    }
+
+    #[test]
+    fn keeps_a_stroke_of_its_own_size_a_scratch_out_only_grazes() {
+        // The same graze as `keeps_a_stroke_a_letter_merely_touches`, with the neighbour as long
+        // as the scratch-out is wide: being crossed is not enough for a stroke of its own size,
+        // it still has to be covered.
+        let mut store = StrokeStore::default();
+        let neighbour = insert_path(
+            &mut store,
+            (0..=10).map(|i| Vector2::new(110.0, 60.0 + 14.0 * i as f64)),
+        );
+        let scribble = insert_path(
+            &mut store,
+            scratch_points(Vector2::new(100.0, 110.0), Vector2::new(220.0, 190.0), 6),
+        );
+        let viewport = Aabb::new(Vector2::new(-500.0, -500.0), Vector2::new(1000.0, 1000.0));
+
+        let (trashed, _, _) = store.trash_strokes_hit_by(scribble, viewport);
+
+        assert_eq!(trashed, 0);
+        assert_eq!(store.trashed(neighbour), Some(false));
     }
 }
