@@ -11,8 +11,19 @@ use rnote_compose::ext::AabbExt;
 use rnote_compose::shapes::Shapeable;
 use tracing::error;
 
-/// The tolerance where check between scale-factors are considered "equal".
-pub(crate) const RENDER_IMAGE_SCALE_TOLERANCE: f64 = 0.01;
+/// The tolerance of an image scale relative to another one, within which images are reused.
+///
+/// A rendering rasterized at a scale within this factor of the current one is kept and drawn
+/// scaled instead of being rasterized again: one zoom step of the scroll wheel is 10%, and
+/// re-rasterizing every visible stroke for it costs far more than the slight softening it avoids.
+/// Beyond it, upscaling becomes visible and the stroke is rasterized again.
+pub(crate) const RENDER_IMAGE_SCALE_REUSE_TOLERANCE: f64 = 0.15;
+
+/// Whether images rasterized at `cached` can be drawn at `current` without rasterizing again.
+pub(crate) fn image_scale_is_reusable(cached: f64, current: f64) -> bool {
+    cached > 0.0 && ((cached / current) - 1.0).abs() <= RENDER_IMAGE_SCALE_REUSE_TOLERANCE
+}
+
 /// The factor for which the rendering for the current viewport is extended by.
 /// For example:: 1.0 means the viewport is extended by its own extents on all sides.
 ///
@@ -37,6 +48,12 @@ impl Default for RenderCompState {
 #[derive(Debug, Clone)]
 pub struct RenderComponent {
     pub(super) state: RenderCompState,
+    /// The image scale the `images` were rasterized at, zero when there are none.
+    ///
+    /// A rendering is reused while this is within [RENDER_IMAGE_SCALE_REUSE_TOLERANCE] of the
+    /// current image scale (see [image_scale_is_reusable]), so that zoom steps small enough not to
+    /// be visible don't rasterize every stroke of the viewport again.
+    pub(super) image_scale: f64,
     pub(super) images: Vec<Image>,
     #[cfg(feature = "ui")]
     pub(super) rendernodes: Vec<gtk4::gsk::RenderNode>,
@@ -52,6 +69,7 @@ impl Default for RenderComponent {
     fn default() -> Self {
         Self {
             state: RenderCompState::default(),
+            image_scale: 0.0,
             images: vec![],
             #[cfg(feature = "ui")]
             rendernodes: vec![],
@@ -194,7 +212,7 @@ impl StrokeStore {
             viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
 
         match stroke.gen_images(viewport_extended, image_scale) {
-            Ok(images) => self.replace_rendering_with_images(key, images),
+            Ok(images) => self.replace_rendering_with_images(key, images, image_scale),
             Err(e) => {
                 self.set_rendering_dirty(key);
                 error!("Generating images for stroke with key {key:?} failed, Err: {e:?}");
@@ -272,14 +290,54 @@ impl StrokeStore {
     }
 
     /// Regenerate the rendering of all keys for the given viewport that need to be rerendered.
+    ///
+    /// A rendering whose viewport still covers the current one and whose scale is within
+    /// [RENDER_IMAGE_SCALE_REUSE_TOLERANCE] of `image_scale` is kept.
+    ///
+    /// Returns the number of render tasks started.
     pub(crate) fn regenerate_rendering_in_viewport_threaded(
         &mut self,
         tasks_tx: EngineTaskSender,
         force_regenerate: bool,
         viewport: Aabb,
         image_scale: f64,
-    ) {
+    ) -> usize {
+        self.regenerate_rendering_in_viewport_impl(
+            tasks_tx,
+            force_regenerate,
+            true,
+            viewport,
+            image_scale,
+        )
+    }
+
+    /// Regenerate the rendering of all keys for the given viewport that need to be rerendered,
+    /// keeping the renderings whose scale is away from `image_scale`.
+    ///
+    /// This is what a zoom gesture in progress needs: it rasterizes at the temporary zoom it shows
+    /// at, which differs from the zoom the renderings were made at, so checking their scale would
+    /// start every rendering of the viewport again on every step of the gesture.
+    ///
+    /// Returns the number of render tasks started.
+    pub(crate) fn regenerate_rendering_in_viewport_zoom_gesture_threaded(
+        &mut self,
+        tasks_tx: EngineTaskSender,
+        viewport: Aabb,
+        image_scale: f64,
+    ) -> usize {
+        self.regenerate_rendering_in_viewport_impl(tasks_tx, false, false, viewport, image_scale)
+    }
+
+    fn regenerate_rendering_in_viewport_impl(
+        &mut self,
+        tasks_tx: EngineTaskSender,
+        force_regenerate: bool,
+        rerender_stale_scale: bool,
+        viewport: Aabb,
+        image_scale: f64,
+    ) -> usize {
         let keys = self.render_components.keys().collect::<Vec<StrokeKey>>();
+        let mut tasks_started = 0;
 
         for key in keys {
             if let Some(stroke) = self.stroke_components.get(key)
@@ -297,39 +355,55 @@ impl StrokeStore {
                         render_comp.clear_rendernodes();
                     }
                     render_comp.images = vec![];
+                    render_comp.image_scale = 0.0;
                     render_comp.state = RenderCompState::Dirty;
                     continue;
                 }
 
                 // only check if rerendering is not forced
                 if !force_regenerate {
-                    match render_comp.state {
-                        RenderCompState::Complete | RenderCompState::BusyRenderingInTask => {
+                    // A rendering whose scale is away from `image_scale` is rasterized again even
+                    // when its viewport still covers: it would be drawn scaled and blurry.
+                    let scale_stale = rerender_stale_scale
+                        && !image_scale_is_reusable(render_comp.image_scale, image_scale);
+
+                    if scale_stale {
+                        if render_comp.state == RenderCompState::BusyRenderingInTask {
+                            // The task in flight carries the stale scale, so it is discarded when
+                            // it arrives and the stroke is rasterized again at the current scale
+                            // then. Starting a second task now would rasterize it twice.
                             continue;
                         }
-                        RenderCompState::ForViewport(old_viewport) => {
-                            /// This factor is applied on top of the viewport extents margin factor,
-                            /// so that rerendering is started a bit earlier to reaching
-                            /// the edges of the viewport of the current rendered images.
-                            const VIEWPORT_EXTENTS_MARGIN_RERENDER_THRESHOLD: f64 = 0.7;
-
-                            if old_viewport.contains(
-                                &(viewport.extend_by(
-                                    viewport.extents()
-                                        * VIEWPORT_EXTENTS_MARGIN_FACTOR
-                                        * VIEWPORT_EXTENTS_MARGIN_RERENDER_THRESHOLD,
-                                )),
-                            ) {
+                    } else {
+                        match render_comp.state {
+                            RenderCompState::Complete | RenderCompState::BusyRenderingInTask => {
                                 continue;
                             }
+                            RenderCompState::ForViewport(old_viewport) => {
+                                /// This factor is applied on top of the viewport extents margin factor,
+                                /// so that rerendering is started a bit earlier to reaching
+                                /// the edges of the viewport of the current rendered images.
+                                const VIEWPORT_EXTENTS_MARGIN_RERENDER_THRESHOLD: f64 = 0.7;
+
+                                if old_viewport.contains(
+                                    &(viewport.extend_by(
+                                        viewport.extents()
+                                            * VIEWPORT_EXTENTS_MARGIN_FACTOR
+                                            * VIEWPORT_EXTENTS_MARGIN_RERENDER_THRESHOLD,
+                                    )),
+                                ) {
+                                    continue;
+                                }
+                            }
+                            RenderCompState::Dirty => {}
                         }
-                        RenderCompState::Dirty => {}
                     }
                 }
 
                 // indicates that a task has now started to render the stroke
                 render_comp.state = RenderCompState::BusyRenderingInTask;
                 let stroke = stroke.clone();
+                tasks_started += 1;
 
                 // Spawn a new thread for image rendering
                 rayon::spawn(
@@ -343,13 +417,15 @@ impl StrokeStore {
                         }
                         Err(e) => {
                             error!(
-                                "Generating stroke images failed stroke while regenerating rendering in viewport `{viewport:?}`, stroke key: {key:?}, Err: {e:?}"
+                                "Generating images of stroke failed while regenerating rendering in viewport `{viewport:?}`, stroke key: {key:?}, Err: {e:?}"
                             );
                         }
                     },
                 );
             }
         }
+
+        tasks_started
     }
 
     /// Clear all rendering for all strokes.
@@ -360,6 +436,7 @@ impl StrokeStore {
                 render_comp.clear_rendernodes();
             }
             render_comp.images = vec![];
+            render_comp.image_scale = 0.0;
             render_comp.state = RenderCompState::Dirty;
         }
     }
@@ -424,11 +501,15 @@ impl StrokeStore {
 
     /// Replace the entire current rendering with the given new images.
     ///
+    /// `image_scale` is the scale the images were rasterized at, it is kept so that a later zoom
+    /// can reuse them (see [image_scale_is_reusable]).
+    ///
     /// Also updates the render component state.
     pub(crate) fn replace_rendering_with_images(
         &mut self,
         key: StrokeKey,
         images: GeneratedContentImages,
+        image_scale: f64,
     ) {
         let mut replaced = false;
         if let Some(render_comp) = self.render_components.get_mut(key) {
@@ -438,6 +519,7 @@ impl StrokeStore {
                     match render_comp.replace_images(images) {
                         Ok(()) => {
                             render_comp.state = RenderCompState::ForViewport(viewport);
+                            render_comp.image_scale = image_scale;
                             replaced = true;
                         }
                         Err(e) => {
@@ -451,6 +533,7 @@ impl StrokeStore {
                     {
                         render_comp.images = images;
                         render_comp.state = RenderCompState::ForViewport(viewport);
+                        render_comp.image_scale = image_scale;
                         replaced = true;
                     }
                 }
@@ -459,6 +542,7 @@ impl StrokeStore {
                     match render_comp.replace_images(images) {
                         Ok(()) => {
                             render_comp.state = RenderCompState::Complete;
+                            render_comp.image_scale = image_scale;
                             replaced = true;
                         }
                         Err(e) => {
@@ -472,6 +556,7 @@ impl StrokeStore {
                     {
                         render_comp.images = images;
                         render_comp.state = RenderCompState::Complete;
+                        render_comp.image_scale = image_scale;
                         replaced = true;
                     }
                 }
@@ -572,10 +657,7 @@ impl StrokeStore {
     }
 
     #[cfg(all(test, feature = "ui"))]
-    pub(crate) fn debug_image_textures(
-        &self,
-        key: StrokeKey,
-    ) -> Vec<crate::image::ImageTexture> {
+    pub(crate) fn debug_image_textures(&self, key: StrokeKey) -> Vec<crate::image::ImageTexture> {
         self.render_components
             .get(key)
             .map(|rc| rc.image_textures.clone())
@@ -604,7 +686,11 @@ impl StrokeStore {
             return Ok(());
         }
 
-        let mut keys = self.preview_keys.iter().copied().collect::<Vec<StrokeKey>>();
+        let mut keys = self
+            .preview_keys
+            .iter()
+            .copied()
+            .collect::<Vec<StrokeKey>>();
         self.sort_keys_chrono(&mut keys);
 
         let highlighter_keys = keys
@@ -808,5 +894,130 @@ impl StrokeStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::Engine;
+    use crate::strokes::BrushStroke;
+    use p2d::math::Vector2;
+    use rnote_compose::PenPath;
+    use rnote_compose::penpath::Element;
+    use rnote_compose::style::Style;
+
+    /// An engine holding one short stroke crossing the viewport.
+    fn engine_with_stroke() -> (Engine, StrokeKey, Aabb) {
+        let mut engine = Engine::default();
+        let key = engine.store.insert_stroke(
+            Stroke::BrushStroke(BrushStroke::from_penpath(
+                PenPath::try_from_elements([
+                    Element::new(Vector2::new(100., 100.), Element::PRESSURE_DEFAULT),
+                    Element::new(Vector2::new(300., 200.), Element::PRESSURE_DEFAULT),
+                ])
+                .unwrap(),
+                Style::default(),
+            )),
+            None,
+        );
+        engine.store.update_geometry_for_stroke(key);
+
+        let viewport = Aabb::new(Vector2::ZERO, Vector2::new(800., 600.));
+        (engine, key, viewport)
+    }
+
+    /// A zoom step of the scroll wheel is 10%, so a rendering is kept until the zoom has moved
+    /// past the reuse tolerance: rasterizing every visible stroke for a single notch is what made
+    /// zooming stutter.
+    #[test]
+    fn rendering_is_reused_across_small_zoom_steps() {
+        let (mut engine, key, viewport) = engine_with_stroke();
+        let tasks_tx = engine.engine_tasks_tx();
+        let store = &mut engine.store;
+
+        // as a render task would deliver the images
+        store.replace_rendering_with_images(key, GeneratedContentImages::Full(vec![]), 2.0);
+
+        assert_eq!(
+            store.regenerate_rendering_in_viewport_threaded(tasks_tx.clone(), false, viewport, 2.0),
+            0,
+            "the rasterized scale is the current one"
+        );
+        assert_eq!(
+            store.regenerate_rendering_in_viewport_threaded(tasks_tx.clone(), false, viewport, 2.2),
+            0,
+            "one scroll step stays within the tolerance"
+        );
+        assert_eq!(
+            store.regenerate_rendering_in_viewport_threaded(tasks_tx.clone(), false, viewport, 2.4),
+            1,
+            "two scroll steps are past the tolerance"
+        );
+    }
+
+    /// During a zoom gesture the strokes are rasterized at the scale they are displayed at, which
+    /// is the temporary one - so the gesture itself never finds a stale scale.
+    #[test]
+    fn zoom_gesture_keeps_rendering_across_scale() {
+        let (mut engine, key, viewport) = engine_with_stroke();
+        let tasks_tx = engine.engine_tasks_tx();
+        let store = &mut engine.store;
+
+        store.replace_rendering_with_images(
+            key,
+            GeneratedContentImages::Partial {
+                images: vec![],
+                viewport: viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR),
+            },
+            2.0,
+        );
+
+        assert_eq!(
+            store.regenerate_rendering_in_viewport_zoom_gesture_threaded(
+                tasks_tx.clone(),
+                viewport,
+                6.0
+            ),
+            0,
+            "the gesture keeps what it has rasterized"
+        );
+    }
+
+    /// The viewport checks still re-render what comes into view, and a rendering whose viewport
+    /// still covers the new one is kept.
+    #[test]
+    fn rendering_is_kept_while_its_viewport_covers_the_new_one() {
+        let (mut engine, key, viewport) = engine_with_stroke();
+        let tasks_tx = engine.engine_tasks_tx();
+        let store = &mut engine.store;
+
+        // render tasks rasterize the viewport extended by the margin
+        let rendered_viewport =
+            viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
+        store.replace_rendering_with_images(
+            key,
+            GeneratedContentImages::Partial {
+                images: vec![],
+                viewport: rendered_viewport,
+            },
+            2.0,
+        );
+
+        assert_eq!(
+            store.regenerate_rendering_in_viewport_threaded(tasks_tx.clone(), false, viewport, 2.0),
+            0,
+            "the rasterized viewport still covers the current one"
+        );
+        assert_eq!(
+            store.regenerate_rendering_in_viewport_threaded(
+                tasks_tx.clone(),
+                false,
+                Aabb::new(Vector2::ZERO, Vector2::new(1920., 1080.)),
+                2.0
+            ),
+            1,
+            "the viewport grew past the margin"
+        );
     }
 }

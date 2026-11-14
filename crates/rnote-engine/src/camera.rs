@@ -196,9 +196,19 @@ impl Camera {
     }
 
     /// Set the permanent zoom.
+    ///
+    /// Setting the zoom the camera already holds flags nothing: a zoom that ends where it started
+    /// (the temporary zoom of a gesture resolved back, or a scroll at the zoom limit) would
+    /// otherwise relayout the canvas and re-render its content for no visible change.
     pub fn zoom_to(&mut self, zoom: f64) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
-        self.zoom = zoom.clamp(Self::ZOOM_MIN, Self::ZOOM_MAX);
+        let zoom = zoom.clamp(Self::ZOOM_MIN, Self::ZOOM_MAX);
+
+        if zoom == self.zoom {
+            return widget_flags;
+        }
+
+        self.zoom = zoom;
         widget_flags.zoomed = true;
         widget_flags
     }
@@ -263,6 +273,16 @@ impl Camera {
     /// Takes the scale factor in account
     pub fn image_scale(&self) -> f64 {
         self.zoom * self.scale_factor
+    }
+
+    /// The scaling factor for generating bitmap images at the zoom they are currently displayed
+    /// with, i.e. including the temporary zoom.
+    ///
+    /// Content that comes into view while a zoom gesture is in progress is rasterized at the scale
+    /// it is shown at, so it stays sharp during the gesture instead of being rasterized at the
+    /// permanent zoom the gesture has not committed to yet.
+    pub fn total_image_scale(&self) -> f64 {
+        self.total_zoom() * self.scale_factor
     }
 
     /// The scale factor that gets set according to the toolkit hi-dpi settings.

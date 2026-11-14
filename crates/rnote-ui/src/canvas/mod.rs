@@ -768,6 +768,8 @@ mod imp {
             self.hadjustment.replace(hadj);
 
             obj.configure_adjustments(widget_size, adjustment_maxs, adjustment_value);
+            // configuring an adjustment reserves its page size, which depends on the widget size
+            obj.queue_resize();
         }
 
         fn set_vadjustment_prop(&self, vadj: Option<Adjustment>) {
@@ -848,6 +850,8 @@ mod imp {
             self.vadjustment.replace(vadj);
 
             obj.configure_adjustments(widget_size, adjustment_maxs, adjustment_value);
+            // configuring an adjustment reserves its page size, which depends on the widget size
+            obj.queue_resize();
         }
     }
 }
@@ -1086,8 +1090,6 @@ impl RnCanvas {
                 widget_size[1],
             );
         }
-
-        self.queue_resize();
     }
 
     pub(crate) fn workaround_disable_kinetic_scrolling(&self, scroller: Option<&ScrolledWindow>) {

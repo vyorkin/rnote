@@ -115,11 +115,13 @@ impl StrokeStore {
                         self.replace_rendering_with_images(
                             new_key,
                             GeneratedContentImages::Partial { images, viewport },
+                            render_comp.image_scale,
                         );
                     } else if render_comp.state == RenderCompState::Complete {
                         self.replace_rendering_with_images(
                             new_key,
                             GeneratedContentImages::Full(images),
+                            render_comp.image_scale,
                         );
                     }
                 }

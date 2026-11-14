@@ -885,7 +885,9 @@ mod tests {
             }),
             Style::Smooth(SmoothOptions::default()),
         );
-        let key = engine.store.insert_stroke(Stroke::ShapeStroke(stroke), None);
+        let key = engine
+            .store
+            .insert_stroke(Stroke::ShapeStroke(stroke), None);
         engine.store.regenerate_rendering_for_strokes(
             &[key],
             engine.camera.viewport(),
@@ -958,6 +960,7 @@ mod tests {
         engine.store.replace_rendering_with_images(
             key,
             crate::strokes::content::GeneratedContentImages::Full(vec![]),
+            0.0,
         );
 
         assert!(
@@ -981,7 +984,9 @@ mod tests {
             }),
             Style::Smooth(SmoothOptions::default()),
         );
-        let key = engine.store.insert_stroke(Stroke::ShapeStroke(stroke), None);
+        let key = engine
+            .store
+            .insert_stroke(Stroke::ShapeStroke(stroke), None);
         engine.store.regenerate_rendering_for_strokes(
             &[key],
             engine.camera.viewport(),
@@ -1041,6 +1046,7 @@ mod tests {
         engine.store.replace_rendering_with_images(
             key,
             crate::strokes::content::GeneratedContentImages::Full(vec![]),
+            0.0,
         );
 
         assert!(
@@ -1064,7 +1070,9 @@ mod tests {
             }),
             Style::Smooth(SmoothOptions::default()),
         );
-        let key = engine.store.insert_stroke(Stroke::ShapeStroke(stroke), None);
+        let key = engine
+            .store
+            .insert_stroke(Stroke::ShapeStroke(stroke), None);
         engine.store.regenerate_rendering_for_strokes(
             &[key],
             engine.camera.viewport(),
@@ -1086,8 +1094,8 @@ mod tests {
         for step in 1..=10 {
             let angle = 0.05 * step as f64;
             let (sin, cos) = angle.sin_cos();
-            let pos = center
-                + Vector2::new(arm[0] * cos - arm[1] * sin, arm[0] * sin + arm[1] * cos);
+            let pos =
+                center + Vector2::new(arm[0] * cos - arm[1] * sin, arm[0] * sin + arm[1] * cos);
             let _ = engine.handle_pen_event(
                 pen_event_down(pos),
                 Some(PenMode::Pen),
@@ -1133,6 +1141,7 @@ mod tests {
         engine.store.replace_rendering_with_images(
             key,
             crate::strokes::content::GeneratedContentImages::Full(vec![]),
+            0.0,
         );
 
         assert!(

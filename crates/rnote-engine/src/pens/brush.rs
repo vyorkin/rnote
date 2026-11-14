@@ -1363,6 +1363,7 @@ mod tests {
         engine.store.replace_rendering_with_images(
             key,
             crate::strokes::content::GeneratedContentImages::Full(vec![]),
+            0.0,
         );
 
         assert!(

@@ -218,12 +218,34 @@ pub struct Engine {
     // Background rendering
     #[serde(skip)]
     background_tile_image: Option<Image>,
+    /// The texture of the background tile image.
+    ///
+    /// Creating it copies no pixels, but it is a new GDK texture on every creation, so it is kept
+    /// beside the image.
     #[cfg(feature = "ui")]
     #[serde(skip)]
-    background_rendernodes: Vec<gtk4::gsk::RenderNode>,
+    background_tile_texture: Option<gtk4::gdk::MemoryTexture>,
+    /// The render node drawing one background tile at the document origin.
+    ///
+    /// The background is this one tile repeated over the viewport (see
+    /// [Self::draw_background_to_gtk_snapshot]), so neither a pan nor a zoom needs a new node, and
+    /// a zoomed out view doesn't hold thousands of them.
+    #[cfg(feature = "ui")]
+    #[serde(skip)]
+    background_tile_rendernode: Option<gtk4::gsk::RenderNode>,
+    /// The bounds of one background tile in document coordinate space.
+    #[cfg(feature = "ui")]
+    #[serde(skip)]
+    background_tile_bounds: Aabb,
     // Origin indicator rendering
     #[serde(skip)]
     origin_indicator_image: Option<Image>,
+    /// The texture of the origin indicator image.
+    ///
+    /// Its render node is rebuilt on every zoom, creating the texture again for it is not needed.
+    #[cfg(feature = "ui")]
+    #[serde(skip)]
+    origin_indicator_texture: Option<gtk4::gdk::MemoryTexture>,
     #[cfg(feature = "ui")]
     #[serde(skip)]
     origin_indicator_rendernode: Option<gtk4::gsk::RenderNode>,
@@ -247,8 +269,14 @@ impl Default for Engine {
             tasks_rx: Some(EngineTaskReceiver(tasks_rx)),
             background_tile_image: None,
             #[cfg(feature = "ui")]
-            background_rendernodes: Vec::default(),
+            background_tile_texture: None,
+            #[cfg(feature = "ui")]
+            background_tile_rendernode: None,
+            #[cfg(feature = "ui")]
+            background_tile_bounds: Aabb::new_zero(),
             origin_indicator_image: None,
+            #[cfg(feature = "ui")]
+            origin_indicator_texture: None,
             #[cfg(feature = "ui")]
             origin_indicator_rendernode: None,
         }
@@ -449,15 +477,24 @@ impl Engine {
                             // so we just discard the render task result
                         }
                         RenderCompState::BusyRenderingInTask => {
-                            if (self.camera.image_scale()
-                                - render_comp::RENDER_IMAGE_SCALE_TOLERANCE
-                                ..self.camera.image_scale()
-                                    + render_comp::RENDER_IMAGE_SCALE_TOLERANCE)
-                                .contains(&image_scale)
-                            {
-                                // Only when the image scale is roughly the same as when the render task was started,
-                                // the new images are considered valid and can replace the old.
-                                self.store.replace_rendering_with_images(key, images);
+                            if render_comp::image_scale_is_reusable(
+                                image_scale,
+                                self.camera.total_image_scale(),
+                            ) {
+                                // Only when the image scale is within the reuse tolerance of the current one,
+                                // the new images can replace the old.
+                                self.store
+                                    .replace_rendering_with_images(key, images, image_scale);
+                            } else {
+                                // The images arrived with a scale the zoom has moved away from.
+                                // Discard them, and rasterize the stroke again at the current
+                                // scale instead of keeping it busy forever.
+                                self.store.set_rendering_dirty_for_strokes(&[key]);
+                                self.store.regenerate_rendering_for_strokes(
+                                    &[key],
+                                    self.camera.viewport(),
+                                    self.camera.total_image_scale(),
+                                );
                             }
                             widget_flags.redraw = true;
                         }
@@ -484,13 +521,24 @@ impl Engine {
                 }
             }
             EngineTask::Zoom(zoom) => {
-                widget_flags |= self.camera.zoom_temporarily_to(1.0) | self.camera.zoom_to(zoom);
+                widget_flags |= self.camera.zoom_temporarily_to(1.0);
+                let zoom_flags = self.camera.zoom_to(zoom);
 
-                let all_strokes = self.store.stroke_keys_unordered();
-                self.store.set_rendering_dirty_for_strokes(&all_strokes);
-                widget_flags |= self.doc_resize_autoexpand()
-                    | self.background_rendering_regenerate()
-                    | self.update_rendering_current_viewport();
+                // The renderings of the strokes are not flagged dirty: a rendering is rasterized
+                // again only when the new zoom is beyond the scale it was rasterized at (see
+                // `regenerate_rendering_in_viewport_threaded`), so a zoom step small enough to be
+                // covered by the reuse tolerance costs nothing at all.
+                if zoom_flags.zoomed {
+                    widget_flags |= zoom_flags
+                        | self.doc_resize_autoexpand()
+                        | self.background_rendering_regenerate()
+                        | self.update_rendering_current_viewport();
+                } else {
+                    // the zoom gesture ended where it started. The content that came into view
+                    // during it was rasterized at the temporary scale, which the committed zoom
+                    // may have moved away from.
+                    widget_flags |= zoom_flags | self.update_content_rendering_current_viewport();
+                }
             }
             EngineTask::Quit => {
                 widget_flags |= self.set_active(false);
