@@ -61,12 +61,18 @@ impl Selector {
                 widget_flags |= engine_view
                     .document
                     .expand_autoexpand(engine_view.camera, engine_view.store);
-                engine_view.store.regenerate_rendering_in_viewport_threaded(
-                    engine_view.tasks_tx.clone(),
-                    false,
-                    engine_view.camera.viewport(),
-                    engine_view.camera.image_scale(),
-                );
+
+                // The lasso is drawn as an overlay on every redraw, so the tile cache only has to
+                // be regenerated when the visible area changed. Regenerating it for every pointer
+                // sample made dragging the lasso lag.
+                if widget_flags.view_modified | widget_flags.resize {
+                    engine_view.store.regenerate_rendering_in_viewport_threaded(
+                        engine_view.tasks_tx.clone(),
+                        false,
+                        engine_view.camera.viewport(),
+                        engine_view.camera.image_scale(),
+                    );
+                }
 
                 EventResult {
                     handled: true,
