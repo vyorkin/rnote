@@ -474,36 +474,6 @@ impl StrokeStore {
         widget_flags
     }
 
-    /// Rotate the stroke rendering images.
-    ///
-    /// The strokes then need to update their rendering.
-    pub(crate) fn rotate_strokes_images(
-        &mut self,
-        keys: &[StrokeKey],
-        angle: f64,
-        center: Vector2,
-    ) {
-        keys.iter().for_each(|&key| {
-            if let Some(render_comp) = self.render_components.get_mut(key) {
-                render_comp.state = RenderCompState::Dirty;
-
-                for image in render_comp.images.iter_mut() {
-                    image.rotate(angle, center);
-                }
-
-                #[cfg(feature = "ui")]
-                match crate::Image::images_to_rendernodes(&render_comp.images) {
-                    Ok(rendernodes) => {
-                        render_comp.rendernodes = rendernodes;
-                    }
-                    Err(e) => error!(
-                        "Generating rendernodes from images failed while rotating stroke images , Err: {e:?}"
-                    ),
-                }
-            }
-        });
-    }
-
     /// Scale the strokes with the factor.
     ///
     /// The strokes then need to update their rendering.

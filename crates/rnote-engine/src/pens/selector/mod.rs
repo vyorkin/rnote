@@ -836,6 +836,7 @@ fn cancel_selection(selection: &[StrokeKey], engine_view: &mut EngineViewMut) ->
 
 #[cfg(test)]
 mod tests {
+    use super::Selector;
     use crate::Engine;
     use crate::pens::{PenMode, PenStyle};
     use crate::strokes::{ShapeStroke, Stroke};
@@ -1013,6 +1014,87 @@ mod tests {
             pen_event_up(last),
             Some(PenMode::Pen),
             now + Duration::from_millis(400),
+        );
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends with the drag"
+        );
+        assert_ne!(
+            engine.store.render_comp_state(key),
+            Some(crate::store::render_comp::RenderCompState::Complete),
+            "the images are regenerated when the drag ends"
+        );
+    }
+
+    /// A rotated selection follows the pen the same way: its images are neither marked dirty nor
+    /// re-uploaded as textures while the drag goes on.
+    #[test]
+    fn a_rotate_drag_draws_the_selection_from_its_geometry_until_it_ends() {
+        let mut engine = Engine::default();
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+        let _ = engine.change_pen_style(PenStyle::Selector);
+
+        let stroke = ShapeStroke::new(
+            Shape::Ellipse(Ellipse {
+                radii: Vector2::new(100., 60.),
+                affine: DAffine2::from_translation(Vector2::new(400., 300.)),
+            }),
+            Style::Smooth(SmoothOptions::default()),
+        );
+        let key = engine.store.insert_stroke(Stroke::ShapeStroke(stroke), None);
+        engine.store.regenerate_rendering_for_strokes(
+            &[key],
+            engine.camera.viewport(),
+            engine.camera.image_scale(),
+        );
+        engine.store.set_selected(key, true);
+        let _ = engine.current_pen_update_state();
+
+        let bounds = engine
+            .store
+            .bounds_for_strokes(&[key])
+            .expect("the stroke has bounds");
+        let center = bounds.center();
+        let rotate_node = Selector::rotate_node_sphere(bounds, &engine.camera).center;
+        let arm = rotate_node - center;
+
+        let now = Instant::now();
+        let _ = engine.handle_pen_event(pen_event_down(rotate_node), Some(PenMode::Pen), now);
+        for step in 1..=10 {
+            let angle = 0.05 * step as f64;
+            let (sin, cos) = angle.sin_cos();
+            let pos = center
+                + Vector2::new(arm[0] * cos - arm[1] * sin, arm[0] * sin + arm[1] * cos);
+            let _ = engine.handle_pen_event(
+                pen_event_down(pos),
+                Some(PenMode::Pen),
+                now + Duration::from_millis(16 * step),
+            );
+        }
+
+        assert!(
+            engine.store.debug_is_previewing(key),
+            "the rotated selection is drawn from its geometry"
+        );
+        assert_eq!(
+            engine.store.render_comp_state(key),
+            Some(crate::store::render_comp::RenderCompState::Complete),
+            "no step of the drag marks the images dirty"
+        );
+        let rotated = engine
+            .store
+            .bounds_for_strokes(&[key])
+            .expect("the stroke has bounds");
+        assert!(
+            rotated.extents()[1] > bounds.extents()[1] + 1.,
+            "the stroke follows the pen during the drag"
+        );
+
+        let _ = engine.handle_pen_event(
+            pen_event_up(center + arm),
+            Some(PenMode::Pen),
+            now + Duration::from_millis(200),
         );
 
         assert!(

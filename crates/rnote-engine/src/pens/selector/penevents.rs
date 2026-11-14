@@ -277,13 +277,13 @@ impl Selector {
                         };
                         let angle_delta = new_rotation_angle - *current_rotation_angle;
 
+                        // The selection follows the pen as a vector preview, like a translate: its
+                        // images would otherwise be marked dirty and re-uploaded as textures on
+                        // every pointer sample. They are regenerated once, when the drag ends.
+                        engine_view.store.set_previewing(selection, true);
+
                         if angle_delta.abs() > Self::ROTATE_ANGLE_THRESHOLD {
                             engine_view.store.rotate_strokes(
-                                selection,
-                                angle_delta,
-                                *rotation_center,
-                            );
-                            engine_view.store.rotate_strokes_images(
                                 selection,
                                 angle_delta,
                                 *rotation_center,

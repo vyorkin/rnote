@@ -294,14 +294,16 @@ impl Typewriter {
                                 engine_view.config,
                             ) - snap_corner_pos;
 
+                            // The text follows the pen as a vector preview: its images would
+                            // otherwise be re-uploaded as textures on every pointer sample.
+                            // They are regenerated once, when the drag ends.
+                            engine_view.store.set_previewing(&[*stroke_key], true);
+
                             if offset.length()
                                 > Self::TRANSLATE_OFFSET_THRESHOLD / engine_view.camera.total_zoom()
                             {
                                 // move text
                                 engine_view.store.translate_strokes(&[*stroke_key], offset);
-                                engine_view
-                                    .store
-                                    .translate_strokes_images(&[*stroke_key], offset);
                                 *current_pos += offset;
 
                                 widget_flags.store_modified = true;
@@ -314,12 +316,17 @@ impl Typewriter {
                             widget_flags |= engine_view
                                 .document
                                 .expand_autoexpand(engine_view.camera, engine_view.store);
-                            engine_view.store.regenerate_rendering_in_viewport_threaded(
-                                engine_view.tasks_tx.clone(),
-                                false,
-                                engine_view.camera.viewport(),
-                                engine_view.camera.image_scale(),
-                            );
+
+                            // The preview is drawn from the stroke geometry on every redraw, so
+                            // the tile cache only has to be regenerated when the view changed.
+                            if widget_flags.view_modified | widget_flags.resize {
+                                engine_view.store.regenerate_rendering_in_viewport_threaded(
+                                    engine_view.tasks_tx.clone(),
+                                    false,
+                                    engine_view.camera.viewport(),
+                                    engine_view.camera.image_scale(),
+                                );
+                            }
                         }
 
                         EventResult {
@@ -409,6 +416,7 @@ impl Typewriter {
                         *finished = true;
                     }
                     ModifyState::Translating { .. } => {
+                        engine_view.store.set_previewing(&[*stroke_key], false);
                         engine_view
                             .store
                             .update_geometry_for_strokes(&[*stroke_key]);
@@ -1344,7 +1352,7 @@ impl Typewriter {
     pub(super) fn handle_pen_event_cancel(
         &mut self,
         _now: Instant,
-        _engine_view: &mut EngineViewMut,
+        engine_view: &mut EngineViewMut,
     ) -> (EventResult<PenProgress>, WidgetFlags) {
         let widget_flags = WidgetFlags::default();
         self.pos = None;
@@ -1355,6 +1363,17 @@ impl Typewriter {
                 propagate: EventPropagation::Proceed,
                 progress: PenProgress::Idle,
             },
+            TypewriterState::Modifying { stroke_key, .. } => {
+                // a translate drag left mid-way must not keep its text in vector preview
+                engine_view.store.set_previewing(&[*stroke_key], false);
+                self.state = TypewriterState::Idle;
+
+                EventResult {
+                    handled: true,
+                    propagate: EventPropagation::Stop,
+                    progress: PenProgress::Finished,
+                }
+            }
             _ => {
                 self.state = TypewriterState::Idle;
 
