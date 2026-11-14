@@ -1,11 +1,159 @@
 // Imports
 use crate::Image;
+use crate::engine::{EngineTask, EngineTaskSender};
+use crate::store::render_comp::{
+    CONTENT_TILE_MIN_STROKES, CONTENT_TILE_TARGET_CELL_EXTENT, VIEWPORT_EXTENTS_MARGIN_FACTOR,
+    gen_content_tile_image_from_strokes, image_scale_is_reusable,
+};
+use crate::strokes::Stroke;
 use crate::{Engine, WidgetFlags};
-use p2d::bounding_volume::Aabb;
+use p2d::bounding_volume::{Aabb, BoundingVolume};
 use p2d::math::Vector2;
 use piet::RenderContext;
 use rnote_compose::color;
+use rnote_compose::ext::AabbExt;
+use std::sync::Arc;
 use tracing::error;
+
+/// The content tile cache: the rasterized stroke content covering the extended viewport.
+#[derive(Debug)]
+pub(crate) struct ContentTileCache {
+    /// Document-space cells, in draw order.
+    pub(crate) tiles: Vec<ContentTile>,
+    /// Document-space region the cells cover (the extended viewport at build time).
+    pub(crate) coverage: Aabb,
+    /// Image scale the tiles were rasterized at.
+    pub(crate) image_scale: f64,
+    /// `StrokeStore::content_revision()` at build time.
+    pub(crate) revision: u64,
+}
+
+/// One rasterized document-space cell of the content tile cache.
+#[derive(Debug)]
+pub(crate) struct ContentTile {
+    /// The document-space cell the image covers.
+    bounds: Aabb,
+    /// The rasterized stroke content of the cell.
+    ///
+    /// Nothing reads it back: the pixels are drawn by `rendernode`, which holds them. Tests read
+    /// it to check a tile really holds content, so it is kept.
+    #[allow(dead_code)]
+    image: Image,
+    /// The node drawing the image, built once per tile.
+    #[cfg(feature = "ui")]
+    rendernode: Option<gtk4::gsk::RenderNode>,
+}
+
+/// The content tile rebuild whose tasks are in flight.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ContentTileRequest {
+    pub(crate) coverage: Aabb,
+    pub(crate) image_scale: f64,
+    pub(crate) revision: u64,
+    /// The number of tiles the rebuild rasterizes, i.e. the tiles of a complete grid.
+    pub(crate) expected_cells: usize,
+}
+
+impl ContentTileCache {
+    pub(crate) fn new(coverage: Aabb, image_scale: f64, revision: u64) -> Self {
+        Self {
+            tiles: vec![],
+            coverage,
+            image_scale,
+            revision,
+        }
+    }
+
+    /// Whether the tiles were rasterized for the given content revision.
+    ///
+    /// Only the revision: a cache built for an older pan or zoom stays drawable until its
+    /// replacement lands, while a cache of older content is never drawn.
+    pub(crate) fn is_for_revision(&self, revision: u64) -> bool {
+        self.revision == revision
+    }
+
+    /// Add one rasterized cell, replacing a tile of the same cell if there is one.
+    pub(crate) fn push_tile(&mut self, bounds: Aabb, image: Image) -> anyhow::Result<()> {
+        #[cfg(feature = "ui")]
+        let rendernode = Some(image.to_rendernode()?);
+
+        self.tiles.retain(|tile| tile.bounds != bounds);
+        self.tiles.push(ContentTile {
+            bounds,
+            image,
+            #[cfg(feature = "ui")]
+            rendernode,
+        });
+        // cells are drawn in row-major order, which keeps overlapping content in its stroke order
+        self.tiles.sort_by(|a, b| {
+            a.bounds.mins[1]
+                .total_cmp(&b.bounds.mins[1])
+                .then(a.bounds.mins[0].total_cmp(&b.bounds.mins[0]))
+        });
+
+        Ok(())
+    }
+
+    #[cfg(feature = "ui")]
+    pub(crate) fn append_to_gtk_snapshot(&self, snapshot: &gtk4::Snapshot) {
+        use gtk4::prelude::*;
+
+        for tile in self.tiles.iter() {
+            if let Some(rendernode) = tile.rendernode.as_ref() {
+                snapshot.append_node(rendernode);
+            }
+        }
+    }
+}
+
+/// The document-space cells a content tile grid cuts `coverage` into, aligned to multiples of
+/// `cell_extent` so a cell keeps its position when the view moves.
+fn content_tile_cells(coverage: Aabb, cell_extent: f64) -> Vec<Aabb> {
+    let min_col = (coverage.mins[0] / cell_extent).floor();
+    let max_col = (coverage.maxs[0] / cell_extent).ceil();
+    let min_row = (coverage.mins[1] / cell_extent).floor();
+    let max_row = (coverage.maxs[1] / cell_extent).ceil();
+
+    let mut cells = Vec::new();
+    let mut row = min_row;
+    while row < max_row {
+        let mut col = min_col;
+        while col < max_col {
+            cells.push(Aabb::new(
+                Vector2::new(col * cell_extent, row * cell_extent),
+                Vector2::new((col + 1.0) * cell_extent, (row + 1.0) * cell_extent),
+            ));
+            col += 1.0;
+        }
+        row += 1.0;
+    }
+    cells
+}
+
+/// Rasterize one cell and send the tile back to the engine.
+///
+/// Shared by the worker-thread spawn and the synchronous path the tests take.
+fn gen_content_tile_task(
+    tasks_tx: EngineTaskSender,
+    strokes: Vec<Arc<Stroke>>,
+    cell_bounds: Aabb,
+    image_scale: f64,
+    revision: u64,
+    coverage: Aabb,
+) {
+    match gen_content_tile_image_from_strokes(&strokes, cell_bounds, image_scale) {
+        Ok(image) => tasks_tx.send(EngineTask::UpdateContentTileWithImage {
+            cell_bounds,
+            image,
+            image_scale,
+            revision,
+            coverage,
+        }),
+        Err(e) => {
+            error!("Generating a content tile image failed, cell {cell_bounds:?}, Err: {e:?}");
+        }
+    }
+}
 
 impl Engine {
     /// Update the background rendering for the current viewport.
@@ -94,9 +242,155 @@ impl Engine {
         self.update_origin_indicator_rendernode();
     }
 
+    /// Update the content tile cache for the current viewport.
+    ///
+    /// A dense view is drawn from rasterized content tiles instead of a render node per stroke
+    /// (see [Engine::draw_to_gtk_snapshot]). This starts the rebuild when the cache no longer
+    /// serves the view; the tiles arrive through [Engine::handle_engine_task].
+    ///
+    /// Rebuilds when the committed content changed, the image scale is away from the cached one
+    /// or the cached coverage no longer contains the extended viewport. Otherwise the cache is
+    /// kept.
+    pub fn update_content_tile_cache_current_viewport(&mut self) -> WidgetFlags {
+        let mut widget_flags = WidgetFlags::default();
+
+        // Drawn tiles would show stale content.
+        if self
+            .content_tile_cache
+            .as_ref()
+            .is_some_and(|cache| cache.revision != self.store.content_revision())
+        {
+            self.content_tile_cache = None;
+            self.content_tile_request = None;
+            widget_flags.redraw = true;
+        }
+
+        // An in-progress stroke is a preview, the committed content is unchanged. Rebuilding on
+        // each preview segment would churn the cache for no gain.
+        if self.penholder.pen_state_down() || self.camera.temporary_zoom() != 1.0 {
+            return widget_flags;
+        }
+
+        let viewport = self.camera.viewport();
+        let coverage = viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
+        let image_scale = self.camera.image_scale();
+
+        let visible_non_highlighter_strokes = self
+            .store
+            .stroke_keys_as_rendered_intersecting_bounds_partitioned(viewport)
+            .0
+            .len();
+
+        if visible_non_highlighter_strokes <= CONTENT_TILE_MIN_STROKES {
+            if self.content_tile_cache.is_some() || self.content_tile_request.is_some() {
+                self.content_tile_cache = None;
+                self.content_tile_request = None;
+                self.content_tile_staging = None;
+                widget_flags.redraw = true;
+            }
+            return widget_flags;
+        }
+
+        if self.content_tile_cache.as_ref().is_some_and(|cache| {
+            cache.revision == self.store.content_revision()
+                && image_scale_is_reusable(cache.image_scale, image_scale)
+                && cache.coverage.contains(&coverage)
+        }) {
+            // the cache serves this view
+            self.content_tile_request = None;
+            self.content_tile_staging = None;
+            return widget_flags;
+        }
+
+        let cell_extent = CONTENT_TILE_TARGET_CELL_EXTENT / image_scale;
+        let mut cells_to_rasterize = Vec::new();
+
+        for cell_bounds in content_tile_cells(coverage, cell_extent) {
+            let strokes = self.store.content_tile_strokes(cell_bounds);
+            if strokes.is_empty() {
+                // nothing to rasterize, the cell stays empty
+                continue;
+            }
+            cells_to_rasterize.push((cell_bounds, strokes));
+        }
+
+        let request = ContentTileRequest {
+            coverage,
+            image_scale,
+            revision: self.store.content_revision(),
+            expected_cells: cells_to_rasterize.len(),
+        };
+        if self.content_tile_request == Some(request) {
+            // already being rasterized
+            return widget_flags;
+        }
+        self.content_tile_request = Some(request);
+        self.content_tile_staging = None;
+
+        for (cell_bounds, strokes) in cells_to_rasterize {
+            let tasks_tx = self.tasks_tx.clone();
+            #[cfg(test)]
+            gen_content_tile_task(
+                tasks_tx,
+                strokes,
+                cell_bounds,
+                image_scale,
+                request.revision,
+                coverage,
+            );
+            #[cfg(not(test))]
+            rayon::spawn(move || {
+                gen_content_tile_task(
+                    tasks_tx,
+                    strokes,
+                    cell_bounds,
+                    image_scale,
+                    request.revision,
+                    coverage,
+                )
+            });
+        }
+
+        widget_flags.redraw = true;
+
+        widget_flags
+    }
+
+    /// Whether the drawn content is the content tile cache.
+    ///
+    /// The per-stroke renderings are left out while this is true: they are neither drawn nor
+    /// regenerated for a view that draws tiles.
+    fn content_tiles_serve_view(&self) -> bool {
+        self.content_tile_cache
+            .as_ref()
+            .is_some_and(|cache| cache.is_for_revision(self.store.content_revision()))
+    }
+
     /// Update the content rendering for the current viewport.
     pub fn update_content_rendering_current_viewport(&mut self) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
+        widget_flags |= self.update_content_tile_cache_current_viewport();
+
+        let tiles_serve_view = self.content_tiles_serve_view();
+        if tiles_serve_view {
+            if !self.content_tiles_served {
+                self.content_tiles_served = true;
+                // no regular per-stroke image is generated, uploaded or kept for a view that
+                // draws tiles
+                self.store.clear_rendering();
+            }
+            // highlighter strokes are blended over the regular layer as a whole, so they stay
+            // per-stroke renderings in the multiply layer
+            self.store
+                .regenerate_highlighter_rendering_in_viewport_threaded(
+                    self.engine_tasks_tx(),
+                    self.camera.viewport(),
+                    self.camera.image_scale(),
+                );
+            widget_flags.redraw = true;
+            return widget_flags;
+        }
+        self.content_tiles_served = false;
 
         // While a zoom gesture is in progress, the zoom is temporary and the content is
         // rasterized at the scale it is shown at. That scale differs from the one of the existing
@@ -133,6 +427,9 @@ impl Engine {
     pub fn clear_rendering(&mut self) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
         self.store.clear_rendering();
+        self.content_tile_cache = None;
+        self.content_tile_request = None;
+        self.content_tiles_served = false;
         self.background_tile_image.take();
         self.origin_indicator_image.take();
         #[cfg(feature = "ui")]
@@ -219,8 +516,17 @@ impl Engine {
         self.draw_format_borders_to_gtk_snapshot(snapshot)?;
 
         // bottom image in blend (regular content)
-        for &key in non_highlighter_keys.iter() {
-            self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
+        match self
+            .content_tile_cache
+            .as_ref()
+            .filter(|cache| cache.is_for_revision(self.store.content_revision()))
+        {
+            Some(cache) => cache.append_to_gtk_snapshot(snapshot),
+            None => {
+                for &key in non_highlighter_keys.iter() {
+                    self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
+                }
+            }
         }
 
         // top image in blend (highlighter layer). The whole layer is blended once,
@@ -497,4 +803,326 @@ fn gen_origin_indicator_image(scale_factor: f64) -> anyhow::Result<Image> {
         bounds,
         scale_factor,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Camera;
+    use crate::engine::EngineTaskReceiver;
+    use crate::store::chrono_comp::StrokeLayer;
+    use crate::store::render_comp::RenderCompState;
+    use crate::strokes::BrushStroke;
+    use rnote_compose::PenPath;
+    use rnote_compose::penpath::Element;
+    use rnote_compose::style::Style;
+
+    /// The document-space region a content tile cache is built for.
+    fn extended_viewport(engine: &Engine) -> Aabb {
+        let viewport = engine.camera.viewport();
+        viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR)
+    }
+
+    /// The grid a cache for the current view is cut into.
+    fn expected_cells(engine: &Engine) -> Vec<Aabb> {
+        content_tile_cells(
+            extended_viewport(engine),
+            CONTENT_TILE_TARGET_CELL_EXTENT / engine.camera.image_scale(),
+        )
+    }
+
+    fn insert_stroke_at(engine: &mut Engine, pos: Vector2) {
+        let key = engine.store.insert_stroke(
+            Stroke::BrushStroke(BrushStroke::from_penpath(
+                PenPath::try_from_elements([
+                    Element::new(pos, Element::PRESSURE_DEFAULT),
+                    Element::new(pos + Vector2::new(10., 10.), Element::PRESSURE_DEFAULT),
+                ])
+                .unwrap(),
+                Style::default(),
+            )),
+            None,
+        );
+        engine.store.update_geometry_for_stroke(key);
+    }
+
+    /// An engine with a far-out view and more than `CONTENT_TILE_MIN_STROKES` visible strokes,
+    /// covering every cell of the grid.
+    fn dense_engine() -> (Engine, EngineTaskReceiver) {
+        let mut engine = Engine::default();
+        engine.camera = Camera::default().with_zoom(0.2);
+
+        // fill every cell of the grid, dense enough that the views of the zoom steps below stay
+        // above the tiling threshold
+        let coverage = extended_viewport(&engine);
+        let mut x = coverage.mins[0];
+        while x <= coverage.maxs[0] {
+            let mut y = coverage.mins[1];
+            while y <= coverage.maxs[1] {
+                insert_stroke_at(&mut engine, Vector2::new(x, y));
+                y += 100.;
+            }
+            x += 100.;
+        }
+
+        let rx = engine
+            .take_engine_tasks_rx()
+            .expect("the engine holds its task receiver");
+        (engine, rx)
+    }
+
+    fn take_tasks(rx: &mut EngineTaskReceiver) -> Vec<EngineTask> {
+        let mut tasks = vec![];
+        while let Some(task) = rx.try_recv() {
+            tasks.push(task);
+        }
+        tasks
+    }
+
+    /// Handle every queued content tile task, returning how many there were.
+    fn handle_tile_tasks(engine: &mut Engine, rx: &mut EngineTaskReceiver) -> usize {
+        let tasks = take_tasks(rx);
+        for task in tasks.iter().cloned() {
+            let _ = engine.handle_engine_task(task);
+        }
+        tasks.len()
+    }
+
+    #[test]
+    fn dense_far_out_view_is_tiled() {
+        let (mut engine, mut rx) = dense_engine();
+        let cells = expected_cells(&engine);
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        let tasks = take_tasks(&mut rx);
+        assert_eq!(tasks.len(), cells.len(), "one task per non-empty cell");
+        for task in tasks {
+            let _ = engine.handle_engine_task(task);
+        }
+
+        let cache = engine
+            .content_tile_cache
+            .as_ref()
+            .expect("the rasterized tiles arrived");
+        assert!(cache.coverage.contains(&extended_viewport(&engine)));
+        assert_eq!(cache.tiles.len(), cells.len());
+        assert!(cache.image_scale > 0.0);
+        assert_eq!(cache.revision, engine.store.content_revision());
+        assert!(
+            cache
+                .tiles
+                .iter()
+                .all(|tile| tile.image.pixel_width > 0 && tile.image.pixel_height > 0),
+            "every tile holds the rasterized cell content"
+        );
+    }
+
+    #[test]
+    fn sparse_documents_are_not_tiled() {
+        let mut engine = Engine::default();
+        let mut rx = engine
+            .take_engine_tasks_rx()
+            .expect("the engine holds its task receiver");
+
+        for i in 0..10 {
+            insert_stroke_at(&mut engine, Vector2::new(100. + i as f64 * 10., 100.));
+        }
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(take_tasks(&mut rx).is_empty(), "no cell is rasterized");
+        assert!(engine.content_tile_cache.is_none());
+        assert!(engine.content_tile_request.is_none());
+    }
+
+    #[test]
+    fn content_tiles_are_reused_across_a_small_zoom_step() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        let (tile_count, cached_scale) = {
+            let cache = engine.content_tile_cache.as_ref().unwrap();
+            (cache.tiles.len(), cache.image_scale)
+        };
+
+        // one scroll step is 10%, inside the reuse tolerance, and the new viewport is still
+        // contained in the cached coverage
+        engine.camera = engine.camera.clone().with_zoom(0.22);
+        let _ = engine.update_content_tile_cache_current_viewport();
+
+        assert!(
+            take_tasks(&mut rx).is_empty(),
+            "the cache is kept, so no tile is rasterized again"
+        );
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_eq!(cache.tiles.len(), tile_count);
+        assert_eq!(cache.image_scale, cached_scale);
+    }
+
+    #[test]
+    fn content_tiles_are_rebuilt_past_the_reuse_tolerance() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let old_scale = engine.content_tile_cache.as_ref().unwrap().image_scale;
+
+        engine.camera = engine.camera.clone().with_zoom(0.4);
+        let _ = engine.update_content_tile_cache_current_viewport();
+        let rebuilt = handle_tile_tasks(&mut engine, &mut rx);
+
+        assert!(
+            rebuilt > 0,
+            "a zoom step past the tolerance rasterizes again"
+        );
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_ne!(cache.image_scale, old_scale);
+        assert!(image_scale_is_reusable(
+            cache.image_scale,
+            engine.camera.image_scale()
+        ));
+        assert_eq!(
+            cache.tiles.len(),
+            rebuilt,
+            "the old tiles are replaced by the new ones"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_keeps_the_stale_cache_drawable_until_complete() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let old_tiles = engine.content_tile_cache.as_ref().unwrap().tiles.len();
+        let old_scale = engine.content_tile_cache.as_ref().unwrap().image_scale;
+
+        engine.camera = engine.camera.clone().with_zoom(0.4);
+        let _ = engine.update_content_tile_cache_current_viewport();
+        let tasks = take_tasks(&mut rx);
+        assert!(!tasks.is_empty(), "the rebuild is in flight");
+        assert!(
+            engine.content_tiles_serve_view(),
+            "the stale grid still serves the view"
+        );
+
+        // one tile arriving must not replace the whole grid with a partial one
+        let _ = engine.handle_engine_task(tasks[0].clone());
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_eq!(cache.tiles.len(), old_tiles, "the stale grid is whole");
+        assert_eq!(cache.image_scale, old_scale);
+
+        for task in tasks.into_iter().skip(1) {
+            let _ = engine.handle_engine_task(task);
+        }
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_eq!(cache.image_scale, engine.camera.image_scale());
+        assert_ne!(cache.tiles.len(), 0, "the rebuilt grid is drawn");
+    }
+
+    #[test]
+    fn a_content_change_drops_the_cache_until_the_rebuild_lands() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let revision = engine.store.content_revision();
+
+        insert_stroke_at(&mut engine, Vector2::new(200., 200.));
+        assert_ne!(engine.store.content_revision(), revision);
+        assert!(
+            !engine.content_tiles_serve_view(),
+            "tiles of the old revision are not drawn"
+        );
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(
+            engine.content_tile_cache.is_none(),
+            "the stale tiles are dropped immediately"
+        );
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_eq!(cache.revision, engine.store.content_revision());
+    }
+
+    #[test]
+    fn only_highlighter_renderings_are_kept_while_tiles_serve() {
+        let (mut engine, mut rx) = dense_engine();
+
+        let highlighter_key = engine.store.insert_stroke(
+            Stroke::BrushStroke(BrushStroke::from_penpath(
+                PenPath::try_from_elements([
+                    Element::new(Vector2::new(100., 100.), Element::PRESSURE_DEFAULT),
+                    Element::new(Vector2::new(300., 200.), Element::PRESSURE_DEFAULT),
+                ])
+                .unwrap(),
+                Style::default(),
+            )),
+            Some(StrokeLayer::Highlighter),
+        );
+        engine.store.update_geometry_for_stroke(highlighter_key);
+        let regular_key = engine
+            .store
+            .keys_sorted_chrono()
+            .into_iter()
+            .find(|&key| key != highlighter_key)
+            .expect("the dense engine holds regular strokes");
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        let _ = engine.update_content_rendering_current_viewport();
+
+        assert_eq!(
+            engine.store.render_comp_state(highlighter_key),
+            Some(RenderCompState::BusyRenderingInTask),
+            "the highlighter stroke is still rasterized per stroke"
+        );
+        assert_eq!(
+            engine.store.render_comp_state(regular_key),
+            Some(RenderCompState::Dirty),
+            "the regular layer is drawn from the tiles"
+        );
+    }
+
+    #[test]
+    fn appearance_changes_drop_the_cache() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        assert!(engine.content_tile_cache.is_some());
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        let _ = engine
+            .store
+            .change_stroke_colors(&[key], color::Color::BLACK);
+
+        assert!(!engine.content_tiles_serve_view());
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(engine.content_tile_cache.is_none());
+
+        // geometry changes are content changes too
+        let revision = engine.store.content_revision();
+        engine
+            .store
+            .rotate_strokes(&[key], 0.1, Vector2::new(10.0, 10.0));
+        assert!(engine.store.content_revision() > revision);
+    }
+
+    #[test]
+    fn empty_cells_spawn_no_task() {
+        let mut engine = Engine::default();
+        engine.camera = Camera::default().with_zoom(0.2);
+        let cells = expected_cells(&engine);
+
+        // above the tiling threshold, but all in one cell
+        for i in 0..300 {
+            insert_stroke_at(&mut engine, Vector2::new(100. + i as f64 * 2.0, 100.));
+        }
+        let mut rx = engine
+            .take_engine_tasks_rx()
+            .expect("the engine holds its task receiver");
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        let tasks = take_tasks(&mut rx);
+        assert_eq!(tasks.len(), 1, "only the cell holding the strokes");
+        assert!(cells.len() > tasks.len());
+    }
 }

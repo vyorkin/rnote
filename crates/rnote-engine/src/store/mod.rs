@@ -104,6 +104,13 @@ pub struct StrokeStore {
     /// The index of the current live document in the history stack.
     #[serde(skip)]
     live_index: usize,
+    /// Monotonic counter of committed content changes.
+    ///
+    /// A content tile cache built for an older revision shows stale strokes, so it checks this
+    /// before drawing and is dropped when it differs (see
+    /// `Engine::update_content_tile_cache_current_viewport`).
+    #[serde(skip)]
+    content_revision: u64,
     /// An rtree backed by the slotmap store, for faster spatial queries.
     ///
     /// Needs to be updated with `update_with_key()` when strokes changed their geometry or position!
@@ -125,6 +132,7 @@ impl Default for StrokeStore {
             // Start off with state in the history
             history: VecDeque::from(vec![HistoryEntry::default()]),
             live_index: 0,
+            content_revision: 0,
 
             key_tree: KeyTree::default(),
 
@@ -136,6 +144,16 @@ impl Default for StrokeStore {
 impl StrokeStore {
     /// Max length of the history.
     pub(crate) const HISTORY_MAX_LEN: usize = 100;
+
+    /// The counter of committed content changes.
+    pub(crate) fn content_revision(&self) -> u64 {
+        self.content_revision
+    }
+
+    /// Mark the committed content as changed.
+    fn bump_content_revision(&mut self) {
+        self.content_revision = self.content_revision.wrapping_add(1);
+    }
 
     /// Import from a engine snapshot. A loaded strokes store should always be imported with this method.
     ///
@@ -153,6 +171,7 @@ impl StrokeStore {
         self.rebuild_trash_components_slotmap();
         self.rebuild_render_components_slotmap();
         self.rebuild_rtree();
+        self.bump_content_revision();
         widget_flags |= self.clear_history(self.create_history_entry());
         widget_flags
     }
@@ -202,6 +221,7 @@ impl StrokeStore {
 
         let all_strokes = self.stroke_keys_unordered();
         self.set_rendering_dirty_for_strokes(&all_strokes);
+        self.bump_content_revision();
     }
 
     /// Record the current state and save it in the history.
@@ -350,6 +370,7 @@ impl StrokeStore {
         );
         self.render_components
             .insert(key, RenderComponent::default());
+        self.bump_content_revision();
 
         key
     }
@@ -365,6 +386,7 @@ impl StrokeStore {
         self.preview_until_rendered.remove(&key);
 
         self.key_tree.remove_with_key(key);
+        self.bump_content_revision();
         Arc::make_mut(&mut self.stroke_components)
             .remove(key)
             .map(|stroke| (*stroke).clone())
@@ -384,6 +406,7 @@ impl StrokeStore {
         self.preview_keys.clear();
         self.preview_until_rendered.clear();
         self.key_tree.clear();
+        self.bump_content_revision();
 
         widget_flags
     }

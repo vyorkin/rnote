@@ -78,6 +78,7 @@ impl StrokeStore {
         {
             trash_comp.trashed = trash;
             self.update_chrono_to_last(key);
+            self.bump_content_revision();
         }
     }
 
@@ -135,6 +136,7 @@ impl StrokeStore {
         if erase == Some(AxisErase::Parts) {
             self.key_tree.update_with_key(key, stroke.bounds());
             self.set_rendering_dirty(key);
+            self.bump_content_revision();
         }
         erase
     }

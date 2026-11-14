@@ -182,3 +182,38 @@ _Avoid_: distraction-free mode, immersive mode, fullscreen
 **Zen variant**:
 The area a zen window covers: the monitor it is on, or the whole desktop area.
 _Avoid_: zen scope, zen span
+
+## Rendering
+
+**Viewport**:
+The document-space region currently visible through the camera, i.e. the camera surface size
+divided by the zoom. The engine's `Camera::viewport()`.
+_Avoid_: screen area, visible rect
+
+**Image scale**:
+The scale factor a rasterized image of a stroke or tile is generated at; the zoom multiplied by
+the surface scale factor. The engine's `Camera::image_scale()`.
+_Avoid_: render scale, resolution
+
+**Background tile**:
+A rasterized image of one document-space cell of the paper background, drawn as one render node.
+Existing behaviour, named here for contrast.
+_Avoid_: paper tile, grid tile
+
+**Content tile**:
+A rasterized image, at the current image scale, of the committed non-highlighter stroke content
+intersecting one document-space cell, drawn as one render node in place of the per-stroke nodes.
+Highlighter strokes stay per-stroke renderings, because the whole layer is blended once.
+_Avoid_: stroke tile, canvas tile
+
+**Cell**:
+One rectangle of the document-space grid the content tiles are cut along, aligned to multiples of
+the cell extent and sized to `CONTENT_TILE_TARGET_CELL_EXTENT` screen pixels.
+_Avoid_: tile (when the grid rectangle is meant), chunk
+
+**Content tile cache**:
+The set of content tiles covering the extended viewport. It is rebuilt when the content revision
+changes, the image scale is no longer reusable, or the cached coverage no longer contains the
+extended viewport. A cache built for an older pan or zoom stays drawable until its replacement
+lands; a cache of older content is dropped immediately.
+_Avoid_: tile atlas, tile set

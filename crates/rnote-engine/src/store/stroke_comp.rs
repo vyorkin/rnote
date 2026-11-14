@@ -134,6 +134,7 @@ impl StrokeStore {
             self.key_tree.update_with_key(key, stroke.bounds());
             self.set_rendering_dirty(key);
         }
+        self.bump_content_revision();
     }
 
     /// Updates the strokes geometries.
@@ -222,6 +223,7 @@ impl StrokeStore {
             return;
         };
         stroke.set_pos(pos);
+        self.bump_content_revision();
     }
 
     /// Translate the strokes by the offset.
@@ -240,6 +242,7 @@ impl StrokeStore {
                 }
             }
         });
+        self.bump_content_revision();
     }
 
     /// Translate the stroke rendering images.
@@ -270,6 +273,7 @@ impl StrokeStore {
     ///
     /// Strokes then need to update their rendering.
     pub(crate) fn rotate_strokes(&mut self, keys: &[StrokeKey], angle: f64, center: Vector2) {
+        self.bump_content_revision();
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
                 .get_mut(key)
@@ -322,6 +326,8 @@ impl StrokeStore {
         widget_flags.redraw = true;
         widget_flags.store_modified = true;
 
+        self.bump_content_revision();
+
         widget_flags
     }
 
@@ -350,6 +356,8 @@ impl StrokeStore {
 
         widget_flags.redraw = true;
         widget_flags.store_modified = true;
+
+        self.bump_content_revision();
 
         widget_flags
     }
@@ -445,6 +453,8 @@ impl StrokeStore {
 
         self.set_rendering_dirty_for_strokes(changed_keys);
 
+        self.bump_content_revision();
+
         widget_flags.redraw = true;
         widget_flags.store_modified = true;
 
@@ -485,6 +495,8 @@ impl StrokeStore {
         widget_flags.redraw = true;
         widget_flags.store_modified = true;
 
+        self.bump_content_revision();
+
         widget_flags
     }
 
@@ -492,6 +504,7 @@ impl StrokeStore {
     ///
     /// The strokes then need to update their rendering.
     pub(crate) fn scale_strokes(&mut self, keys: &[StrokeKey], scale: Vector2) {
+        self.bump_content_revision();
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
                 .get_mut(key)

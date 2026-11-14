@@ -10,6 +10,7 @@ use p2d::bounding_volume::{Aabb, BoundingVolume};
 use rnote_compose::ext::AabbExt;
 use rnote_compose::shapes::Shapeable;
 use std::collections::HashSet;
+use std::sync::Arc;
 use tracing::error;
 
 /// The tolerance of an image scale relative to another one, within which images are reused.
@@ -31,6 +32,16 @@ pub(crate) fn image_scale_is_reusable(cached: f64, current: f64) -> bool {
 /// Used when checking rendering for new zooms or a moved viewport.
 /// There is a trade off: a larger value will consume more memory, a smaller value will mean more stuttering on zooms and when moving the view.
 pub const VIEWPORT_EXTENTS_MARGIN_FACTOR: f64 = 0.4;
+
+/// The visible non-highlighter stroke count a view must exceed for its content to be drawn
+/// from content tiles instead of per-stroke render nodes.
+///
+/// At or below it the node count is small enough that the tiling costs more (rasterizing
+/// cells, keeping their images) than the per-stroke nodes it would replace.
+pub const CONTENT_TILE_MIN_STROKES: usize = 200;
+
+/// The longest side of a content tile, in screen pixels.
+pub(crate) const CONTENT_TILE_TARGET_CELL_EXTENT: f64 = 512.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RenderCompState {
@@ -307,6 +318,7 @@ impl StrokeStore {
             tasks_tx,
             force_regenerate,
             true,
+            None,
             viewport,
             image_scale,
         )
@@ -326,7 +338,36 @@ impl StrokeStore {
         viewport: Aabb,
         image_scale: f64,
     ) -> usize {
-        self.regenerate_rendering_in_viewport_impl(tasks_tx, false, false, viewport, image_scale)
+        self.regenerate_rendering_in_viewport_impl(
+            tasks_tx,
+            false,
+            false,
+            None,
+            viewport,
+            image_scale,
+        )
+    }
+
+    /// Regenerate the rendering of the highlighter strokes for the given viewport.
+    ///
+    /// These are the only per-stroke renderings a view drawn from content tiles still needs; the
+    /// regular layer is drawn from the tiles.
+    ///
+    /// Returns the number of render tasks started.
+    pub(crate) fn regenerate_highlighter_rendering_in_viewport_threaded(
+        &mut self,
+        tasks_tx: EngineTaskSender,
+        viewport: Aabb,
+        image_scale: f64,
+    ) -> usize {
+        self.regenerate_rendering_in_viewport_impl(
+            tasks_tx,
+            false,
+            true,
+            Some(StrokeLayer::Highlighter),
+            viewport,
+            image_scale,
+        )
     }
 
     fn regenerate_rendering_in_viewport_impl(
@@ -334,6 +375,7 @@ impl StrokeStore {
         tasks_tx: EngineTaskSender,
         force_regenerate: bool,
         rerender_stale_scale: bool,
+        only_layer: Option<StrokeLayer>,
         viewport: Aabb,
         image_scale: f64,
     ) -> usize {
@@ -353,6 +395,10 @@ impl StrokeStore {
         let mut tasks_started = 0;
 
         for key in keys {
+            if only_layer.is_some_and(|layer| self.stroke_layer(key) != layer) {
+                continue;
+            }
+
             if let Some(stroke) = self.stroke_components.get(key)
                 && let Some(render_comp) = self.render_components.get_mut(key)
             {
@@ -812,6 +858,18 @@ impl StrokeStore {
         }
     }
 
+    /// The strokes one content tile of `bounds` draws, in draw order.
+    ///
+    /// Highlighter strokes are left out: they are blended over the regular layer as a whole, so
+    /// they stay per-stroke render nodes.
+    pub(crate) fn content_tile_strokes(&self, bounds: Aabb) -> Vec<Arc<Stroke>> {
+        self.stroke_keys_as_rendered_intersecting_bounds_partitioned(bounds)
+            .0
+            .into_iter()
+            .filter_map(|key| self.stroke_components.get(key).cloned())
+            .collect()
+    }
+
     /// Draw bounds, positions, etc. for all strokes for visual debugging purposes.
     #[cfg(feature = "ui")]
     pub(crate) fn draw_debug_to_gtk_snapshot(
@@ -905,6 +963,27 @@ impl StrokeStore {
 
         Ok(())
     }
+}
+
+/// Rasterize the given strokes into one image of `bounds`, at `image_scale`.
+///
+/// A free function so that a render task can own the strokes (cheap `Arc` clones) instead of the
+/// store, which is not sent to worker threads.
+pub(crate) fn gen_content_tile_image_from_strokes(
+    strokes: &[Arc<Stroke>],
+    bounds: Aabb,
+    image_scale: f64,
+) -> anyhow::Result<Image> {
+    Image::gen_with_piet(
+        |piet_cx| {
+            for stroke in strokes {
+                stroke.draw(piet_cx, image_scale)?;
+            }
+            Ok(())
+        },
+        bounds,
+        image_scale,
+    )
 }
 
 #[cfg(test)]

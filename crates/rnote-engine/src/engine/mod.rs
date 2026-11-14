@@ -33,6 +33,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::{mpsc, oneshot};
 use p2d::bounding_volume::{Aabb, BoundingVolume};
 use p2d::math::Vector2;
+use rendering::{ContentTileCache, ContentTileRequest};
 use rnote_compose::eventresult::EventPropagation;
 use rnote_compose::ext::AabbExt;
 use rnote_compose::penevent::{PenEvent, ShortcutKey};
@@ -154,6 +155,22 @@ pub enum EngineTask {
         /// The generated images
         images: GeneratedContentImages,
     },
+    /// Replaces one content tile of the cache with a newly rasterized image.
+    ///
+    /// The task is discarded when the cache request it was generated for is no longer the current
+    /// one (the view or the content has changed in the meantime).
+    UpdateContentTileWithImage {
+        /// The document-space cell the tile covers.
+        cell_bounds: Aabb,
+        /// The rasterized cell content.
+        image: Image,
+        /// The image scale the tile was rasterized at.
+        image_scale: f64,
+        /// The `StrokeStore::content_revision()` at request time.
+        revision: u64,
+        /// The document-space region the tile set covers at request time.
+        coverage: Aabb,
+    },
     /// Requests that the typewriter cursor should be blinked/toggled
     BlinkTypewriterCursor,
     /// Requests that the currently drawn brush stroke should be recognized as a shape and replaced by it.
@@ -242,6 +259,19 @@ pub struct Engine {
     #[cfg(feature = "ui")]
     #[serde(skip)]
     background_tile_bounds: Aabb,
+    // Content tile rendering
+    /// The content tiles drawn instead of the per-stroke render nodes.
+    #[serde(skip)]
+    content_tile_cache: Option<ContentTileCache>,
+    /// The content tile rebuild whose tasks are in flight.
+    #[serde(skip)]
+    content_tile_request: Option<ContentTileRequest>,
+    /// The tiles of the rebuild in flight, swapped in as the drawn cache once complete.
+    #[serde(skip)]
+    content_tile_staging: Option<ContentTileCache>,
+    /// Whether the per-stroke renderings are left out because content tiles serve the view.
+    #[serde(skip)]
+    content_tiles_served: bool,
     // Origin indicator rendering
     #[serde(skip)]
     origin_indicator_image: Option<Image>,
@@ -279,6 +309,10 @@ impl Default for Engine {
             background_tile_rendernode: None,
             #[cfg(feature = "ui")]
             background_tile_bounds: Aabb::new_zero(),
+            content_tile_cache: None,
+            content_tile_request: None,
+            content_tile_staging: None,
+            content_tiles_served: false,
             origin_indicator_image: None,
             #[cfg(feature = "ui")]
             origin_indicator_texture: None,
@@ -513,6 +547,54 @@ impl Engine {
             EngineTask::AppendImagesToStroke { key, images } => {
                 self.store.append_rendering_images(key, images);
                 widget_flags.redraw = true;
+            }
+            EngineTask::UpdateContentTileWithImage {
+                cell_bounds,
+                image,
+                image_scale,
+                revision,
+                coverage,
+            } => {
+                let belongs_to_current_request =
+                    self.content_tile_request.as_ref().is_some_and(|request| {
+                        request.revision == revision
+                            && request.image_scale == image_scale
+                            && request.coverage == coverage
+                    });
+
+                if belongs_to_current_request {
+                    let staging_is_for_request =
+                        self.content_tile_staging.as_ref().is_some_and(|staging| {
+                            staging.revision == revision
+                                && staging.image_scale == image_scale
+                                && staging.coverage == coverage
+                        });
+
+                    if !staging_is_for_request {
+                        self.content_tile_staging =
+                            Some(ContentTileCache::new(coverage, image_scale, revision));
+                    }
+
+                    let expected_cells = self
+                        .content_tile_request
+                        .as_ref()
+                        .map(|request| request.expected_cells)
+                        .unwrap_or_default();
+
+                    if let Some(staging) = self.content_tile_staging.as_mut() {
+                        if let Err(e) = staging.push_tile(cell_bounds, image) {
+                            error!("Failed to add a content tile to the cache, Err: {e:?}");
+                        }
+
+                        // The stale cache stays drawable (with the camera transform) until the
+                        // replacement is whole: a partial grid would blank every cell whose tile
+                        // hasn't arrived yet.
+                        if staging.tiles.len() >= expected_cells {
+                            self.content_tile_cache = self.content_tile_staging.take();
+                        }
+                    }
+                    widget_flags.redraw = true;
+                }
             }
             EngineTask::BlinkTypewriterCursor => {
                 if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
