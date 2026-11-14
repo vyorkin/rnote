@@ -330,8 +330,9 @@ impl DrawableOnDoc for Selector {
                                 bez_path.line_to(element.pos.to_kurbo_point());
                             }
 
-                            bez_path.close_path();
-
+                            // The polygon lasso shows only the curve drawn so far: a closed,
+                            // filled outline while the pen still moves hides where the curve
+                            // is going and reads as a finished selection.
                             let mut stroke_style = piet::StrokeStyle::new();
                             stroke_style.set_dash_pattern(
                                 Self::SELECTING_DASH_PATTERN
@@ -340,7 +341,6 @@ impl DrawableOnDoc for Selector {
                                     .collect::<Vec<f64>>(),
                             );
 
-                            cx.fill(bez_path.clone(), &Self::SELECTION_FILL_COLOR);
                             cx.stroke_styled(
                                 bez_path,
                                 &Self::SELECTION_OUTLINE_COLOR,
