@@ -171,6 +171,17 @@ pub enum EngineTask {
         /// The document-space region the tile set covers at request time.
         coverage: Aabb,
     },
+    /// A cell of a content tile rebuild whose rasterization failed.
+    ///
+    /// Sent so the rebuild completes without it instead of waiting for a tile that never arrives.
+    ContentTileFailed {
+        /// The image scale the tile was to be rasterized at.
+        image_scale: f64,
+        /// The `StrokeStore::content_revision()` at request time.
+        revision: u64,
+        /// The document-space region the tile set covers at request time.
+        coverage: Aabb,
+    },
     /// Requests that the typewriter cursor should be blinked/toggled
     BlinkTypewriterCursor,
     /// Requests that the currently drawn brush stroke should be recognized as a shape and replaced by it.
@@ -429,6 +440,9 @@ impl Engine {
     pub fn load_snapshot(&mut self, snapshot: EngineSnapshot) -> WidgetFlags {
         self.document = snapshot.document.extract_snapshot_data();
         self.camera = snapshot.camera.extract_snapshot_data();
+        // The tiles hold the content of the previous document: they are neither drawn nor kept
+        // while the new one is rasterized.
+        self.clear_content_tiles();
         let mut widget_flags = self.store.import_from_snapshot(&snapshot)
             | self.doc_resize_autoexpand()
             | self.current_pen_update_state()
@@ -475,6 +489,9 @@ impl Engine {
 
     // Clears the entire engine.
     pub fn clear(&mut self) -> WidgetFlags {
+        // the tiles of the cleared document must not stay drawn: nothing moves the camera here,
+        // so no viewport update follows to drop them
+        self.clear_content_tiles();
         self.store.clear() | self.current_pen_update_state() | self.return_to_origin(None)
     }
 
@@ -555,43 +572,37 @@ impl Engine {
                 revision,
                 coverage,
             } => {
-                let belongs_to_current_request =
-                    self.content_tile_request.as_ref().is_some_and(|request| {
-                        request.revision == revision
-                            && request.image_scale == image_scale
-                            && request.coverage == coverage
-                    });
-
-                if belongs_to_current_request {
-                    let staging_is_for_request =
-                        self.content_tile_staging.as_ref().is_some_and(|staging| {
-                            staging.revision == revision
-                                && staging.image_scale == image_scale
-                                && staging.coverage == coverage
-                        });
-
-                    if !staging_is_for_request {
-                        self.content_tile_staging =
-                            Some(ContentTileCache::new(coverage, image_scale, revision));
+                if self.content_tile_task_belongs_to_request(image_scale, revision, coverage) {
+                    if let Some(staging) =
+                        self.content_tile_staging_for_request(image_scale, revision, coverage)
+                        && let Err(e) = staging.push_tile(cell_bounds, image)
+                    {
+                        error!("Failed to add a content tile to the cache, Err: {e:?}");
                     }
 
-                    let expected_cells = self
-                        .content_tile_request
-                        .as_ref()
-                        .map(|request| request.expected_cells)
-                        .unwrap_or_default();
-
-                    if let Some(staging) = self.content_tile_staging.as_mut() {
-                        if let Err(e) = staging.push_tile(cell_bounds, image) {
-                            error!("Failed to add a content tile to the cache, Err: {e:?}");
-                        }
-
-                        // The stale cache stays drawable (with the camera transform) until the
-                        // replacement is whole: a partial grid would blank every cell whose tile
-                        // hasn't arrived yet.
-                        if staging.tiles.len() >= expected_cells {
-                            self.content_tile_cache = self.content_tile_staging.take();
-                        }
+                    // The stale cache stays drawable (with the camera transform) until the
+                    // replacement is whole: a partial grid would blank every cell whose tile
+                    // hasn't arrived yet.
+                    if self.swap_content_tile_staging_if_complete() {
+                        self.regenerate_highlighter_layer();
+                    }
+                    widget_flags.redraw = true;
+                }
+            }
+            EngineTask::ContentTileFailed {
+                image_scale,
+                revision,
+                coverage,
+            } => {
+                if self.content_tile_task_belongs_to_request(image_scale, revision, coverage) {
+                    if let Some(staging) =
+                        self.content_tile_staging_for_request(image_scale, revision, coverage)
+                    {
+                        staging.failed_cells += 1;
+                    }
+                    // complete the rebuild without the failed cell instead of waiting for it
+                    if self.swap_content_tile_staging_if_complete() {
+                        self.regenerate_highlighter_layer();
                     }
                     widget_flags.redraw = true;
                 }

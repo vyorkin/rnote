@@ -114,6 +114,43 @@ impl StrokeStore {
             })
     }
 
+    /// The number of visible (non-trashed) non-highlighter strokes intersecting the bounds.
+    ///
+    /// Cheaper than [Self::stroke_keys_as_rendered_intersecting_bounds_partitioned] when only the
+    /// count matters: no sort and no key list.
+    pub(crate) fn visible_non_highlighter_stroke_count(&self, bounds: Aabb) -> usize {
+        self.key_tree
+            .keys_intersecting_bounds(bounds)
+            .into_iter()
+            .filter(|&key| {
+                !self.trashed(key).unwrap_or(false)
+                    && self.stroke_layer(key) != StrokeLayer::Highlighter
+            })
+            .count()
+    }
+
+    /// Highlighter stroke keys intersecting the given bounds, in the order they should be rendered.
+    ///
+    /// The highlighter layer stays per-stroke when the regular content is drawn from tiles, so its
+    /// keys are fetched without sorting the whole visible content.
+    #[cfg(feature = "ui")]
+    pub(crate) fn highlighter_keys_as_rendered_intersecting_bounds(
+        &self,
+        bounds: Aabb,
+    ) -> Vec<StrokeKey> {
+        let mut keys = self
+            .key_tree
+            .keys_intersecting_bounds(bounds)
+            .into_iter()
+            .filter(|&key| {
+                !self.trashed(key).unwrap_or(false)
+                    && self.stroke_layer(key) == StrokeLayer::Highlighter
+            })
+            .collect::<Vec<StrokeKey>>();
+        self.sort_keys_chrono(&mut keys);
+        keys
+    }
+
     /// Clone the strokes for the given keys.
     #[allow(unused)]
     pub(crate) fn clone_strokes(&self, keys: &[StrokeKey]) -> Vec<Stroke> {

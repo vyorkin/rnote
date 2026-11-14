@@ -1499,7 +1499,7 @@ mod preview_draw {
     }
 
     /// Renders the whole canvas, as the canvas widget does.
-    fn render_canvas(engine: &Engine) -> image::RgbaImage {
+    fn render_canvas(engine: &mut Engine) -> image::RgbaImage {
         let bounds = Aabb::new(
             DVec2::new(0., 0.),
             DVec2::new(CANVAS_SIZE[0], CANVAS_SIZE[1]),
@@ -1555,7 +1555,7 @@ mod preview_draw {
             let key = engine.store.insert_stroke(red_image_stroke(center), None);
             engine.store.set_previewing(&[key], true);
 
-            let frame = render_canvas(&engine);
+            let frame = render_canvas(&mut engine);
             let pixel = frame.get_pixel(400, 300);
             assert!(
                 pixel.0[0] == 255 && pixel.0[1] == 0 && pixel.0[2] == 0,
@@ -1585,7 +1585,7 @@ mod preview_draw {
         );
         engine.store.set_previewing(&[key], true);
 
-        let frame = render_canvas(&engine);
+        let frame = render_canvas(&mut engine);
         // the right extremum of the ellipse, where the camera puts it
         let right = center + Vector2::new(radii[0], 0.);
         let on_surface = (right * zoom - (center * zoom - CANVAS_SIZE * 0.5)).round();

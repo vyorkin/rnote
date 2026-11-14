@@ -106,9 +106,9 @@ pub struct StrokeStore {
     live_index: usize,
     /// Monotonic counter of committed content changes.
     ///
-    /// A content tile cache built for an older revision shows stale strokes, so it checks this
-    /// before drawing and is dropped when it differs (see
-    /// `Engine::update_content_tile_cache_current_viewport`).
+    /// A content tile cache built for an older revision shows stale strokes, so a rebuild is
+    /// started when it differs (see `Engine::update_content_tile_cache_current_viewport`). The
+    /// old grid stays drawable until the replacement lands.
     #[serde(skip)]
     content_revision: u64,
     /// An rtree backed by the slotmap store, for faster spatial queries.

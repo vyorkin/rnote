@@ -382,6 +382,23 @@ impl StrokeStore {
         let viewport_extended =
             viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
 
+        // Only the keys of the requested layer are collected: while the regular content is drawn
+        // from content tiles, only highlighter strokes are visited then, instead of collecting
+        // every render component key and looking up its layer on every viewport update.
+        let keys = match only_layer {
+            Some(layer) => self
+                .chrono_components
+                .iter()
+                .filter(|(_, chrono_comp)| chrono_comp.layer == layer)
+                .map(|(key, _)| key)
+                .collect::<Vec<StrokeKey>>(),
+            None => self.render_components.keys().collect::<Vec<StrokeKey>>(),
+        };
+        if keys.is_empty() {
+            // No stroke of the requested layer, so no visible key set was needed either.
+            return 0;
+        }
+
         // The bounds of every stroke are already indexed in the key tree, so the strokes
         // intersecting the viewport are looked up there instead of recomputing the composed
         // bounds of every stroke in the document: that scan cost tens of milliseconds on a
@@ -391,14 +408,9 @@ impl StrokeStore {
             .keys_intersecting_bounds(viewport_extended)
             .into_iter()
             .collect::<HashSet<StrokeKey>>();
-        let keys = self.render_components.keys().collect::<Vec<StrokeKey>>();
         let mut tasks_started = 0;
 
         for key in keys {
-            if only_layer.is_some_and(|layer| self.stroke_layer(key) != layer) {
-                continue;
-            }
-
             if let Some(stroke) = self.stroke_components.get(key)
                 && let Some(render_comp) = self.render_components.get_mut(key)
             {

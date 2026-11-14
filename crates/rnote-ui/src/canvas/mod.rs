@@ -663,9 +663,11 @@ mod imp {
                 snapshot.push_clip(&graphene::Rect::from_p2d_aabb(clip_bounds));
 
                 // Draw the entire engine
-                self.engine
-                    .borrow()
-                    .draw_to_gtk_snapshot(snapshot, obj.bounds(), clip_bounds)?;
+                self.engine.borrow_mut().draw_to_gtk_snapshot(
+                    snapshot,
+                    obj.bounds(),
+                    clip_bounds,
+                )?;
 
                 // pop the clip
                 snapshot.pop();

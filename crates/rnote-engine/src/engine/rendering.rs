@@ -26,6 +26,11 @@ pub(crate) struct ContentTileCache {
     pub(crate) image_scale: f64,
     /// `StrokeStore::content_revision()` at build time.
     pub(crate) revision: u64,
+    /// Cells of the rebuild whose rasterization failed.
+    ///
+    /// Staging only, counted so that a cell whose tile never arrives cannot leave the rebuild
+    /// waiting forever: the grid would then never swap in and the view would stay stale.
+    pub(crate) failed_cells: usize,
 }
 
 /// One rasterized document-space cell of the content tile cache.
@@ -61,13 +66,15 @@ impl ContentTileCache {
             coverage,
             image_scale,
             revision,
+            failed_cells: 0,
         }
     }
 
     /// Whether the tiles were rasterized for the given content revision.
     ///
-    /// Only the revision: a cache built for an older pan or zoom stays drawable until its
-    /// replacement lands, while a cache of older content is never drawn.
+    /// Only the revision, and only to decide whether a rebuild is needed: a cache built for an
+    /// older revision stays drawable until its replacement lands, it is just not served as the
+    /// up-to-date grid.
     pub(crate) fn is_for_revision(&self, revision: u64) -> bool {
         self.revision == revision
     }
@@ -151,6 +158,11 @@ fn gen_content_tile_task(
         }),
         Err(e) => {
             error!("Generating a content tile image failed, cell {cell_bounds:?}, Err: {e:?}");
+            tasks_tx.send(EngineTask::ContentTileFailed {
+                image_scale,
+                revision,
+                coverage,
+            });
         }
     }
 }
@@ -242,6 +254,17 @@ impl Engine {
         self.update_origin_indicator_rendernode();
     }
 
+    /// Drop the content tiles, the rebuild in flight and its staged tiles.
+    ///
+    /// Used when the tiles no longer describe anything drawable: the rendering is cleared or
+    /// another document is loaded.
+    pub(crate) fn clear_content_tiles(&mut self) {
+        self.content_tile_cache = None;
+        self.content_tile_request = None;
+        self.content_tile_staging = None;
+        self.content_tiles_served = false;
+    }
+
     /// Update the content tile cache for the current viewport.
     ///
     /// A dense view is drawn from rasterized content tiles instead of a render node per stroke
@@ -254,17 +277,6 @@ impl Engine {
     pub fn update_content_tile_cache_current_viewport(&mut self) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
 
-        // Drawn tiles would show stale content.
-        if self
-            .content_tile_cache
-            .as_ref()
-            .is_some_and(|cache| cache.revision != self.store.content_revision())
-        {
-            self.content_tile_cache = None;
-            self.content_tile_request = None;
-            widget_flags.redraw = true;
-        }
-
         // An in-progress stroke is a preview, the committed content is unchanged. Rebuilding on
         // each preview segment would churn the cache for no gain.
         if self.penholder.pen_state_down() || self.camera.temporary_zoom() != 1.0 {
@@ -275,11 +287,20 @@ impl Engine {
         let coverage = viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
         let image_scale = self.camera.image_scale();
 
-        let visible_non_highlighter_strokes = self
-            .store
-            .stroke_keys_as_rendered_intersecting_bounds_partitioned(viewport)
-            .0
-            .len();
+        // The cache serves this view. This is checked before the visible stroke count: while it
+        // serves, a pan or a small zoom step must not sort the visible stroke keys just to count.
+        if self.content_tile_cache.as_ref().is_some_and(|cache| {
+            cache.is_for_revision(self.store.content_revision())
+                && image_scale_is_reusable(cache.image_scale, image_scale)
+                && cache.coverage.contains(&coverage)
+        }) {
+            self.content_tile_request = None;
+            self.content_tile_staging = None;
+            return widget_flags;
+        }
+
+        let visible_non_highlighter_strokes =
+            self.store.visible_non_highlighter_stroke_count(viewport);
 
         if visible_non_highlighter_strokes <= CONTENT_TILE_MIN_STROKES {
             if self.content_tile_cache.is_some() || self.content_tile_request.is_some() {
@@ -288,17 +309,6 @@ impl Engine {
                 self.content_tile_staging = None;
                 widget_flags.redraw = true;
             }
-            return widget_flags;
-        }
-
-        if self.content_tile_cache.as_ref().is_some_and(|cache| {
-            cache.revision == self.store.content_revision()
-                && image_scale_is_reusable(cache.image_scale, image_scale)
-                && cache.coverage.contains(&coverage)
-        }) {
-            // the cache serves this view
-            self.content_tile_request = None;
-            self.content_tile_staging = None;
             return widget_flags;
         }
 
@@ -356,14 +366,95 @@ impl Engine {
         widget_flags
     }
 
+    /// Whether a tile or failure arriving for these rebuild parameters answers the request.
+    pub(crate) fn content_tile_task_belongs_to_request(
+        &self,
+        image_scale: f64,
+        revision: u64,
+        coverage: Aabb,
+    ) -> bool {
+        self.content_tile_request.as_ref().is_some_and(|request| {
+            request.revision == revision
+                && request.image_scale == image_scale
+                && request.coverage == coverage
+        })
+    }
+
+    /// The staging cache of the rebuild in flight, started when its first task arrives.
+    ///
+    /// Only call this for a task that answers the request: a stale task must not start a grid.
+    pub(crate) fn content_tile_staging_for_request(
+        &mut self,
+        image_scale: f64,
+        revision: u64,
+        coverage: Aabb,
+    ) -> Option<&mut ContentTileCache> {
+        let staging_is_for_request = self.content_tile_staging.as_ref().is_some_and(|staging| {
+            staging.revision == revision
+                && staging.image_scale == image_scale
+                && staging.coverage == coverage
+        });
+        if !staging_is_for_request {
+            self.content_tile_staging =
+                Some(ContentTileCache::new(coverage, image_scale, revision));
+        }
+        self.content_tile_staging.as_mut()
+    }
+
+    /// Swap the staged grid in once every cell of the request has arrived or failed.
+    ///
+    /// Returns whether it swapped, i.e. whether the drawn content changed.
+    pub(crate) fn swap_content_tile_staging_if_complete(&mut self) -> bool {
+        let expected_cells = self
+            .content_tile_request
+            .as_ref()
+            .map(|request| request.expected_cells)
+            .unwrap_or_default();
+        let complete = self
+            .content_tile_staging
+            .as_ref()
+            .is_some_and(|staging| staging.tiles.len() + staging.failed_cells >= expected_cells);
+        if !complete {
+            return false;
+        }
+
+        match self.content_tile_staging.take() {
+            // every cell failed: a grid without a single tile would blank the view, so what is
+            // drawn stays and the request is dropped for the next update to retry
+            Some(staging) if staging.tiles.is_empty() => {
+                self.content_tile_request = None;
+                false
+            }
+            Some(staging) => {
+                self.content_tile_cache = Some(staging);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Rasterize the highlighter strokes of the current viewport again.
+    ///
+    /// The highlighter layer is blended over the content tiles as a whole, so it stays per-stroke
+    /// renderings: they are refreshed once a new grid is drawn, since the images of the previous
+    /// highlighter content are not regenerated with the tiles.
+    pub(crate) fn regenerate_highlighter_layer(&mut self) {
+        self.store
+            .regenerate_highlighter_rendering_in_viewport_threaded(
+                self.engine_tasks_tx(),
+                self.camera.viewport(),
+                self.camera.image_scale(),
+            );
+    }
+
     /// Whether the drawn content is the content tile cache.
     ///
     /// The per-stroke renderings are left out while this is true: they are neither drawn nor
-    /// regenerated for a view that draws tiles.
+    /// regenerated for a view that draws tiles. A cache of older content counts: while its
+    /// replacement is rasterized it stays drawable, because falling back to per-stroke images
+    /// for that window would rasterize every visible stroke - the work the tiles exist to avoid.
     fn content_tiles_serve_view(&self) -> bool {
-        self.content_tile_cache
-            .as_ref()
-            .is_some_and(|cache| cache.is_for_revision(self.store.content_revision()))
+        self.content_tile_cache.is_some()
     }
 
     /// Update the content rendering for the current viewport.
@@ -381,16 +472,32 @@ impl Engine {
             }
             // highlighter strokes are blended over the regular layer as a whole, so they stay
             // per-stroke renderings in the multiply layer
-            self.store
-                .regenerate_highlighter_rendering_in_viewport_threaded(
-                    self.engine_tasks_tx(),
-                    self.camera.viewport(),
-                    self.camera.image_scale(),
-                );
+            self.regenerate_highlighter_layer();
             widget_flags.redraw = true;
             return widget_flags;
         }
         self.content_tiles_served = false;
+
+        // The tiles for this view are being rasterized, or a zoom gesture is in progress on a
+        // view dense enough to be tiled once it ends. The images at hand stay drawn scaled until
+        // then: rasterizing every visible stroke, per wheel tick or once for a view that is about
+        // to draw tiles, is the work the tiles exist to avoid.
+        if self.content_tile_request.is_some()
+            || (self.camera.temporary_zoom() != 1.0
+                && self
+                    .store
+                    .visible_non_highlighter_stroke_count(self.camera.viewport())
+                    > CONTENT_TILE_MIN_STROKES)
+        {
+            if self.content_tile_request.is_some() {
+                // the highlighter layer is per-stroke also while the first grid is rasterized,
+                // and nothing regenerates it once the grid swaps in: without this, the multiply
+                // layer would blend the placeholder rects of unrendered highlighter strokes
+                self.regenerate_highlighter_layer();
+            }
+            widget_flags.redraw = true;
+            return widget_flags;
+        }
 
         // While a zoom gesture is in progress, the zoom is temporary and the content is
         // rasterized at the scale it is shown at. That scale differs from the one of the existing
@@ -427,9 +534,7 @@ impl Engine {
     pub fn clear_rendering(&mut self) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
         self.store.clear_rendering();
-        self.content_tile_cache = None;
-        self.content_tile_request = None;
-        self.content_tiles_served = false;
+        self.clear_content_tiles();
         self.background_tile_image.take();
         self.origin_indicator_image.take();
         #[cfg(feature = "ui")]
@@ -485,7 +590,7 @@ impl Engine {
     /// large as the document, so the visible area extends past it once the document is zoomed out
     /// far enough to fit on screen.
     pub fn draw_to_gtk_snapshot(
-        &self,
+        &mut self,
         snapshot: &gtk4::Snapshot,
         surface_bounds: p2d::bounding_volume::Aabb,
         visible_bounds: p2d::bounding_volume::Aabb,
@@ -496,6 +601,23 @@ impl Engine {
         use gtk4::{graphene, prelude::*};
         use rnote_compose::ext::DAffine2Ext;
 
+        // A commit - a stroke, a trashed stroke - changes the content without moving the camera,
+        // and no viewport update follows it. Start the replacement grid from the frame that first
+        // draws a grid the content has moved on from, so the committed content cannot stay hidden
+        // until the next pan or zoom.
+        let revision = self.store.content_revision();
+        let grid_is_stale = self
+            .content_tile_cache
+            .as_ref()
+            .is_some_and(|cache| !cache.is_for_revision(revision));
+        let rebuild_is_for_current_content = self
+            .content_tile_request
+            .as_ref()
+            .is_some_and(|request| request.revision == revision);
+        if grid_is_stale && !rebuild_is_for_current_content {
+            let _ = self.update_content_tile_cache_current_viewport();
+        }
+
         let doc_bounds = self.document.bounds();
         let viewport = self.camera.viewport();
         let camera_transform = self.camera.transform_for_gtk_snapshot();
@@ -505,9 +627,21 @@ impl Engine {
 
         self.draw_document_shadow_to_gtk_snapshot(snapshot);
 
-        let (non_highlighter_keys, highlighter_keys) = self
-            .store
-            .stroke_keys_as_rendered_intersecting_bounds_partitioned(viewport);
+        let tiles = self.content_tile_cache.as_ref();
+
+        // The highlighter layer is drawn per stroke, also when the regular content comes from
+        // content tiles. Only its keys are fetched then: the regular content is one node per cell,
+        // so sorting and partitioning the visible stroke keys would be wasted work every frame.
+        let (non_highlighter_keys, highlighter_keys) = if tiles.is_some() {
+            (
+                Vec::new(),
+                self.store
+                    .highlighter_keys_as_rendered_intersecting_bounds(viewport),
+            )
+        } else {
+            self.store
+                .stroke_keys_as_rendered_intersecting_bounds_partitioned(viewport)
+        };
 
         // push clip
         snapshot.push_clip(&graphene::Rect::from_p2d_aabb(doc_bounds));
@@ -516,11 +650,7 @@ impl Engine {
         self.draw_format_borders_to_gtk_snapshot(snapshot)?;
 
         // bottom image in blend (regular content)
-        match self
-            .content_tile_cache
-            .as_ref()
-            .filter(|cache| cache.is_for_revision(self.store.content_revision()))
-        {
+        match tiles {
             Some(cache) => cache.append_to_gtk_snapshot(snapshot),
             None => {
                 for &key in non_highlighter_keys.iter() {
@@ -1019,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn a_content_change_drops_the_cache_until_the_rebuild_lands() {
+    fn a_content_change_rebuilds_the_tiles() {
         let (mut engine, mut rx) = dense_engine();
         let _ = engine.update_content_tile_cache_current_viewport();
         assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
@@ -1028,18 +1158,76 @@ mod tests {
         insert_stroke_at(&mut engine, Vector2::new(200., 200.));
         assert_ne!(engine.store.content_revision(), revision);
         assert!(
-            !engine.content_tiles_serve_view(),
-            "tiles of the old revision are not drawn"
+            engine.content_tiles_serve_view(),
+            "the previous tiles stay drawable while the new grid is rasterized"
         );
 
         let _ = engine.update_content_tile_cache_current_viewport();
-        assert!(
-            engine.content_tile_cache.is_none(),
-            "the stale tiles are dropped immediately"
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_ne!(
+            cache.revision,
+            engine.store.content_revision(),
+            "the tiles of the old content stay until the replacement lands"
         );
         assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
         let cache = engine.content_tile_cache.as_ref().unwrap();
         assert_eq!(cache.revision, engine.store.content_revision());
+    }
+
+    #[test]
+    fn the_first_grid_is_rasterized_without_a_per_stroke_wave() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_rendering_current_viewport();
+        let tasks = take_tasks(&mut rx);
+        let tile_tasks = tasks
+            .iter()
+            .filter(|task| matches!(task, EngineTask::UpdateContentTileWithImage { .. }))
+            .count();
+        assert!(tile_tasks > 0, "the grid is rasterized");
+        assert_eq!(
+            tile_tasks,
+            tasks.len(),
+            "no visible stroke is rasterized per stroke while the grid is built"
+        );
+    }
+
+    #[test]
+    fn a_zoom_gesture_on_a_dense_view_does_not_rasterize_per_stroke() {
+        let (mut engine, mut rx) = dense_engine();
+        let backlog = take_tasks(&mut rx);
+        for task in backlog {
+            let _ = engine.handle_engine_task(task);
+        }
+        let _ = engine.camera.zoom_temporarily_to(1.2);
+
+        let _ = engine.update_content_rendering_current_viewport();
+        let tasks = take_tasks(&mut rx);
+        assert!(
+            tasks.is_empty(),
+            "no visible stroke is rasterized while the zoom is temporary"
+        );
+    }
+
+    #[test]
+    fn an_edit_on_a_tiled_view_rebuilds_the_grid_without_a_per_stroke_wave() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let _ = engine.update_content_rendering_current_viewport();
+
+        insert_stroke_at(&mut engine, Vector2::new(200., 200.));
+        let _ = engine.update_content_rendering_current_viewport();
+        let tasks = take_tasks(&mut rx);
+        let tile_tasks = tasks
+            .iter()
+            .filter(|task| matches!(task, EngineTask::UpdateContentTileWithImage { .. }))
+            .count();
+        assert!(tile_tasks > 0, "the new grid is rasterized");
+        assert_eq!(
+            tile_tasks,
+            tasks.len(),
+            "no visible stroke is rasterized per stroke for the tiles view"
+        );
     }
 
     #[test]
@@ -1083,20 +1271,25 @@ mod tests {
     }
 
     #[test]
-    fn appearance_changes_drop_the_cache() {
+    fn appearance_changes_rebuild_the_tiles() {
         let (mut engine, mut rx) = dense_engine();
         let _ = engine.update_content_tile_cache_current_viewport();
         assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
         assert!(engine.content_tile_cache.is_some());
+        let revision = engine.store.content_revision();
 
         let key = engine.store.keys_sorted_chrono()[0];
         let _ = engine
             .store
             .change_stroke_colors(&[key], color::Color::BLACK);
+        assert!(engine.store.content_revision() > revision);
 
-        assert!(!engine.content_tiles_serve_view());
         let _ = engine.update_content_tile_cache_current_viewport();
-        assert!(engine.content_tile_cache.is_none());
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_ne!(cache.revision, engine.store.content_revision());
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_eq!(cache.revision, engine.store.content_revision());
 
         // geometry changes are content changes too
         let revision = engine.store.content_revision();
@@ -1124,5 +1317,87 @@ mod tests {
         let tasks = take_tasks(&mut rx);
         assert_eq!(tasks.len(), 1, "only the cell holding the strokes");
         assert!(cells.len() > tasks.len());
+    }
+
+    /// The frame that first draws a grid the content has moved on from starts its replacement: a
+    /// commit moves no camera, so no viewport update follows it.
+    #[cfg(feature = "ui")]
+    #[gtk4::test]
+    fn the_frame_after_a_commit_starts_the_replacement_grid() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        let _ = handle_tile_tasks(&mut engine, &mut rx);
+        assert!(engine.content_tiles_serve_view());
+
+        // a stroke is committed, the camera does not move
+        insert_stroke_at(&mut engine, Vector2::new(1000., 1000.));
+        let revision = engine.store.content_revision();
+        assert!(
+            !engine
+                .content_tile_cache
+                .as_ref()
+                .unwrap()
+                .is_for_revision(revision)
+        );
+        assert!(take_tasks(&mut rx).is_empty());
+
+        // drawing the stale grid starts its replacement
+        let bounds = Aabb::new(Vector2::ZERO, Vector2::new(800., 600.));
+        let snapshot = gtk4::Snapshot::new();
+        engine
+            .draw_to_gtk_snapshot(&snapshot, bounds, bounds)
+            .unwrap();
+
+        let request = engine
+            .content_tile_request
+            .expect("the replacement is requested");
+        assert_eq!(request.revision, revision);
+
+        // the committed content is drawn once the grid lands
+        let tasks = take_tasks(&mut rx);
+        assert!(!tasks.is_empty(), "the cells are rasterized");
+        for task in tasks {
+            let _ = engine.handle_engine_task(task);
+        }
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert_eq!(cache.revision, revision);
+    }
+
+    #[test]
+    fn clearing_the_document_drops_the_tiles() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        let _ = handle_tile_tasks(&mut engine, &mut rx);
+        assert!(engine.content_tile_cache.is_some());
+
+        // the cleared document must not keep drawing the previous document's tiles
+        let _ = engine.clear();
+        assert!(engine.content_tile_cache.is_none());
+        assert!(engine.content_tile_request.is_none());
+        assert!(!engine.content_tiles_served);
+    }
+
+    #[test]
+    fn failed_cells_complete_the_rebuild() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        let request = engine
+            .content_tile_request
+            .expect("the rebuild is requested");
+
+        // the tile tasks are dropped and every cell reports a failure instead
+        let _ = take_tasks(&mut rx);
+        for _ in 0..request.expected_cells {
+            let _ = engine.handle_engine_task(EngineTask::ContentTileFailed {
+                image_scale: request.image_scale,
+                revision: request.revision,
+                coverage: request.coverage,
+            });
+        }
+
+        // a grid without a single tile would blank the view, so no cache is swapped in and the
+        // rebuild is not left waiting for tiles that never arrive
+        assert!(engine.content_tile_cache.is_none());
+        assert!(engine.content_tile_request.is_none());
     }
 }
