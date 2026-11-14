@@ -953,4 +953,76 @@ mod tests {
             "the images are regenerated when the drag ends"
         );
     }
+
+    /// Moving a selection follows the pen the same way: the images of the selected strokes are
+    /// not re-uploaded as textures on every step, they are regenerated once, when the drag ends.
+    #[test]
+    fn a_translate_drag_draws_the_selection_from_its_geometry_until_it_ends() {
+        let mut engine = Engine::default();
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+        let _ = engine.change_pen_style(PenStyle::Selector);
+
+        let stroke = ShapeStroke::new(
+            Shape::Ellipse(Ellipse {
+                radii: Vector2::splat(100.),
+                affine: DAffine2::from_translation(Vector2::new(400., 300.)),
+            }),
+            Style::Smooth(SmoothOptions::default()),
+        );
+        let key = engine.store.insert_stroke(Stroke::ShapeStroke(stroke), None);
+        engine.store.regenerate_rendering_for_strokes(
+            &[key],
+            engine.camera.viewport(),
+            engine.camera.image_scale(),
+        );
+        engine.store.set_selected(key, true);
+        let _ = engine.current_pen_update_state();
+
+        let bounds = engine
+            .store
+            .bounds_for_strokes(&[key])
+            .expect("the stroke has bounds");
+
+        let now = Instant::now();
+        let start = bounds.center();
+        let _ = engine.handle_pen_event(pen_event_down(start), Some(PenMode::Pen), now);
+        for step in 1..=20 {
+            let pos = start + Vector2::new(5. * step as f64, 3. * step as f64);
+            let _ = engine.handle_pen_event(
+                pen_event_down(pos),
+                Some(PenMode::Pen),
+                now + Duration::from_millis(16 * step),
+            );
+        }
+
+        assert!(
+            engine.store.debug_is_previewing(key),
+            "the moved selection is drawn from its geometry"
+        );
+        let moved = engine
+            .store
+            .bounds_for_strokes(&[key])
+            .expect("the stroke has bounds");
+        assert!(
+            moved.center()[0] > bounds.center()[0] + 1.,
+            "the stroke follows the pen during the drag"
+        );
+
+        let last = start + Vector2::new(100., 60.);
+        let _ = engine.handle_pen_event(
+            pen_event_up(last),
+            Some(PenMode::Pen),
+            now + Duration::from_millis(400),
+        );
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends with the drag"
+        );
+        assert_ne!(
+            engine.store.render_comp_state(key),
+            Some(crate::store::render_comp::RenderCompState::Complete),
+            "the images are regenerated when the drag ends"
+        );
+    }
 }

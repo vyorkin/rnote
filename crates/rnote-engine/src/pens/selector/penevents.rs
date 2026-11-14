@@ -233,14 +233,16 @@ impl Selector {
                             engine_view.config,
                         ) - snap_corner_pos;
 
+                        // The selection follows the pen as a vector preview, like a resize: its
+                        // images would otherwise have to be re-uploaded as textures on every
+                        // pointer sample. They are regenerated once, when the drag ends.
+                        engine_view.store.set_previewing(selection, true);
+
                         if offset.length()
                             > Self::TRANSLATE_OFFSET_THRESHOLD / engine_view.camera.total_zoom()
                         {
                             // move selection
                             engine_view.store.translate_strokes(selection, offset);
-                            engine_view
-                                .store
-                                .translate_strokes_images(selection, offset);
                             *selection_bounds = selection_bounds.translate(offset);
                             *current_pos += offset;
                         }
@@ -252,12 +254,17 @@ impl Selector {
                         widget_flags |= engine_view
                             .document
                             .expand_autoexpand(engine_view.camera, engine_view.store);
-                        engine_view.store.regenerate_rendering_in_viewport_threaded(
-                            engine_view.tasks_tx.clone(),
-                            false,
-                            engine_view.camera.viewport(),
-                            engine_view.camera.image_scale(),
-                        );
+
+                        // The preview is drawn from the stroke geometry on every redraw, so the
+                        // tile cache only has to be regenerated when the visible area changed.
+                        if widget_flags.view_modified | widget_flags.resize {
+                            engine_view.store.regenerate_rendering_in_viewport_threaded(
+                                engine_view.tasks_tx.clone(),
+                                false,
+                                engine_view.camera.viewport(),
+                                engine_view.camera.image_scale(),
+                            );
+                        }
                     }
                     ModifyState::Rotate {
                         rotation_center,
