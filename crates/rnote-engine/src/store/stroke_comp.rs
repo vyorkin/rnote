@@ -13,8 +13,6 @@ use rnote_compose::Transformable;
 use rnote_compose::penpath::Element;
 use rnote_compose::shapes::Shapeable;
 use std::sync::Arc;
-#[cfg(feature = "ui")]
-use tracing::error;
 
 /// Systems that are related to the stroke components.
 impl StrokeStore {
@@ -235,19 +233,20 @@ impl StrokeStore {
     pub(crate) fn translate_strokes_images(&mut self, keys: &[StrokeKey], offset: Vector2) {
         keys.iter().for_each(|&key| {
             if let Some(render_comp) = self.render_components.get_mut(key) {
+                // while previewing, the stroke is drawn from its geometry and its images are
+                // regenerated once the transform ended
+                if self.preview_keys.contains(&key) {
+                    render_comp.state = RenderCompState::Dirty;
+                    return;
+                }
+
                 for image in render_comp.images.iter_mut() {
                     image.translate(offset);
                 }
 
+                // the pixels of the images are unchanged, only the affines they are drawn at
                 #[cfg(feature = "ui")]
-                match crate::Image::images_to_rendernodes(&render_comp.images) {
-                    Ok(rendernodes) => {
-                        render_comp.rendernodes = rendernodes;
-                    }
-                    Err(e) => error!(
-                        "Generating rendernodes from images failed while translating stroke images , Err: {e:?}"
-                    ),
-                }
+                render_comp.update_rendernode_transforms();
             }
         });
     }
@@ -511,15 +510,9 @@ impl StrokeStore {
                     image.scale(scale);
                 }
 
+                // the pixels of the images are unchanged, only the affines they are drawn at
                 #[cfg(feature = "ui")]
-                match crate::Image::images_to_rendernodes(&render_comp.images) {
-                    Ok(rendernodes) => {
-                        render_comp.rendernodes = rendernodes;
-                    }
-                    Err(e) => error!(
-                        "Generating rendernodes from images failed while scaling stroke images, Err: {e:?}"
-                    ),
-                }
+                render_comp.update_rendernode_transforms();
             }
         });
     }
@@ -1022,5 +1015,34 @@ mod tests {
         let Some(Stroke::BrushStroke(_)) = store.get_stroke_ref(line) else {
             panic!("expected the line to stay a brush stroke");
         };
+    }
+
+    /// A translate or a scale only changes the affine a rendering is drawn at, its pixels are
+    /// unchanged and must not be handed to gdk again.
+    #[cfg(feature = "ui")]
+    #[test]
+    fn transforming_a_rendering_keeps_its_textures() {
+        let mut store = StrokeStore::default();
+        let key = insert_line(&mut store, 100.0, 100.0, 200.0);
+        store.regenerate_rendering_for_strokes(&[key], viewport(), 1.0);
+
+        let textures_before = store.debug_image_textures(key);
+        assert!(!textures_before.is_empty(), "the stroke is rendered");
+
+        store.translate_strokes_images(&[key], Vector2::new(50.0, 20.0));
+        store.scale_strokes_images(&[key], Vector2::splat(2.0));
+
+        let textures_after = store.debug_image_textures(key);
+        assert_eq!(
+            textures_before
+                .iter()
+                .map(|texture| texture.texture().clone())
+                .collect::<Vec<_>>(),
+            textures_after
+                .iter()
+                .map(|texture| texture.texture().clone())
+                .collect::<Vec<_>>(),
+            "the rendering keeps its textures while it is transformed"
+        );
     }
 }

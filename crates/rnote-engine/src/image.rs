@@ -4,6 +4,7 @@ use anyhow::Context;
 use core::fmt::Debug;
 use image::ImageReader;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
+use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use piet::RenderContext;
 use rayon::prelude::*;
@@ -233,6 +234,52 @@ fn max_channel_distance(a: [u8; 3], b: [u8; 3]) -> u8 {
     distance(a[0], b[0])
         .max(distance(a[1], b[1]))
         .max(distance(a[2], b[2]))
+}
+
+/// The texture of an [Image] together with the local bounds it covers.
+///
+/// A texture is bound to the pixels it was created from, and can be drawn at any affine of those
+/// pixels. So transforming an image only needs a new render node around the same texture: handing
+/// the pixels to gdk again is what creating a texture costs, and a translate or scale of a
+/// rendering must not pay it per step.
+#[cfg(feature = "ui")]
+#[derive(Clone, Debug)]
+pub struct ImageTexture {
+    texture: gtk4::gdk::MemoryTexture,
+    local_rect: gtk4::graphene::Rect,
+}
+
+#[cfg(feature = "ui")]
+impl ImageTexture {
+    pub fn new(image: &Image) -> Result<Self, anyhow::Error> {
+        use crate::ext::GrapheneRectExt;
+
+        image.assert_valid()?;
+
+        Ok(Self {
+            texture: gtk4::gdk::MemoryTexture::new(
+                image.pixel_width as i32,
+                image.pixel_height as i32,
+                image.memory_format.into(),
+                &image.data,
+                (image.pixel_width * 4) as usize,
+            ),
+            local_rect: gtk4::graphene::Rect::from_p2d_aabb(image.rectangle.cuboid.local_aabb()),
+        })
+    }
+
+    /// Draw the texture at the given affine of the image it was created from.
+    pub fn to_rendernode(&self, affine: &DAffine2) -> gtk4::gsk::RenderNode {
+        use gtk4::{gsk, prelude::*};
+
+        let texture_node = gsk::TextureNode::new(&self.texture, &self.local_rect);
+        gsk::TransformNode::new(&texture_node, Some(&crate::utils::affine_to_gsk(affine))).upcast()
+    }
+
+    /// The texture the node of this image draws.
+    pub fn texture(&self) -> &gtk4::gdk::MemoryTexture {
+        &self.texture
+    }
 }
 
 impl Drawable for Image {
@@ -537,24 +584,14 @@ impl Image {
 
     #[cfg(feature = "ui")]
     pub fn to_rendernode(&self) -> Result<gtk4::gsk::RenderNode, anyhow::Error> {
-        use crate::ext::GrapheneRectExt;
-        use gtk4::{graphene, gsk, prelude::*};
+        Ok(ImageTexture::new(self)?.to_rendernode(&self.rectangle.affine))
+    }
 
-        self.assert_valid()?;
-
-        let memtexture = self.to_memtexture()?;
-        let texture_node = gsk::TextureNode::new(
-            &memtexture,
-            &graphene::Rect::from_p2d_aabb(self.rectangle.cuboid.local_aabb()),
-        )
-        .upcast();
-        let transform_node = gsk::TransformNode::new(
-            &texture_node,
-            Some(&crate::utils::affine_to_gsk(&self.rectangle.affine)),
-        )
-        .upcast();
-
-        Ok(transform_node)
+    #[cfg(feature = "ui")]
+    pub fn images_to_textures<'a>(
+        images: impl IntoIterator<Item = &'a Self>,
+    ) -> Result<Vec<ImageTexture>, anyhow::Error> {
+        images.into_iter().map(ImageTexture::new).collect()
     }
 
     #[cfg(feature = "ui")]

@@ -40,6 +40,12 @@ pub struct RenderComponent {
     pub(super) images: Vec<Image>,
     #[cfg(feature = "ui")]
     pub(super) rendernodes: Vec<gtk4::gsk::RenderNode>,
+    /// The textures of `images`, entry for entry.
+    ///
+    /// Kept so transforming a rendering only makes new render nodes around them instead of
+    /// creating the textures again.
+    #[cfg(feature = "ui")]
+    pub(super) image_textures: Vec<crate::image::ImageTexture>,
 }
 
 impl Default for RenderComponent {
@@ -49,7 +55,69 @@ impl Default for RenderComponent {
             images: vec![],
             #[cfg(feature = "ui")]
             rendernodes: vec![],
+            #[cfg(feature = "ui")]
+            image_textures: vec![],
         }
+    }
+}
+
+#[cfg(feature = "ui")]
+impl RenderComponent {
+    /// Create the textures for the current images and the render nodes drawing them.
+    fn rebuild_texture_nodes(&mut self) -> Result<(), anyhow::Error> {
+        self.image_textures = Image::images_to_textures(&self.images)?;
+        self.update_rendernode_transforms();
+        Ok(())
+    }
+
+    /// Replace the images together with the textures and render nodes drawing them.
+    fn replace_images(&mut self, images: Vec<Image>) -> Result<(), anyhow::Error> {
+        self.images = images;
+        if let Err(e) = self.rebuild_texture_nodes() {
+            // the textures of the previous images no longer match the current ones
+            self.clear_rendernodes();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Append the images together with the textures and render nodes drawing them.
+    fn append_images(&mut self, mut images: Vec<Image>) -> Result<(), anyhow::Error> {
+        let textures = Image::images_to_textures(&images)?;
+        self.rendernodes.extend(
+            textures
+                .iter()
+                .zip(images.iter())
+                .map(|(texture, image)| texture.to_rendernode(&image.rectangle.affine)),
+        );
+        self.image_textures.extend(textures);
+        self.images.append(&mut images);
+
+        Ok(())
+    }
+
+    /// Rebuild the render nodes around the existing textures, at the current image affines.
+    ///
+    /// The textures hold their pixels and their local bounds, so this only recreates the cheap
+    /// transform nodes.
+    pub(super) fn update_rendernode_transforms(&mut self) {
+        debug_assert_eq!(
+            self.image_textures.len(),
+            self.images.len(),
+            "every image has a texture"
+        );
+        self.rendernodes = self
+            .image_textures
+            .iter()
+            .zip(self.images.iter())
+            .map(|(texture, image)| texture.to_rendernode(&image.rectangle.affine))
+            .collect();
+    }
+
+    /// Drop the textures and render nodes but keep the images.
+    fn clear_rendernodes(&mut self) {
+        self.rendernodes = vec![];
+        self.image_textures = vec![];
     }
 }
 
@@ -226,7 +294,7 @@ impl StrokeStore {
                 if !viewport_extended.intersects(&stroke_bounds) {
                     #[cfg(feature = "ui")]
                     {
-                        render_comp.rendernodes = vec![];
+                        render_comp.clear_rendernodes();
                     }
                     render_comp.images = vec![];
                     render_comp.state = RenderCompState::Dirty;
@@ -289,7 +357,7 @@ impl StrokeStore {
         for (_key, render_comp) in self.render_components.iter_mut() {
             #[cfg(feature = "ui")]
             {
-                render_comp.rendernodes = vec![];
+                render_comp.clear_rendernodes();
             }
             render_comp.images = vec![];
             render_comp.state = RenderCompState::Dirty;
@@ -315,15 +383,11 @@ impl StrokeStore {
                     match brushstroke.gen_image_for_last_segments(n_last_segments, image_scale) {
                         Ok(Some(image)) => {
                             #[cfg(feature = "ui")]
-                            match Image::images_to_rendernodes([&image]) {
-                                Ok(mut rendernodes) => {
-                                    render_comp.rendernodes.append(&mut rendernodes);
-                                    render_comp.images.push(image);
-                                }
-                                Err(e) => {
+                            {
+                                if let Err(e) = render_comp.append_images(vec![image]) {
                                     render_comp.state = RenderCompState::Dirty;
                                     error!(
-                                        "Failed to generated rendernodes while appending last segments rendering, Err: {e:?}"
+                                        "Failed to generate rendernodes while appending last segments rendering, Err: {e:?}"
                                     );
                                 }
                             }
@@ -371,10 +435,8 @@ impl StrokeStore {
             match images {
                 GeneratedContentImages::Partial { images, viewport } => {
                     #[cfg(feature = "ui")]
-                    match Image::images_to_rendernodes(&images) {
-                        Ok(rendernodes) => {
-                            render_comp.rendernodes = rendernodes;
-                            render_comp.images = images;
+                    match render_comp.replace_images(images) {
+                        Ok(()) => {
                             render_comp.state = RenderCompState::ForViewport(viewport);
                             replaced = true;
                         }
@@ -394,10 +456,8 @@ impl StrokeStore {
                 }
                 GeneratedContentImages::Full(images) => {
                     #[cfg(feature = "ui")]
-                    match Image::images_to_rendernodes(&images) {
-                        Ok(rendernodes) => {
-                            render_comp.rendernodes = rendernodes;
-                            render_comp.images = images;
+                    match render_comp.replace_images(images) {
+                        Ok(()) => {
                             render_comp.state = RenderCompState::Complete;
                             replaced = true;
                         }
@@ -436,26 +496,20 @@ impl StrokeStore {
         if let Some(render_comp) = self.render_components.get_mut(key) {
             match images {
                 GeneratedContentImages::Partial {
-                    mut images,
+                    images,
                     viewport: _,
                 }
-                | GeneratedContentImages::Full(mut images) => {
+                | GeneratedContentImages::Full(images) => {
                     #[cfg(feature = "ui")]
-                    match Image::images_to_rendernodes(&images) {
-                        Ok(mut rendernodes) => {
-                            render_comp.rendernodes.append(&mut rendernodes);
-                            render_comp.images.append(&mut images);
-                        }
-                        Err(e) => {
-                            error!(
-                                "Generating rendernodes failed while appending rendering full images, Err: {e:?}"
-                            );
-                            render_comp.state = RenderCompState::Dirty;
-                        }
+                    if let Err(e) = render_comp.append_images(images) {
+                        error!(
+                            "Generating rendernodes failed while appending rendering full images, Err: {e:?}"
+                        );
+                        render_comp.state = RenderCompState::Dirty;
                     }
                     #[cfg(not(feature = "ui"))]
                     {
-                        render_comp.images.append(&mut images);
+                        render_comp.images.extend(images);
                     }
                 }
             }
@@ -515,6 +569,17 @@ impl StrokeStore {
         self.render_components
             .get(key)
             .and_then(|rc| rc.images.first().map(|i| (i.pixel_width, i.pixel_height)))
+    }
+
+    #[cfg(all(test, feature = "ui"))]
+    pub(crate) fn debug_image_textures(
+        &self,
+        key: StrokeKey,
+    ) -> Vec<crate::image::ImageTexture> {
+        self.render_components
+            .get(key)
+            .map(|rc| rc.image_textures.clone())
+            .unwrap_or_default()
     }
 
     /// Draws the geometry of the strokes being dragged, in surface coordinates.
