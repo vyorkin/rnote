@@ -248,7 +248,10 @@ fn erase(
             );
             widget_flags |= wf;
 
-            engine_view.store.regenerate_rendering_for_strokes(
+            // Rasterizing on the event thread stalled every pointer sample of an erase; the
+            // images arrive a frame later instead.
+            engine_view.store.regenerate_rendering_for_strokes_threaded(
+                engine_view.tasks_tx.clone(),
                 &modified_strokes,
                 engine_view.camera.viewport(),
                 engine_view.camera.image_scale(),
@@ -266,7 +269,8 @@ fn erase(
             );
             widget_flags |= wf;
 
-            engine_view.store.regenerate_rendering_for_strokes(
+            engine_view.store.regenerate_rendering_for_strokes_threaded(
+                engine_view.tasks_tx.clone(),
                 &modified_strokes,
                 engine_view.camera.viewport(),
                 engine_view.camera.image_scale(),

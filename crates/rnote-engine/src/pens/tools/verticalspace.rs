@@ -119,13 +119,15 @@ impl VerticalSpaceTool {
                     )[1]
                 };
 
+                // The strokes below follow the pen as a vector preview: their images would
+                // otherwise be re-uploaded as textures on every pointer sample. They are
+                // regenerated once, when the drag ends.
+                engine_view.store.set_previewing(&self.strokes_below, true);
+
                 if y_offset.abs() > VerticalSpaceTool::Y_OFFSET_THRESHOLD {
                     engine_view
                         .store
                         .translate_strokes(&self.strokes_below, Vector2::new(0.0, y_offset));
-                    engine_view
-                        .store
-                        .translate_strokes_images(&self.strokes_below, Vector2::new(0.0, y_offset));
                     self.pos_y += y_offset;
 
                     widget_flags.store_modified = true;
@@ -138,12 +140,17 @@ impl VerticalSpaceTool {
                 widget_flags |= engine_view
                     .document
                     .expand_autoexpand(engine_view.camera, engine_view.store);
-                engine_view.store.regenerate_rendering_in_viewport_threaded(
-                    engine_view.tasks_tx.clone(),
-                    false,
-                    engine_view.camera.viewport(),
-                    engine_view.camera.image_scale(),
-                );
+
+                // The preview is drawn from the stroke geometry on every redraw, so the tile
+                // cache only has to be regenerated when the visible area changed.
+                if widget_flags.view_modified | widget_flags.resize {
+                    engine_view.store.regenerate_rendering_in_viewport_threaded(
+                        engine_view.tasks_tx.clone(),
+                        false,
+                        engine_view.camera.viewport(),
+                        engine_view.camera.image_scale(),
+                    );
+                }
 
                 EventResult {
                     handled: true,
@@ -152,6 +159,7 @@ impl VerticalSpaceTool {
                 }
             }
             (ToolsState::Active, PenEvent::Up { .. }) => {
+                engine_view.store.set_previewing(&self.strokes_below, false);
                 engine_view
                     .store
                     .update_geometry_for_strokes(&self.strokes_below);
@@ -193,6 +201,7 @@ impl VerticalSpaceTool {
                 progress: PenProgress::InProgress,
             },
             (ToolsState::Active, PenEvent::Cancel) => {
+                engine_view.store.set_previewing(&self.strokes_below, false);
                 widget_flags |= engine_view
                     .document
                     .resize_autoexpand(engine_view.store, engine_view.camera);
