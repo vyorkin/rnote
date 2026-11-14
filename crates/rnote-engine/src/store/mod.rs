@@ -93,6 +93,12 @@ pub struct StrokeStore {
     /// drawn directly and the images are only regenerated once, when the drag ends.
     #[serde(skip)]
     preview_keys: HashSet<StrokeKey>,
+    /// Strokes that keep being drawn as a vector preview until their regenerated images arrive.
+    ///
+    /// Dropping the preview together with the drag would draw the stale images of the previous
+    /// position for the frame(s) the render task still needs.
+    #[serde(skip)]
+    preview_until_rendered: HashSet<StrokeKey>,
     #[serde(skip)]
     history: VecDeque<HistoryEntry>,
     /// The index of the current live document in the history stack.
@@ -114,6 +120,7 @@ impl Default for StrokeStore {
             chrono_components: Arc::new(SecondaryMap::new()),
             render_components: SecondaryMap::new(),
             preview_keys: HashSet::new(),
+            preview_until_rendered: HashSet::new(),
 
             // Start off with state in the history
             history: VecDeque::from(vec![HistoryEntry::default()]),
@@ -354,6 +361,8 @@ impl StrokeStore {
         Arc::make_mut(&mut self.selection_components).remove(key);
         Arc::make_mut(&mut self.chrono_components).remove(key);
         self.render_components.remove(key);
+        self.preview_keys.remove(&key);
+        self.preview_until_rendered.remove(&key);
 
         self.key_tree.remove_with_key(key);
         Arc::make_mut(&mut self.stroke_components)
@@ -373,6 +382,7 @@ impl StrokeStore {
 
         self.render_components.clear();
         self.preview_keys.clear();
+        self.preview_until_rendered.clear();
         self.key_tree.clear();
 
         widget_flags

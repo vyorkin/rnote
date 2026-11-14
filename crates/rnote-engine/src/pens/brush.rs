@@ -1350,13 +1350,24 @@ mod tests {
         });
 
         assert!(
-            !engine.store.debug_is_previewing(key),
-            "the preview ends when the pen lifts"
+            engine.store.debug_is_previewing(key),
+            "the preview is kept until the regenerated image arrives"
         );
         assert_ne!(
             engine.store.render_comp_state(key),
             Some(RenderCompState::Complete),
             "the image is regenerated once the pen lifts"
+        );
+
+        // as the render task would deliver it
+        engine.store.replace_rendering_with_images(
+            key,
+            crate::strokes::content::GeneratedContentImages::Full(vec![]),
+        );
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends once the regenerated image arrives"
         );
     }
 

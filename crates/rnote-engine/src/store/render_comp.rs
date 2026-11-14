@@ -72,6 +72,10 @@ impl StrokeStore {
                 self.render_components.insert(k, RenderComponent::default());
             }
         });
+
+        let valid = |key: &StrokeKey| self.stroke_components.contains_key(*key);
+        self.preview_keys.retain(valid);
+        self.preview_until_rendered.retain(valid);
     }
 
     /// Ability if rendering is supported.
@@ -110,63 +114,22 @@ impl StrokeStore {
         viewport: Aabb,
         image_scale: f64,
     ) {
-        if let Some(stroke) = self.stroke_components.get(key)
-            && let Some(render_comp) = self.render_components.get_mut(key)
-        {
-            if render_comp.state == RenderCompState::BusyRenderingInTask {
-                return;
-            }
+        let Some(stroke) = self.stroke_components.get(key).cloned() else {
+            return;
+        };
 
-            let viewport_extended =
-                viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
+        if self.render_comp_state(key) == Some(RenderCompState::BusyRenderingInTask) {
+            return;
+        }
 
-            match stroke.gen_images(viewport_extended, image_scale) {
-                Ok(GeneratedContentImages::Partial { images, viewport }) => {
-                    #[cfg(feature = "ui")]
-                    match Image::images_to_rendernodes(&images) {
-                        Ok(rendernodes) => {
-                            render_comp.rendernodes = rendernodes;
-                            render_comp.images = images;
-                            render_comp.state = RenderCompState::ForViewport(viewport);
-                        }
-                        Err(e) => {
-                            render_comp.state = RenderCompState::Dirty;
-                            error!(
-                                "Creating rendernodes from partial images failed while regenerating stroke rendering, Err: {e:?}"
-                            );
-                        }
-                    }
-                    #[cfg(not(feature = "ui"))]
-                    {
-                        render_comp.images = images;
-                        render_comp.state = RenderCompState::ForViewport(viewport);
-                    }
-                }
-                Ok(GeneratedContentImages::Full(images)) => {
-                    #[cfg(feature = "ui")]
-                    match Image::images_to_rendernodes(&images) {
-                        Ok(rendernodes) => {
-                            render_comp.rendernodes = rendernodes;
-                            render_comp.images = images;
-                            render_comp.state = RenderCompState::Complete;
-                        }
-                        Err(e) => {
-                            render_comp.state = RenderCompState::Dirty;
-                            error!(
-                                "Creating rendernodes from full images failed while regenerating stroke rendering, Err: {e:?}"
-                            );
-                        }
-                    }
-                    #[cfg(not(feature = "ui"))]
-                    {
-                        render_comp.images = images;
-                        render_comp.state = RenderCompState::Complete;
-                    }
-                }
-                Err(e) => {
-                    render_comp.state = RenderCompState::Dirty;
-                    error!("Generating images for stroke with key {key:?} failed, Err: {e:?}");
-                }
+        let viewport_extended =
+            viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
+
+        match stroke.gen_images(viewport_extended, image_scale) {
+            Ok(images) => self.replace_rendering_with_images(key, images),
+            Err(e) => {
+                self.set_rendering_dirty(key);
+                error!("Generating images for stroke with key {key:?} failed, Err: {e:?}");
             }
         }
     }
@@ -403,6 +366,7 @@ impl StrokeStore {
         key: StrokeKey,
         images: GeneratedContentImages,
     ) {
+        let mut replaced = false;
         if let Some(render_comp) = self.render_components.get_mut(key) {
             match images {
                 GeneratedContentImages::Partial { images, viewport } => {
@@ -412,6 +376,7 @@ impl StrokeStore {
                             render_comp.rendernodes = rendernodes;
                             render_comp.images = images;
                             render_comp.state = RenderCompState::ForViewport(viewport);
+                            replaced = true;
                         }
                         Err(e) => {
                             error!(
@@ -424,6 +389,7 @@ impl StrokeStore {
                     {
                         render_comp.images = images;
                         render_comp.state = RenderCompState::ForViewport(viewport);
+                        replaced = true;
                     }
                 }
                 GeneratedContentImages::Full(images) => {
@@ -433,6 +399,7 @@ impl StrokeStore {
                             render_comp.rendernodes = rendernodes;
                             render_comp.images = images;
                             render_comp.state = RenderCompState::Complete;
+                            replaced = true;
                         }
                         Err(e) => {
                             error!(
@@ -445,9 +412,16 @@ impl StrokeStore {
                     {
                         render_comp.images = images;
                         render_comp.state = RenderCompState::Complete;
+                        replaced = true;
                     }
                 }
             }
+        }
+
+        // a stroke that was transformed stops being drawn from its geometry once its images show
+        // the new transform
+        if replaced {
+            self.end_preview_if_rendered(key);
         }
     }
 
@@ -499,7 +473,11 @@ impl StrokeStore {
         for &key in keys {
             if previewing {
                 self.preview_keys.insert(key);
-            } else if self.preview_keys.remove(&key) {
+                self.preview_until_rendered.remove(&key);
+            } else if self.preview_keys.contains(&key) {
+                // The stroke keeps being drawn from its geometry until its regenerated images
+                // arrive, otherwise the stale images of the previous position show for a frame.
+                self.preview_until_rendered.insert(key);
                 if let Some(render_comp) = self.render_components.get_mut(key) {
                     render_comp.state = RenderCompState::Dirty;
                 }
@@ -509,12 +487,21 @@ impl StrokeStore {
 
     /// End all vector previews, e.g. when the pen that started one is left mid-drag.
     ///
-    /// The images of the affected strokes are marked dirty, so the next regeneration picks them up.
+    /// The images of the affected strokes are marked dirty and the preview is kept until they are
+    /// regenerated, so no stale image is drawn in between.
     pub(crate) fn end_all_previews(&mut self) {
-        for key in std::mem::take(&mut self.preview_keys) {
+        for &key in self.preview_keys.iter() {
+            self.preview_until_rendered.insert(key);
             if let Some(render_comp) = self.render_components.get_mut(key) {
                 render_comp.state = RenderCompState::Dirty;
             }
+        }
+    }
+
+    /// The images of the stroke are current again, stop drawing it as a preview.
+    fn end_preview_if_rendered(&mut self, key: StrokeKey) {
+        if self.preview_until_rendered.remove(&key) {
+            self.preview_keys.remove(&key);
         }
     }
 

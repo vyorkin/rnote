@@ -945,13 +945,24 @@ mod tests {
         );
 
         assert!(
-            !engine.store.debug_is_previewing(key),
-            "the preview ends with the drag"
+            engine.store.debug_is_previewing(key),
+            "the preview is kept until the regenerated images arrive"
         );
         assert_ne!(
             engine.store.render_comp_state(key),
             Some(crate::store::render_comp::RenderCompState::Complete),
             "the images are regenerated when the drag ends"
+        );
+
+        // as the render task would deliver them
+        engine.store.replace_rendering_with_images(
+            key,
+            crate::strokes::content::GeneratedContentImages::Full(vec![]),
+        );
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends once the regenerated images arrive"
         );
     }
 
@@ -1017,13 +1028,24 @@ mod tests {
         );
 
         assert!(
-            !engine.store.debug_is_previewing(key),
-            "the preview ends with the drag"
+            engine.store.debug_is_previewing(key),
+            "the preview is kept until the regenerated images arrive"
         );
         assert_ne!(
             engine.store.render_comp_state(key),
             Some(crate::store::render_comp::RenderCompState::Complete),
             "the images are regenerated when the drag ends"
+        );
+
+        // as the render task would deliver them
+        engine.store.replace_rendering_with_images(
+            key,
+            crate::strokes::content::GeneratedContentImages::Full(vec![]),
+        );
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends once the regenerated images arrive"
         );
     }
 
@@ -1098,13 +1120,24 @@ mod tests {
         );
 
         assert!(
-            !engine.store.debug_is_previewing(key),
-            "the preview ends with the drag"
+            engine.store.debug_is_previewing(key),
+            "the preview is kept until the regenerated images arrive"
         );
         assert_ne!(
             engine.store.render_comp_state(key),
             Some(crate::store::render_comp::RenderCompState::Complete),
             "the images are regenerated when the drag ends"
+        );
+
+        // as the render task would deliver them
+        engine.store.replace_rendering_with_images(
+            key,
+            crate::strokes::content::GeneratedContentImages::Full(vec![]),
+        );
+
+        assert!(
+            !engine.store.debug_is_previewing(key),
+            "the preview ends once the regenerated images arrive"
         );
     }
 }
