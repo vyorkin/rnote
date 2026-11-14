@@ -314,8 +314,7 @@ impl Document {
         }
 
         if include_content {
-            let keys = store.stroke_keys_as_rendered();
-            let content_bounds = if let Some(content_bounds) = store.bounds_for_strokes(&keys) {
+            let content_bounds = if let Some(content_bounds) = store.bounds_as_rendered() {
                 content_bounds.extend_by(padding)
             } else {
                 // If doc is empty, resize to one page with the format size

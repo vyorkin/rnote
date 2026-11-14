@@ -9,6 +9,7 @@ use crate::strokes::content::GeneratedContentImages;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
 use rnote_compose::ext::AabbExt;
 use rnote_compose::shapes::Shapeable;
+use std::collections::HashSet;
 use tracing::error;
 
 /// The tolerance of an image scale relative to another one, within which images are reused.
@@ -336,6 +337,18 @@ impl StrokeStore {
         viewport: Aabb,
         image_scale: f64,
     ) -> usize {
+        let viewport_extended =
+            viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
+
+        // The bounds of every stroke are already indexed in the key tree, so the strokes
+        // intersecting the viewport are looked up there instead of recomputing the composed
+        // bounds of every stroke in the document: that scan cost tens of milliseconds on a
+        // document with tens of thousands of strokes and ran on every step of a zoom gesture.
+        let visible_keys = self
+            .key_tree
+            .keys_intersecting_bounds(viewport_extended)
+            .into_iter()
+            .collect::<HashSet<StrokeKey>>();
         let keys = self.render_components.keys().collect::<Vec<StrokeKey>>();
         let mut tasks_started = 0;
 
@@ -344,12 +357,9 @@ impl StrokeStore {
                 && let Some(render_comp) = self.render_components.get_mut(key)
             {
                 let tasks_tx = tasks_tx.clone();
-                let stroke_bounds = stroke.bounds();
-                let viewport_extended =
-                    viewport.extend_by(viewport.extents() * VIEWPORT_EXTENTS_MARGIN_FACTOR);
 
                 // skip and clear image buffer if stroke is not in viewport
-                if !viewport_extended.intersects(&stroke_bounds) {
+                if !visible_keys.contains(&key) {
                     #[cfg(feature = "ui")]
                     {
                         render_comp.clear_rendernodes();

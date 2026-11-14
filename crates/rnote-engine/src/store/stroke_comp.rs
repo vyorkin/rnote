@@ -192,6 +192,21 @@ impl StrokeStore {
         Some(bounds)
     }
 
+    /// The enclosing bounds of all rendered (not trashed) strokes.
+    ///
+    /// Read from the key tree instead of recomputing the composed bounds of every stroke, which
+    /// costs tens of milliseconds on a document with tens of thousands of strokes.
+    pub(crate) fn bounds_as_rendered(&self) -> Option<Aabb> {
+        self.key_tree
+            .iter()
+            .filter(|(key, _)| !self.trashed(*key).unwrap_or(false))
+            .map(|(_, bounds)| bounds)
+            .reduce(|mut acc, bounds| {
+                acc.merge(&bounds);
+                acc
+            })
+    }
+
     /// Collect all stroke bounds for the given keys.
     pub(crate) fn strokes_bounds(&self, keys: &[StrokeKey]) -> Vec<Aabb> {
         keys.iter()

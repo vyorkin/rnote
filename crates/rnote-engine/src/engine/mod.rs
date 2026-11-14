@@ -188,6 +188,11 @@ impl EngineTaskReceiver {
     pub fn recv(&mut self) -> futures::stream::Next<'_, UnboundedReceiver<EngineTask>> {
         self.0.next()
     }
+
+    /// Receive a task that is already queued, without waiting for one to arrive.
+    pub fn try_recv(&mut self) -> Option<EngineTask> {
+        self.0.try_recv().ok()
+    }
 }
 
 /// The engine.

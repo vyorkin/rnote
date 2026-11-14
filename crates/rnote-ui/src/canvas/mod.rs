@@ -30,11 +30,20 @@ use rnote_engine::ext::GrapheneRectExt;
 use rnote_engine::{Engine, WidgetFlags};
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
 /// How long the pen can be gone before the cursor hidden for it is shown again.
 const PEN_GONE_DELAY: Duration = Duration::from_millis(250);
+
+/// How long a burst of engine tasks may hold the main loop before it hands the frame loop a turn.
+///
+/// A viewport regeneration arrives as one task per stroke - thousands of them - and each one
+/// uploads a rasterized image and instantiates render nodes. Drained in one go, the burst takes
+/// tens of milliseconds and the frame that was due during it is painted late, which is the freeze
+/// while zooming. The budget leaves the frame loop time to paint between bursts; what is left in
+/// the channel is picked up on the next turn, so only the pressure of it is spread out.
+const TASK_BURST_TIME_BUDGET: Duration = Duration::from_millis(6);
 
 /// The picture of a widget being dragged, and where over the canvas it is drawn.
 ///
@@ -319,14 +328,72 @@ mod imp {
                         return;
                     };
 
+                    // A task taken off the channel by a burst that ran out of budget.
+                    let mut pending_task = None;
+
                     loop {
-                        if let Some(task) = task_rx.recv().await {
-                            let (widget_flags, quit) = canvas.engine_mut().handle_engine_task(task);
-                            canvas.emit_handle_widget_flags(widget_flags);
+                        let mut task = match pending_task.take() {
+                            Some(task) => task,
+                            None => match task_rx.recv().await {
+                                Some(task) => task,
+                                None => break,
+                            },
+                        };
+                        let mut widget_flags = WidgetFlags::default();
+                        // set by the task that asks the engine to quit
+                        let mut quit;
+                        // set when the burst was handed back to the loop with arrivals still queued
+                        let mut more_queued = false;
+                        let burst_start = Instant::now();
+                        // Tasks are drained in a burst, so that a burst of arrivals - a viewport
+                        // regeneration spawns thousands of tasks - emits the widget flags once
+                        // instead of once per task. The flags merge with `|=` (the last `Some` wins),
+                        // so one emit of the merged flags is equivalent to emitting each of them in
+                        // order, and the handlers that read the engine state see all arrivals
+                        // instead of the first one.
+                        //
+                        // The burst is cut off after a budget: uploading and instantiating a
+                        // rasterized image is tens of microseconds, so thousands of arrivals take
+                        // long enough to drop frames and freeze the view for that whole time. What
+                        // is left in the channel is picked up on the next turn, after the frame loop
+                        // has had its turn to paint.
+                        loop {
+                            let (flags, task_quit) = canvas.engine_mut().handle_engine_task(task);
+                            widget_flags |= flags;
+                            quit = task_quit;
 
                             if quit {
                                 break;
                             }
+
+                            let next_task = match task_rx.try_recv() {
+                                Some(next_task) => next_task,
+                                // nothing queued: handle what we have
+                                None => break,
+                            };
+
+                            if burst_start.elapsed() >= TASK_BURST_TIME_BUDGET {
+                                pending_task = Some(next_task);
+                                more_queued = true;
+                                break;
+                            }
+                            task = next_task;
+                        }
+
+                        canvas.emit_handle_widget_flags(widget_flags);
+
+                        if quit {
+                            break;
+                        }
+
+                        if more_queued {
+                            // Hand the frame loop a turn before carrying on: an idle-priority source
+                            // runs after the redraws, so the frame that is due is painted first.
+                            glib::timeout_future_with_priority(
+                                glib::Priority::DEFAULT_IDLE,
+                                Duration::ZERO,
+                            )
+                            .await;
                         }
                     }
                 }
