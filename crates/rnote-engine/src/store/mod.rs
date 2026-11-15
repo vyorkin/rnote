@@ -111,6 +111,20 @@ pub struct StrokeStore {
     /// old grid stays drawable until the replacement lands.
     #[serde(skip)]
     content_revision: u64,
+    /// The strokes the content tiles drawn by the engine were rasterized from.
+    ///
+    /// Set by the engine when a new grid is swapped in, so that a change of any of them can be
+    /// told from a stroke the tiles do not hold (see [Self::content_tiles_hold_old_content]).
+    #[serde(skip)]
+    content_tiles_keys: HashSet<StrokeKey>,
+    /// Whether a stroke the content tiles were rasterized from changed since.
+    ///
+    /// The tiles then draw content that is no longer there - an erased, moved or recolored stroke -
+    /// and are dropped instead of drawn (see `Engine::draw_to_gtk_snapshot`). Strokes the tiles do
+    /// not hold, above all the ones inserted after the grid was built, are drawn per stroke on top
+    /// of it, so adding content never sets this.
+    #[serde(skip)]
+    content_tiles_hold_old_content: bool,
     /// An rtree backed by the slotmap store, for faster spatial queries.
     ///
     /// Needs to be updated with `update_with_key()` when strokes changed their geometry or position!
@@ -133,6 +147,8 @@ impl Default for StrokeStore {
             history: VecDeque::from(vec![HistoryEntry::default()]),
             live_index: 0,
             content_revision: 0,
+            content_tiles_keys: HashSet::new(),
+            content_tiles_hold_old_content: false,
 
             key_tree: KeyTree::default(),
 
@@ -153,6 +169,37 @@ impl StrokeStore {
     /// Mark the committed content as changed.
     fn bump_content_revision(&mut self) {
         self.content_revision = self.content_revision.wrapping_add(1);
+    }
+
+    /// The content tile grid now draws these strokes, and all of them as they are.
+    pub(crate) fn content_tiles_are_current(&mut self, keys: HashSet<StrokeKey>) {
+        self.content_tiles_keys = keys;
+        self.content_tiles_hold_old_content = false;
+    }
+
+    /// No content tile grid is drawn anymore.
+    pub(crate) fn content_tiles_forget(&mut self) {
+        self.content_tiles_keys.clear();
+        self.content_tiles_hold_old_content = false;
+    }
+
+    /// Whether a stroke the content tiles were rasterized from changed since.
+    pub(crate) fn content_tiles_hold_old_content(&self) -> bool {
+        self.content_tiles_hold_old_content
+    }
+
+    /// Whether any stroke is currently drawn from its geometry instead of its images.
+    pub(crate) fn has_previews(&self) -> bool {
+        !self.preview_keys.is_empty() || !self.preview_until_rendered.is_empty()
+    }
+
+    /// Mark the content tiles as holding older content if they draw any of the given strokes.
+    fn content_tiles_hold_keys(&mut self, keys: &[StrokeKey]) {
+        if !self.content_tiles_hold_old_content
+            && keys.iter().any(|key| self.content_tiles_keys.contains(key))
+        {
+            self.content_tiles_hold_old_content = true;
+        }
     }
 
     /// Import from a engine snapshot. A loaded strokes store should always be imported with this method.
@@ -211,6 +258,9 @@ impl StrokeStore {
         self.trash_components = Arc::clone(&history_entry.trash_components);
         self.chrono_components = Arc::clone(&history_entry.chrono_components);
         self.chrono_counter = history_entry.chrono_counter;
+        // Undo and redo bring strokes back or take them away: the tiles cannot tell what changed
+        // without re-rasterizing, so they are replaced.
+        self.content_tiles_hold_old_content = true;
 
         // Since we don't store the rtree in the history, we need to rebuild it.
         self.rebuild_rtree();
@@ -378,6 +428,7 @@ impl StrokeStore {
     /// Permanently remove a stroke with the given key from the store.
     #[allow(unused)]
     pub(crate) fn remove_stroke(&mut self, key: StrokeKey) -> Option<Stroke> {
+        self.content_tiles_hold_keys(&[key]);
         Arc::make_mut(&mut self.trash_components).remove(key);
         Arc::make_mut(&mut self.selection_components).remove(key);
         Arc::make_mut(&mut self.chrono_components).remove(key);
@@ -406,6 +457,7 @@ impl StrokeStore {
         self.preview_keys.clear();
         self.preview_until_rendered.clear();
         self.key_tree.clear();
+        self.content_tiles_forget();
         self.bump_content_revision();
 
         widget_flags

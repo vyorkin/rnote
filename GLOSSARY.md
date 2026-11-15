@@ -216,5 +216,10 @@ The set of content tiles covering the extended viewport. It is rebuilt when the 
 changes, the image scale is no longer reusable, or the cached coverage no longer contains the
 extended viewport. A cache built for an older pan, zoom or content revision stays drawable until
 its replacement lands, and the replacement grid is swapped in whole: falling back to per-stroke
-images in between would rasterize every visible stroke, the work the tiles exist to avoid.
+images in between would rasterize every visible stroke, the work the tiles exist to avoid. A
+change to a stroke the tiles were rasterized from is the exception: the grid would draw content
+that is no longer there - an erased, moved or recolored stroke - so it is dropped immediately and
+the view falls back to per-stroke images until the replacement lands. Strokes inserted after the
+grid was built are not in any of its cells and are drawn per stroke above it, until the
+replacement includes them.
 _Avoid_: tile atlas, tile set

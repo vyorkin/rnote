@@ -178,6 +178,7 @@ impl StrokeStore {
     ///
     /// The strokes then need to update their rendering.
     pub(crate) fn update_geometry_for_strokes(&mut self, keys: &[StrokeKey]) {
+        self.content_tiles_hold_keys(keys);
         keys.iter().for_each(|&key| {
             self.update_geometry_for_stroke(key);
         });
@@ -260,6 +261,7 @@ impl StrokeStore {
             return;
         };
         stroke.set_pos(pos);
+        self.content_tiles_hold_keys(&[key]);
         self.bump_content_revision();
     }
 
@@ -267,6 +269,7 @@ impl StrokeStore {
     ///
     /// The strokes then need to update their geometry and rendering.
     pub(crate) fn translate_strokes(&mut self, keys: &[StrokeKey], offset: Vector2) {
+        self.content_tiles_hold_keys(keys);
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
                 .get_mut(key)
@@ -310,6 +313,7 @@ impl StrokeStore {
     ///
     /// Strokes then need to update their rendering.
     pub(crate) fn rotate_strokes(&mut self, keys: &[StrokeKey], angle: f64, center: Vector2) {
+        self.content_tiles_hold_keys(keys);
         self.bump_content_revision();
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
@@ -334,6 +338,7 @@ impl StrokeStore {
         if keys.is_empty() {
             return widget_flags;
         }
+        self.content_tiles_hold_keys(keys);
 
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
@@ -488,6 +493,7 @@ impl StrokeStore {
             return widget_flags;
         }
 
+        self.content_tiles_hold_keys(changed_keys);
         self.set_rendering_dirty_for_strokes(changed_keys);
 
         self.bump_content_revision();
@@ -507,6 +513,7 @@ impl StrokeStore {
         if keys.is_empty() {
             return widget_flags;
         }
+        self.content_tiles_hold_keys(keys);
 
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
@@ -541,6 +548,7 @@ impl StrokeStore {
     ///
     /// The strokes then need to update their rendering.
     pub(crate) fn scale_strokes(&mut self, keys: &[StrokeKey], scale: Vector2) {
+        self.content_tiles_hold_keys(keys);
         self.bump_content_revision();
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
@@ -895,7 +903,6 @@ impl StrokeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::ImageMemoryFormat;
     use crate::strokes::BrushStroke;
     use rnote_compose::PenPath;
     use rnote_compose::Style;

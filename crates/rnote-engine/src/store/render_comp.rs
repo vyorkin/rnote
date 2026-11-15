@@ -792,6 +792,15 @@ impl StrokeStore {
         Ok(())
     }
 
+    /// The strokes a content tile of the cell rasterizes: the visible strokes intersecting it.
+    #[allow(unused)]
+    pub(crate) fn content_tile_keys(&self, cell_bounds: Aabb) -> HashSet<StrokeKey> {
+        self.stroke_keys_as_rendered_intersecting_bounds_partitioned(cell_bounds)
+            .0
+            .into_iter()
+            .collect()
+    }
+
     #[cfg(feature = "ui")]
     pub(crate) fn draw_stroke_key_to_gtk_snapshot(
         &self,

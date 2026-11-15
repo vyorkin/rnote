@@ -1,6 +1,7 @@
 // Imports
 use crate::Image;
 use crate::engine::{EngineTask, EngineTaskSender};
+use crate::store::StrokeKey;
 use crate::store::render_comp::{
     CONTENT_TILE_MIN_STROKES, CONTENT_TILE_TARGET_CELL_EXTENT, VIEWPORT_EXTENTS_MARGIN_FACTOR,
     gen_content_tile_image_from_strokes, image_scale_is_reusable,
@@ -12,6 +13,7 @@ use p2d::math::Vector2;
 use piet::RenderContext;
 use rnote_compose::color;
 use rnote_compose::ext::AabbExt;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::error;
 
@@ -26,6 +28,11 @@ pub(crate) struct ContentTileCache {
     pub(crate) image_scale: f64,
     /// `StrokeStore::content_revision()` at build time.
     pub(crate) revision: u64,
+    /// The strokes the tiles rasterize.
+    ///
+    /// Handed to the store when the grid is swapped in, which then knows which strokes a change
+    /// makes the tiles draw stale content of.
+    pub(crate) keys: HashSet<StrokeKey>,
     /// Cells of the rebuild whose rasterization failed.
     ///
     /// Staging only, counted so that a cell whose tile never arrives cannot leave the rebuild
@@ -50,22 +57,30 @@ pub(crate) struct ContentTile {
 }
 
 /// The content tile rebuild whose tasks are in flight.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ContentTileRequest {
     pub(crate) coverage: Aabb,
     pub(crate) image_scale: f64,
     pub(crate) revision: u64,
+    /// The strokes the rebuild rasterizes, the same set the swapped-in grid will hold.
+    pub(crate) keys: HashSet<StrokeKey>,
     /// The number of tiles the rebuild rasterizes, i.e. the tiles of a complete grid.
     pub(crate) expected_cells: usize,
 }
 
 impl ContentTileCache {
-    pub(crate) fn new(coverage: Aabb, image_scale: f64, revision: u64) -> Self {
+    pub(crate) fn new(
+        coverage: Aabb,
+        image_scale: f64,
+        revision: u64,
+        keys: HashSet<StrokeKey>,
+    ) -> Self {
         Self {
             tiles: vec![],
             coverage,
             image_scale,
             revision,
+            keys,
             failed_cells: 0,
         }
     }
@@ -263,6 +278,8 @@ impl Engine {
         self.content_tile_request = None;
         self.content_tile_staging = None;
         self.content_tiles_served = false;
+        // no grid is drawn anymore: the store no longer has to track what it shows
+        self.store.content_tiles_forget();
     }
 
     /// Update the content tile cache for the current viewport.
@@ -299,6 +316,16 @@ impl Engine {
             return widget_flags;
         }
 
+        // A change the grid cannot draw - a stroke it holds erased, moved or recolored, older
+        // content restored - leaves it showing content that is no longer there. It is dropped and
+        // the view falls back to per-stroke images until the rebuild lands. While strokes are
+        // previewed the grid is kept: dropping it would blank every stroke it holds, and the
+        // previews stand in for the changed ones until the drag ends.
+        if self.store.content_tiles_hold_old_content() && !self.store.has_previews() {
+            self.clear_content_tiles();
+            widget_flags.redraw = true;
+        }
+
         let visible_non_highlighter_strokes =
             self.store.visible_non_highlighter_stroke_count(viewport);
 
@@ -313,9 +340,16 @@ impl Engine {
         }
 
         let cell_extent = CONTENT_TILE_TARGET_CELL_EXTENT / image_scale;
+        let cells = content_tile_cells(coverage, cell_extent);
+        // the cells tile the grid extent exactly, so this is the set of strokes all of them hold
+        let grid_extent = Aabb::new(
+            cells.first().map(|cell| cell.mins).unwrap_or(coverage.mins),
+            cells.last().map(|cell| cell.maxs).unwrap_or(coverage.maxs),
+        );
+        let tile_keys = self.store.content_tile_keys(grid_extent);
         let mut cells_to_rasterize = Vec::new();
 
-        for cell_bounds in content_tile_cells(coverage, cell_extent) {
+        for cell_bounds in cells {
             let strokes = self.store.content_tile_strokes(cell_bounds);
             if strokes.is_empty() {
                 // nothing to rasterize, the cell stays empty
@@ -328,13 +362,14 @@ impl Engine {
             coverage,
             image_scale,
             revision: self.store.content_revision(),
+            keys: tile_keys,
             expected_cells: cells_to_rasterize.len(),
         };
-        if self.content_tile_request == Some(request) {
+        if self.content_tile_request.as_ref() == Some(&request) {
             // already being rasterized
             return widget_flags;
         }
-        self.content_tile_request = Some(request);
+        self.content_tile_request = Some(request.clone());
         self.content_tile_staging = None;
 
         for (cell_bounds, strokes) in cells_to_rasterize {
@@ -395,8 +430,13 @@ impl Engine {
                 && staging.coverage == coverage
         });
         if !staging_is_for_request {
+            let keys = self
+                .content_tile_request
+                .as_ref()
+                .map(|request| request.keys.clone())
+                .unwrap_or_default();
             self.content_tile_staging =
-                Some(ContentTileCache::new(coverage, image_scale, revision));
+                Some(ContentTileCache::new(coverage, image_scale, revision, keys));
         }
         self.content_tile_staging.as_mut()
     }
@@ -426,6 +466,8 @@ impl Engine {
                 false
             }
             Some(staging) => {
+                // the grid now draws these strokes as they are, until one of them changes
+                self.store.content_tiles_are_current(staging.keys.clone());
                 self.content_tile_cache = Some(staging);
                 true
             }
@@ -602,9 +644,21 @@ impl Engine {
         use rnote_compose::ext::DAffine2Ext;
 
         // A commit - a stroke, a trashed stroke - changes the content without moving the camera,
-        // and no viewport update follows it. Start the replacement grid from the frame that first
-        // draws a grid the content has moved on from, so the committed content cannot stay hidden
-        // until the next pan or zoom.
+        // and no viewport update follows it. A change the grid cannot draw - a stroke it holds
+        // erased, moved or recolored, older content restored - leaves it showing content that is
+        // no longer there; it is dropped here, before it is drawn. The replacement is started from
+        // this frame, so the committed content cannot stay hidden until the next pan or zoom.
+        //
+        // While a stroke is in progress the grid stays: dropping it would blank every stroke it
+        // holds, and the preview is drawn over the stale one until the stroke is committed.
+        if self.store.content_tiles_hold_old_content()
+            && self.content_tile_cache.is_some()
+            && !self.penholder.pen_state_down()
+            && !self.store.has_previews()
+        {
+            self.clear_content_tiles();
+        }
+
         let revision = self.store.content_revision();
         let grid_is_stale = self
             .content_tile_cache
@@ -632,15 +686,33 @@ impl Engine {
         // The highlighter layer is drawn per stroke, also when the regular content comes from
         // content tiles. Only its keys are fetched then: the regular content is one node per cell,
         // so sorting and partitioning the visible stroke keys would be wasted work every frame.
-        let (non_highlighter_keys, highlighter_keys) = if tiles.is_some() {
-            (
+        //
+        // A grid that was built before the content changed is still drawn until its replacement
+        // lands, and strokes inserted since are not in any of its cells. Only then are the visible
+        // keys partitioned to find them, to draw them per stroke above the grid.
+        let (non_highlighter_keys, highlighter_keys, keys_above_tiles) = match tiles {
+            Some(cache) if cache.is_for_revision(revision) => (
                 Vec::new(),
                 self.store
                     .highlighter_keys_as_rendered_intersecting_bounds(viewport),
-            )
-        } else {
-            self.store
-                .stroke_keys_as_rendered_intersecting_bounds_partitioned(viewport)
+                Vec::new(),
+            ),
+            Some(cache) => {
+                let (regular_keys, highlighter_keys) = self
+                    .store
+                    .stroke_keys_as_rendered_intersecting_bounds_partitioned(viewport);
+                let keys_above_tiles = regular_keys
+                    .into_iter()
+                    .filter(|key| !cache.keys.contains(key))
+                    .collect();
+                (Vec::new(), highlighter_keys, keys_above_tiles)
+            }
+            None => {
+                let (regular_keys, highlighter_keys) = self
+                    .store
+                    .stroke_keys_as_rendered_intersecting_bounds_partitioned(viewport);
+                (regular_keys, highlighter_keys, Vec::new())
+            }
         };
 
         // push clip
@@ -651,7 +723,14 @@ impl Engine {
 
         // bottom image in blend (regular content)
         match tiles {
-            Some(cache) => cache.append_to_gtk_snapshot(snapshot),
+            Some(cache) => {
+                cache.append_to_gtk_snapshot(snapshot);
+                // Strokes the grid does not hold, inserted after it was built, are drawn above it
+                // per stroke, chronologically, until the replacement grid includes them.
+                for &key in keys_above_tiles.iter() {
+                    self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
+                }
+            }
             None => {
                 for &key in non_highlighter_keys.iter() {
                     self.store.draw_stroke_key_to_gtk_snapshot(snapshot, key);
@@ -1271,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn appearance_changes_rebuild_the_tiles() {
+    fn appearance_changes_drop_and_rebuild_the_tiles() {
         let (mut engine, mut rx) = dense_engine();
         let _ = engine.update_content_tile_cache_current_viewport();
         assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
@@ -1284,9 +1363,19 @@ mod tests {
             .change_stroke_colors(&[key], color::Color::BLACK);
         assert!(engine.store.content_revision() > revision);
 
+        // the grid would draw the stroke in its old color until the replacement lands, so it is
+        // dropped and the view falls back to per-stroke images for the duration of the rebuild
         let _ = engine.update_content_tile_cache_current_viewport();
-        let cache = engine.content_tile_cache.as_ref().unwrap();
-        assert_ne!(cache.revision, engine.store.content_revision());
+        assert!(
+            engine.content_tile_cache.is_none(),
+            "the stale grid is dropped"
+        );
+        assert!(!engine.store.content_tiles_hold_old_content());
+        assert!(
+            engine.content_tile_request.is_some(),
+            "the rebuild is requested"
+        );
+
         assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
         let cache = engine.content_tile_cache.as_ref().unwrap();
         assert_eq!(cache.revision, engine.store.content_revision());
@@ -1297,6 +1386,108 @@ mod tests {
             .store
             .rotate_strokes(&[key], 0.1, Vector2::new(10.0, 10.0));
         assert!(engine.store.content_revision() > revision);
+    }
+
+    /// Additions are not in any cell of a grid built before them, so they are drawn per stroke
+    /// above it instead of dropping it, which would blank every stroke it holds.
+    #[test]
+    fn a_stroke_added_to_a_tiled_view_keeps_the_grid() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        insert_stroke_at(&mut engine, Vector2::new(100., 100.));
+        let added_key = engine.store.keys_sorted_chrono().last().copied().unwrap();
+        let revision = engine.store.content_revision();
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+
+        let cache = engine
+            .content_tile_cache
+            .as_ref()
+            .expect("the grid is not dropped for an addition");
+        assert!(
+            !cache.is_for_revision(revision),
+            "the grid holds the older content"
+        );
+        assert!(
+            !cache.keys.contains(&added_key),
+            "the addition is drawn above it"
+        );
+        assert!(
+            engine.content_tile_request.is_some(),
+            "the grid is rebuilt anyway"
+        );
+    }
+
+    /// A stroke the grid was rasterized from that changed makes it draw content that is no
+    /// longer there: the grid is dropped instead of drawn.
+    #[test]
+    fn a_change_to_a_grid_stroke_drops_the_grid() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        assert!(
+            cache.keys.contains(&key),
+            "the grid holds the changed stroke"
+        );
+
+        engine
+            .store
+            .translate_strokes(&[key], Vector2::new(20., 0.));
+        let _ = engine.update_content_tile_cache_current_viewport();
+
+        assert!(
+            engine.content_tile_cache.is_none(),
+            "a grid drawing a stroke where it no longer is, is not drawn"
+        );
+        assert!(!engine.store.content_tiles_hold_old_content());
+    }
+
+    /// A change to a stroke the grid does not hold cannot make it draw stale content.
+    #[test]
+    fn a_change_outside_the_grid_keeps_it() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        // far outside the extended viewport the grid covers
+        let coverage = extended_viewport(&engine);
+        let outside = coverage.maxs + Vector2::splat(5000.);
+        insert_stroke_at(&mut engine, outside);
+        let outside_key = engine.store.keys_sorted_chrono().last().copied().unwrap();
+        engine
+            .store
+            .translate_strokes(&[outside_key], Vector2::new(10., 0.));
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(engine.content_tile_cache.is_some());
+        assert!(!engine.store.content_tiles_hold_old_content());
+    }
+
+    /// While a stroke is previewed, the grid stays: dropping it would blank every stroke it
+    /// holds, and the preview stands in for the changed stroke until the drag ends.
+    #[test]
+    fn previews_keep_the_grid() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        engine.store.set_previewing(&[key], true);
+        engine
+            .store
+            .translate_strokes(&[key], Vector2::new(20., 0.));
+        assert!(engine.store.content_tiles_hold_old_content());
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(
+            engine.content_tile_cache.is_some(),
+            "the grid stays while previewing"
+        );
     }
 
     #[test]
@@ -1350,6 +1541,7 @@ mod tests {
 
         let request = engine
             .content_tile_request
+            .clone()
             .expect("the replacement is requested");
         assert_eq!(request.revision, revision);
 
@@ -1383,6 +1575,7 @@ mod tests {
         let _ = engine.update_content_tile_cache_current_viewport();
         let request = engine
             .content_tile_request
+            .clone()
             .expect("the rebuild is requested");
 
         // the tile tasks are dropped and every cell reports a failure instead

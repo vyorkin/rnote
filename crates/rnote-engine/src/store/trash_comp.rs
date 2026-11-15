@@ -77,6 +77,7 @@ impl StrokeStore {
             .map(Arc::make_mut)
         {
             trash_comp.trashed = trash;
+            self.content_tiles_hold_keys(&[key]);
             self.update_chrono_to_last(key);
             self.bump_content_revision();
         }
@@ -135,6 +136,7 @@ impl StrokeStore {
         let erase = shapestroke.erase_axis_parts(hit);
         if erase == Some(AxisErase::Parts) {
             self.key_tree.update_with_key(key, stroke.bounds());
+            self.content_tiles_hold_keys(&[key]);
             self.set_rendering_dirty(key);
             self.bump_content_revision();
         }
