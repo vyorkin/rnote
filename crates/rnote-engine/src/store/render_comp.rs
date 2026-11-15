@@ -887,15 +887,18 @@ impl StrokeStore {
         }
     }
 
-    /// The strokes one content tile of `bounds` draws, in draw order.
+    /// The strokes one content tile of `bounds` draws, in draw order, with their keys.
     ///
     /// Highlighter strokes are left out: they are blended over the regular layer as a whole, so
     /// they stay per-stroke render nodes.
-    pub(crate) fn content_tile_strokes(&self, bounds: Aabb) -> Vec<Arc<Stroke>> {
+    pub(crate) fn content_tile_strokes_with_keys(
+        &self,
+        bounds: Aabb,
+    ) -> Vec<(StrokeKey, Arc<Stroke>)> {
         self.stroke_keys_as_rendered_intersecting_bounds_partitioned(bounds)
             .0
             .into_iter()
-            .filter_map(|key| self.stroke_components.get(key).cloned())
+            .filter_map(|key| Some((key, self.stroke_components.get(key)?.clone())))
             .collect()
     }
 

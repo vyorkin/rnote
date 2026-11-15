@@ -45,6 +45,11 @@ pub(crate) struct ContentTileCache {
 pub(crate) struct ContentTile {
     /// The document-space cell the image covers.
     bounds: Aabb,
+    /// The strokes the tile was rasterized from.
+    ///
+    /// A stroke that starts being previewed is drawn from its geometry, but the tile still holds
+    /// its pixels where it was: these keys find the cells that have to be repainted without it.
+    keys: HashSet<StrokeKey>,
     /// The rasterized stroke content of the cell.
     ///
     /// Nothing reads it back: the pixels are drawn by `rendernode`, which holds them. Tests read
@@ -95,13 +100,19 @@ impl ContentTileCache {
     }
 
     /// Add one rasterized cell, replacing a tile of the same cell if there is one.
-    pub(crate) fn push_tile(&mut self, bounds: Aabb, image: Image) -> anyhow::Result<()> {
+    pub(crate) fn push_tile(
+        &mut self,
+        bounds: Aabb,
+        keys: HashSet<StrokeKey>,
+        image: Image,
+    ) -> anyhow::Result<()> {
         #[cfg(feature = "ui")]
         let rendernode = Some(image.to_rendernode()?);
 
         self.tiles.retain(|tile| tile.bounds != bounds);
         self.tiles.push(ContentTile {
             bounds,
+            keys,
             image,
             #[cfg(feature = "ui")]
             rendernode,
@@ -157,6 +168,7 @@ fn content_tile_cells(coverage: Aabb, cell_extent: f64) -> Vec<Aabb> {
 /// Shared by the worker-thread spawn and the synchronous path the tests take.
 fn gen_content_tile_task(
     tasks_tx: EngineTaskSender,
+    keys: HashSet<StrokeKey>,
     strokes: Vec<Arc<Stroke>>,
     cell_bounds: Aabb,
     image_scale: f64,
@@ -166,6 +178,7 @@ fn gen_content_tile_task(
     match gen_content_tile_image_from_strokes(&strokes, cell_bounds, image_scale) {
         Ok(image) => tasks_tx.send(EngineTask::UpdateContentTileWithImage {
             cell_bounds,
+            keys,
             image,
             image_scale,
             revision,
@@ -180,6 +193,52 @@ fn gen_content_tile_task(
             });
         }
     }
+}
+
+/// Rasterize one cell of the drawn grid again, without the strokes being previewed, and send it
+/// back to the engine.
+///
+/// The preview draws the moved strokes from their geometry, but the grid still holds their
+/// pixels where they were: repainting the cells they are in without them removes the old copy.
+/// Shared by the worker-thread spawn and the synchronous path the tests take.
+fn gen_content_tile_preview_task(
+    tasks_tx: EngineTaskSender,
+    keys: HashSet<StrokeKey>,
+    strokes: Vec<Arc<Stroke>>,
+    cell_bounds: Aabb,
+    image_scale: f64,
+    coverage: Aabb,
+) {
+    match gen_content_tile_image_from_strokes(&strokes, cell_bounds, image_scale) {
+        Ok(image) => tasks_tx.send(EngineTask::ReplaceContentTileWithImage {
+            cell_bounds,
+            keys,
+            image,
+            image_scale,
+            coverage,
+        }),
+        Err(e) => {
+            error!(
+                "Repainting a content tile without its previewed strokes failed, cell \
+                 {cell_bounds:?}, Err: {e:?}"
+            );
+            tasks_tx.send(EngineTask::ContentTileRepaintFailed {
+                cell_bounds,
+                image_scale,
+                coverage,
+            });
+        }
+    }
+}
+
+/// The cells of the drawn grid that are being repainted without their previewed strokes.
+///
+/// A cell is repainted once; until its tile arrives, it is not rasterized again.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ContentTilePreviewRepaint {
+    pub(crate) coverage: Aabb,
+    pub(crate) image_scale: f64,
+    pub(crate) pending_cells: Vec<Aabb>,
 }
 
 impl Engine {
@@ -277,6 +336,7 @@ impl Engine {
         self.content_tile_cache = None;
         self.content_tile_request = None;
         self.content_tile_staging = None;
+        self.content_tile_preview_repaint = None;
         self.content_tiles_served = false;
         // no grid is drawn anymore: the store no longer has to track what it shows
         self.store.content_tiles_forget();
@@ -319,8 +379,9 @@ impl Engine {
         // A change the grid cannot draw - a stroke it holds erased, moved or recolored, older
         // content restored - leaves it showing content that is no longer there. It is dropped and
         // the view falls back to per-stroke images until the rebuild lands. While strokes are
-        // previewed the grid is kept: dropping it would blank every stroke it holds, and the
-        // previews stand in for the changed ones until the drag ends.
+        // previewed the grid is kept: dropping it would blank every stroke it holds. The cells
+        // holding a previewed stroke are repainted without it instead (see
+        // [Self::update_content_tiles_for_previews]), which removes its old copy.
         if self.store.content_tiles_are_stale() && !self.store.has_previews() {
             self.clear_content_tiles();
             widget_flags.redraw = true;
@@ -347,15 +408,24 @@ impl Engine {
             cells.last().map(|cell| cell.maxs).unwrap_or(coverage.maxs),
         );
         let tile_keys = self.store.content_tile_keys(grid_extent);
-        let mut cells_to_rasterize = Vec::new();
+        let mut cells_to_rasterize: Vec<(Aabb, HashSet<StrokeKey>, Vec<Arc<Stroke>>)> = Vec::new();
 
         for cell_bounds in cells {
-            let strokes = self.store.content_tile_strokes(cell_bounds);
-            if strokes.is_empty() {
+            // keyed per cell: a preview repaints the cells holding its strokes, and a tile has to
+            // know which strokes it was rasterized from
+            let cells_strokes = self.store.content_tile_strokes_with_keys(cell_bounds);
+            if cells_strokes.is_empty() {
                 // nothing to rasterize, the cell stays empty
                 continue;
             }
-            cells_to_rasterize.push((cell_bounds, strokes));
+            cells_to_rasterize.push((
+                cell_bounds,
+                cells_strokes.iter().map(|(key, _)| *key).collect(),
+                cells_strokes
+                    .into_iter()
+                    .map(|(_, stroke)| stroke)
+                    .collect(),
+            ));
         }
 
         let request = ContentTileRequest {
@@ -372,11 +442,13 @@ impl Engine {
         self.content_tile_request = Some(request.clone());
         self.content_tile_staging = None;
 
-        for (cell_bounds, strokes) in cells_to_rasterize {
+        for (cell_bounds, cell_keys, strokes) in cells_to_rasterize {
             let tasks_tx = self.tasks_tx.clone();
+            let keys = cell_keys.clone();
             #[cfg(test)]
             gen_content_tile_task(
                 tasks_tx,
+                keys,
                 strokes,
                 cell_bounds,
                 image_scale,
@@ -387,6 +459,7 @@ impl Engine {
             rayon::spawn(move || {
                 gen_content_tile_task(
                     tasks_tx,
+                    keys,
                     strokes,
                     cell_bounds,
                     image_scale,
@@ -397,6 +470,114 @@ impl Engine {
         }
 
         widget_flags.redraw = true;
+
+        widget_flags
+    }
+
+    /// Repaint the cells of the drawn grid that hold a stroke being previewed, without it.
+    ///
+    /// A drag draws the moved strokes from their geometry, but the grid still holds their pixels
+    /// where they were before it: the cell would draw the old copy under the preview, and every
+    /// previewed stroke would show twice until the drag ends and the grid is rebuilt. Repainting
+    /// those cells without the previewed strokes removes the old copy, while the rest of the grid
+    /// stays drawn - dropping the whole grid would blank every stroke it holds, and the per-stroke
+    /// images are cleared while it serves.
+    ///
+    /// A cell is repainted once; until its tile arrives it is not rasterized again.
+    pub(crate) fn update_content_tiles_for_previews(&mut self) -> WidgetFlags {
+        let mut widget_flags = WidgetFlags::default();
+
+        if self.store.preview_keys().is_empty() {
+            // only strokes that keep their preview until their images arrive are left: the grid
+            // is rebuilt for them, their geometry no longer moves
+            self.content_tile_preview_repaint = None;
+            return widget_flags;
+        }
+        let Some(cache) = self.content_tile_cache.as_ref() else {
+            return widget_flags;
+        };
+        // A grid built for the current content holds the previewed strokes where they are now:
+        // there is no old copy to remove, and repainting the cells without them would leave the
+        // strokes out of a grid that is not rebuilt again.
+        if cache.is_for_revision(self.store.content_revision()) {
+            self.content_tile_preview_repaint = None;
+            return widget_flags;
+        }
+        let coverage = cache.coverage;
+        let image_scale = cache.image_scale;
+
+        let repaint_is_for_drawn_grid =
+            self.content_tile_preview_repaint
+                .as_ref()
+                .is_some_and(|repaint| {
+                    repaint.coverage == coverage && repaint.image_scale == image_scale
+                });
+        if !repaint_is_for_drawn_grid {
+            self.content_tile_preview_repaint = Some(ContentTilePreviewRepaint {
+                coverage,
+                image_scale,
+                pending_cells: Vec::new(),
+            });
+        }
+
+        let preview_keys = self.store.preview_keys().clone();
+        let pending_cells = &self
+            .content_tile_preview_repaint
+            .as_ref()
+            .map(|repaint| repaint.pending_cells.clone())
+            .unwrap_or_default();
+        let cells_to_repaint: Vec<Aabb> = self
+            .content_tile_cache
+            .as_ref()
+            .map(|cache| {
+                cache
+                    .tiles
+                    .iter()
+                    .filter(|tile| tile.keys.iter().any(|key| preview_keys.contains(key)))
+                    .map(|tile| tile.bounds)
+                    .filter(|bounds| !pending_cells.contains(bounds))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if cells_to_repaint.is_empty() {
+            return widget_flags;
+        }
+
+        for cell_bounds in cells_to_repaint {
+            let (keys, strokes): (HashSet<StrokeKey>, Vec<Arc<Stroke>>) = self
+                .store
+                .content_tile_strokes_with_keys(cell_bounds)
+                .into_iter()
+                .filter(|(key, _)| !preview_keys.contains(key))
+                .unzip();
+
+            let tasks_tx = self.tasks_tx.clone();
+            #[cfg(test)]
+            gen_content_tile_preview_task(
+                tasks_tx,
+                keys,
+                strokes,
+                cell_bounds,
+                image_scale,
+                coverage,
+            );
+            #[cfg(not(test))]
+            rayon::spawn(move || {
+                gen_content_tile_preview_task(
+                    tasks_tx,
+                    keys,
+                    strokes,
+                    cell_bounds,
+                    image_scale,
+                    coverage,
+                )
+            });
+
+            if let Some(repaint) = self.content_tile_preview_repaint.as_mut() {
+                repaint.pending_cells.push(cell_bounds);
+            }
+            widget_flags.redraw = true;
+        }
 
         widget_flags
     }
@@ -469,6 +650,8 @@ impl Engine {
                 // the grid now draws these strokes as they are, until one of them changes
                 self.store.content_tiles_are_current(staging.keys.clone());
                 self.content_tile_cache = Some(staging);
+                // the repaints in flight were for the grid that was drawn before
+                self.content_tile_preview_repaint = None;
                 true
             }
             None => false,
@@ -660,7 +843,8 @@ impl Engine {
         // this frame, so the committed content cannot stay hidden until the next pan or zoom.
         //
         // While a stroke is in progress the grid stays: dropping it would blank every stroke it
-        // holds, and the preview is drawn over the stale one until the stroke is committed.
+        // holds. A grid holding a stroke being previewed is not drawn over the preview either:
+        // the cells holding such a stroke are repainted without it, below.
         if self.store.content_tiles_are_stale()
             && self.content_tile_cache.is_some()
             && !self.penholder.pen_state_down()
@@ -690,6 +874,11 @@ impl Engine {
         snapshot.transform(Some(&camera_transform));
 
         self.draw_document_shadow_to_gtk_snapshot(snapshot);
+
+        // A drag draws the previewed strokes from their geometry, but the grid still holds their
+        // pixels where they were before it. The cells holding them are repainted without them, so
+        // the stroke does not stay drawn at its old place under the preview.
+        let _ = self.update_content_tiles_for_previews();
 
         let tiles = self.content_tile_cache.as_ref();
 
@@ -1550,7 +1739,7 @@ mod tests {
     }
 
     /// While a stroke is previewed, the grid stays: dropping it would blank every stroke it
-    /// holds, and the preview stands in for the changed stroke until the drag ends.
+    /// holds.
     #[test]
     fn previews_keep_the_grid() {
         let (mut engine, mut rx) = dense_engine();
@@ -1569,6 +1758,138 @@ mod tests {
             engine.content_tile_cache.is_some(),
             "the grid stays while previewing"
         );
+    }
+
+    /// A previewed stroke is drawn from its geometry, but the grid still holds its rasterized
+    /// pixels where it was before the drag. The cells holding it are repainted without it, so the
+    /// stroke does not stay drawn at its old place under the preview until the drag ends.
+    #[test]
+    fn a_preview_repaints_the_cells_the_stroke_is_drawn_from() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        let cells_holding_it: Vec<Aabb> = engine
+            .content_tile_cache
+            .as_ref()
+            .unwrap()
+            .tiles
+            .iter()
+            .filter(|tile| tile.keys.contains(&key))
+            .map(|tile| tile.bounds)
+            .collect();
+        assert!(
+            !cells_holding_it.is_empty(),
+            "the grid holds the stroke that is dragged"
+        );
+
+        engine.store.set_previewing(&[key], true);
+        engine
+            .store
+            .translate_strokes(&[key], Vector2::new(20., 0.));
+        let _ = engine.update_content_tiles_for_previews();
+
+        let tasks = take_tasks(&mut rx);
+        assert_eq!(
+            tasks.len(),
+            cells_holding_it.len(),
+            "one repaint per cell holding the stroke"
+        );
+        for task in tasks.iter() {
+            match task {
+                EngineTask::ReplaceContentTileWithImage {
+                    cell_bounds, keys, ..
+                } => {
+                    assert!(cells_holding_it.contains(cell_bounds));
+                    assert!(
+                        !keys.contains(&key),
+                        "the repainted cell is rasterized without the previewed stroke"
+                    );
+                }
+                task => panic!("expected a cell repaint, got {task:?}"),
+            }
+        }
+
+        for task in tasks {
+            let _ = engine.handle_engine_task(task);
+        }
+        let cache = engine.content_tile_cache.as_ref().unwrap();
+        for bounds in cells_holding_it.iter() {
+            let tile = cache
+                .tiles
+                .iter()
+                .find(|tile| tile.bounds == *bounds)
+                .expect("the repainted cell is still in the grid");
+            assert!(
+                !tile.keys.contains(&key),
+                "the old copy of the previewed stroke is gone from the grid"
+            );
+        }
+        assert!(
+            engine.store.debug_is_previewing(key),
+            "the stroke keeps being drawn as a preview"
+        );
+    }
+
+    /// A stroke the grid does not hold is not rasterized in it, so previewing it cannot leave an
+    /// old copy behind and no cell is repainted.
+    #[test]
+    fn a_preview_of_a_stroke_the_grid_does_not_hold_spawns_no_repaint() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+
+        // inserted after the grid was rasterized, so drawn per stroke above it
+        insert_stroke_at(&mut engine, Vector2::new(100., 100.));
+        let key = engine.store.keys_sorted_chrono().last().copied().unwrap();
+        assert!(
+            !engine
+                .content_tile_cache
+                .as_ref()
+                .unwrap()
+                .keys
+                .contains(&key)
+        );
+
+        engine.store.set_previewing(&[key], true);
+        engine
+            .store
+            .translate_strokes(&[key], Vector2::new(20., 0.));
+        let _ = engine.update_content_tiles_for_previews();
+
+        let repaints = take_tasks(&mut rx)
+            .into_iter()
+            .filter(|task| matches!(task, EngineTask::ReplaceContentTileWithImage { .. }))
+            .count();
+        assert_eq!(repaints, 0);
+    }
+
+    /// A grid built for the current content holds every stroke where it is now: the preview draws
+    /// it in the same place, so there is no old copy to remove. Repainting the cells without it
+    /// would leave the stroke out of a grid that is not rebuilt again.
+    #[test]
+    fn a_current_grid_is_not_repainted_for_a_preview() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        assert!(
+            engine
+                .content_tile_cache
+                .as_ref()
+                .unwrap()
+                .is_for_revision(engine.store.content_revision())
+        );
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        engine.store.set_previewing(&[key], true);
+        let _ = engine.update_content_tiles_for_previews();
+
+        let repaints = take_tasks(&mut rx)
+            .into_iter()
+            .filter(|task| matches!(task, EngineTask::ReplaceContentTileWithImage { .. }))
+            .count();
+        assert_eq!(repaints, 0);
     }
 
     #[test]

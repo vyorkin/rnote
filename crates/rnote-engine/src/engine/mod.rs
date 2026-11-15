@@ -33,13 +33,14 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::{mpsc, oneshot};
 use p2d::bounding_volume::{Aabb, BoundingVolume};
 use p2d::math::Vector2;
-use rendering::{ContentTileCache, ContentTileRequest};
+use rendering::{ContentTileCache, ContentTilePreviewRepaint, ContentTileRequest};
 use rnote_compose::eventresult::EventPropagation;
 use rnote_compose::ext::AabbExt;
 use rnote_compose::penevent::{PenEvent, ShortcutKey};
 use rnote_compose::{Color, SplitOrder};
 use serde::{Deserialize, Serialize};
 use snapshot::Snapshotable;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -162,6 +163,8 @@ pub enum EngineTask {
     UpdateContentTileWithImage {
         /// The document-space cell the tile covers.
         cell_bounds: Aabb,
+        /// The strokes the tile was rasterized from.
+        keys: HashSet<StrokeKey>,
         /// The rasterized cell content.
         image: Image,
         /// The image scale the tile was rasterized at.
@@ -169,6 +172,33 @@ pub enum EngineTask {
         /// The `StrokeStore::content_revision()` at request time.
         revision: u64,
         /// The document-space region the tile set covers at request time.
+        coverage: Aabb,
+    },
+    /// Repaints one cell of the drawn content tile grid without the strokes being previewed.
+    ///
+    /// The task is discarded when the drawn grid is no longer the one it was rasterized for.
+    ReplaceContentTileWithImage {
+        /// The document-space cell the tile covers.
+        cell_bounds: Aabb,
+        /// The strokes the repainted tile is rasterized from, the previewed ones left out.
+        keys: HashSet<StrokeKey>,
+        /// The rasterized cell content.
+        image: Image,
+        /// The image scale the tile was rasterized at.
+        image_scale: f64,
+        /// The document-space region the drawn grid covers.
+        coverage: Aabb,
+    },
+    /// A repaint of one cell of the drawn content tile grid failed.
+    ///
+    /// Sent so the cell stops being waited for; it keeps drawing its tile until the grid is
+    /// rebuilt.
+    ContentTileRepaintFailed {
+        /// The document-space cell that failed.
+        cell_bounds: Aabb,
+        /// The image scale the tile was to be rasterized at.
+        image_scale: f64,
+        /// The document-space region the drawn grid covers.
         coverage: Aabb,
     },
     /// A cell of a content tile rebuild whose rasterization failed.
@@ -280,6 +310,13 @@ pub struct Engine {
     /// The tiles of the rebuild in flight, swapped in as the drawn cache once complete.
     #[serde(skip)]
     content_tile_staging: Option<ContentTileCache>,
+    /// The cells of the drawn grid being repainted without the strokes that are previewed.
+    ///
+    /// The grid still holds the rasterized pixels of a stroke where it was before a drag, while
+    /// the preview draws it from its geometry: a cell only stops drawing the old copy once it is
+    /// repainted.
+    #[serde(skip)]
+    content_tile_preview_repaint: Option<ContentTilePreviewRepaint>,
     /// Whether the per-stroke renderings are left out because content tiles serve the view.
     #[serde(skip)]
     content_tiles_served: bool,
@@ -327,6 +364,7 @@ impl Default for Engine {
             content_tile_cache: None,
             content_tile_request: None,
             content_tile_staging: None,
+            content_tile_preview_repaint: None,
             content_tiles_served: false,
             per_stroke_rendering_cleared: false,
             origin_indicator_image: None,
@@ -572,6 +610,7 @@ impl Engine {
             }
             EngineTask::UpdateContentTileWithImage {
                 cell_bounds,
+                keys,
                 image,
                 image_scale,
                 revision,
@@ -580,7 +619,7 @@ impl Engine {
                 if self.content_tile_task_belongs_to_request(image_scale, revision, coverage) {
                     if let Some(staging) =
                         self.content_tile_staging_for_request(image_scale, revision, coverage)
-                        && let Err(e) = staging.push_tile(cell_bounds, image)
+                        && let Err(e) = staging.push_tile(cell_bounds, keys, image)
                     {
                         error!("Failed to add a content tile to the cache, Err: {e:?}");
                         // the cell's tile never arrives: count it as failed so the rebuild
@@ -613,6 +652,62 @@ impl Engine {
                         self.regenerate_highlighter_layer();
                     }
                     widget_flags.redraw = true;
+                }
+            }
+            EngineTask::ReplaceContentTileWithImage {
+                cell_bounds,
+                keys,
+                image,
+                image_scale,
+                coverage,
+            } => {
+                let repaint_is_for_drawn_grid = self
+                    .content_tile_preview_repaint
+                    .as_ref()
+                    .is_some_and(|repaint| {
+                        repaint.coverage == coverage && repaint.image_scale == image_scale
+                    });
+                // A grid built for the current content is not repainted: the strokes are where
+                // the preview draws them, and the grid is not rebuilt again.
+                let grid_is_stale = self
+                    .content_tile_cache
+                    .as_ref()
+                    .is_some_and(|cache| !cache.is_for_revision(self.store.content_revision()));
+                if repaint_is_for_drawn_grid && grid_is_stale {
+                    if let Some(cache) = self.content_tile_cache.as_mut()
+                        && cache.coverage == coverage
+                        && cache.image_scale == image_scale
+                    {
+                        if let Err(e) = cache.push_tile(cell_bounds, keys, image) {
+                            error!("Failed to repaint a content tile, Err: {e:?}");
+                        }
+                        widget_flags.redraw = true;
+                    }
+                    if let Some(repaint) = self.content_tile_preview_repaint.as_mut() {
+                        repaint
+                            .pending_cells
+                            .retain(|pending| *pending != cell_bounds);
+                    }
+                }
+            }
+            EngineTask::ContentTileRepaintFailed {
+                cell_bounds,
+                image_scale,
+                coverage,
+            } => {
+                let repaint_is_for_drawn_grid = self
+                    .content_tile_preview_repaint
+                    .as_ref()
+                    .is_some_and(|repaint| {
+                        repaint.coverage == coverage && repaint.image_scale == image_scale
+                    });
+                if repaint_is_for_drawn_grid
+                    && let Some(repaint) = self.content_tile_preview_repaint.as_mut()
+                {
+                    // the cell keeps drawing its tile, the grid is rebuilt when the drag ends
+                    repaint
+                        .pending_cells
+                        .retain(|pending| *pending != cell_bounds);
                 }
             }
             EngineTask::BlinkTypewriterCursor => {

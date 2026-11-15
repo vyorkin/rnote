@@ -193,6 +193,11 @@ impl StrokeStore {
         !self.preview_keys.is_empty() || !self.preview_until_rendered.is_empty()
     }
 
+    /// The strokes that are currently drawn from their geometry instead of their images.
+    pub(crate) fn preview_keys(&self) -> &HashSet<StrokeKey> {
+        &self.preview_keys
+    }
+
     /// Mark the content tiles as holding older content if they draw any of the given strokes.
     fn content_tiles_hold_keys(&mut self, keys: &[StrokeKey]) {
         if !self.content_tiles_are_stale
