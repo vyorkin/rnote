@@ -268,8 +268,7 @@ impl Stroke {
                 true
             }
             Stroke::TextStroke(text_stroke) => {
-                text_stroke.text_style.color =
-                    text_stroke.text_style.color.to_inverted_brightness_color();
+                text_stroke.map_text_colors(Color::to_inverted_brightness_color);
 
                 true
             }
@@ -310,7 +309,7 @@ impl Stroke {
                 true
             }
             Stroke::TextStroke(text_stroke) => {
-                text_stroke.text_style.color = text_stroke.text_style.color.to_darkest_color();
+                text_stroke.map_text_colors(Color::to_darkest_color);
 
                 true
             }

@@ -356,7 +356,7 @@ impl StrokeStore {
                             self.set_rendering_dirty(key);
                         }
                         Stroke::TextStroke(text_stroke) => {
-                            text_stroke.text_style.color = color;
+                            text_stroke.set_text_color(color);
                             self.set_rendering_dirty(key);
                         }
                         _ => {}
@@ -1091,6 +1091,47 @@ mod tests {
         let Some(Stroke::BrushStroke(_)) = store.get_stroke_ref(line) else {
             panic!("expected the line to stay a brush stroke");
         };
+    }
+
+    /// Recoloring a selected text stroke recolors all of its text: a range that carries its own
+    /// color attribute must not keep rendering in its old color.
+    #[test]
+    fn change_stroke_colors_recolors_ranged_text_attributes() {
+        use crate::strokes::TextStroke;
+        use crate::strokes::textstroke::{RangedTextAttribute, TextAttribute, TextStyle};
+        use rnote_compose::Color;
+
+        let gold = Color::new(1.0, 0.8, 0.0, 1.0);
+        let mut text_style = TextStyle::default();
+        text_style.color = Color::new(0.6, 0.6, 0.6, 1.0);
+        text_style.ranged_text_attributes.push(RangedTextAttribute {
+            range: 0..4,
+            attribute: TextAttribute::TextColor(gold),
+        });
+
+        let mut store = StrokeStore::default();
+        let key = store.insert_stroke(
+            Stroke::TextStroke(TextStroke::new(
+                String::from("gold text"),
+                Vector2::ZERO,
+                text_style,
+            )),
+            None,
+        );
+
+        let flags = store.change_stroke_colors(&[key], Color::WHITE);
+        assert!(flags.store_modified);
+
+        let Some(Stroke::TextStroke(textstroke)) = store.get_stroke_ref(key) else {
+            panic!("expected a text stroke");
+        };
+        for index in textstroke.text.char_indices().map(|(index, _)| index) {
+            assert_eq!(
+                textstroke.text_color_at(index),
+                Color::WHITE,
+                "every character must be recolored"
+            );
+        }
     }
 
     /// A translate or a scale only changes the affine a rendering is drawn at, its pixels are

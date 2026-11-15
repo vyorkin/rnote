@@ -599,6 +599,25 @@ impl TextStroke {
             .unwrap_or(self.text_style.color)
     }
 
+    /// Set the color of the whole text, dropping the color attributes of ranges that would
+    /// otherwise keep rendering in their color.
+    pub fn set_text_color(&mut self, color: Color) {
+        self.text_style.color = color;
+        self.text_style
+            .ranged_text_attributes
+            .retain(|attr| !matches!(attr.attribute, TextAttribute::TextColor(_)));
+    }
+
+    /// Apply `map` to the color of the text and to the color of every range.
+    pub fn map_text_colors<F: Fn(Color) -> Color>(&mut self, map: F) {
+        self.text_style.color = map(self.text_style.color);
+        for attr in &mut self.text_style.ranged_text_attributes {
+            if let TextAttribute::TextColor(color) = &mut attr.attribute {
+                *color = map(*color);
+            }
+        }
+    }
+
     /// Render the text in the given range in `color`, leaving text that already renders in it untouched.
     ///
     /// An attribute of the same color ending right before the range is extended instead of adding
