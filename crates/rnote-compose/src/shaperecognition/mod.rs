@@ -447,6 +447,17 @@ pub fn recognize_shape_with_options(
     if closed {
         recognize_closed(&input_points, bounds_diag, options).map(RecognizedShape::plain)
     } else {
+        // A stroke with one straight-armed corner is an angular polyline like `<` or a checkmark.
+        // It is judged before the brackets because its two straight arms also look like a
+        // parenthesis or a brace to those recognizers.
+        if options.polyline
+            && let Some(Shape::Polyline(polyline)) =
+                polyline::recognize_polyline(&input_points, bounds_diag)
+            && polyline.path.len() == 2
+        {
+            return Some(RecognizedShape::plain(Shape::Polyline(polyline)));
+        }
+
         // The glyph is decided before the representation, and a stroke with a cusp is a brace
         // whatever else it looks like: a cornered bracket has a straight middle, and the cusp of a
         // brace is the one sharp turn in the middle of a stroke.
@@ -2386,6 +2397,25 @@ mod tests {
     }
 
     #[test]
+    fn a_curly_brace_is_not_taken_by_the_polyline() {
+        for left in [true, false] {
+            let points = with_resting_tail(curly_brace_points(left));
+            let recognized = recognize_shape_with_options(
+                &pen_path_from_points(points),
+                1.0,
+                &all_recognizers(),
+            )
+            .expect("a curly brace is recognized");
+            assert_eq!(
+                recognized.bracket,
+                Some(BracketKind::Brace(BraceStyle::Curly)),
+                "the {} curly brace is not a polyline",
+                if left { "left" } else { "right" }
+            );
+        }
+    }
+
+    #[test]
     fn recognize_a_left_curly_brace() {
         let points = with_resting_tail(curly_brace_points(true));
         let recognized = recognize_shape_with_kind(&pen_path_from_points(points), 1.0, false)
@@ -2832,6 +2862,28 @@ mod tests {
             }) => assert_eq!(polygon.path.len() + 1, 10),
             other => panic!("expected a star outline, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recognize_an_angular_bracket_as_a_polyline() {
+        let vertices = [
+            Vector2::new(120.0, 40.0),
+            Vector2::new(40.0, 100.0),
+            Vector2::new(120.0, 160.0),
+        ];
+        let mut points = Vec::new();
+        for pair in vertices.windows(2) {
+            for j in 0..=24 {
+                points.push(pair[0] + (pair[1] - pair[0]) * (j as f64 / 24.0));
+            }
+        }
+
+        let recognized =
+            recognize_shape_with_options(&pen_path_from_points(points), 1.0, &all_recognizers());
+        assert!(
+            matches!(recognized.map(|r| r.shape), Some(Shape::Polyline(_))),
+            "an angular bracket stays a polyline"
+        );
     }
 
     #[test]

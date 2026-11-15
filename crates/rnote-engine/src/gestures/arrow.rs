@@ -2,11 +2,12 @@
 
 use p2d::math::Vector2;
 use rnote_compose::penpath::PenPath;
-use rnote_compose::shaperecognition::{self, RecognitionOptions};
-use rnote_compose::shapes::{Arrow, Line, Shape};
+use rnote_compose::shapes::Arrow;
 
 /// The shortest shaft (in surface coordinates) an arrow needs.
 const MIN_SHAFT_SURFACE: f64 = 30.0;
+/// How far the shaft may bow away from the straight line between its ends, relative to its length.
+const SHAFT_MAX_DEVIATION_RATIO: f64 = 0.10;
 /// The shortest barb relative to the shaft: shorter barbs are noise next to the shaft.
 const MIN_BARB_RATIO: f64 = 0.08;
 /// The longest barb relative to the shaft: longer strokes are more likely another drawing.
@@ -17,21 +18,30 @@ const MAX_BARB_LENGTH_DIFF: f64 = 2.2;
 const MIN_HEAD_ANGLE: f64 = 20.0 * std::f64::consts::PI / 180.0;
 const MAX_HEAD_ANGLE: f64 = 120.0 * std::f64::consts::PI / 180.0;
 /// How far (in surface coordinates) the head may sit from the shaft end.
-const HEAD_END_TOLERANCE_SURFACE: f64 = 20.0;
+const HEAD_END_TOLERANCE_SURFACE: f64 = 25.0;
 /// The deviation (in surface coordinates) the head may have from its two straight segments.
-const HEAD_STRAIGHTNESS_TOLERANCE_SURFACE: f64 = 4.0;
+const HEAD_STRAIGHTNESS_TOLERANCE_SURFACE: f64 = 6.0;
 
 /// Recognize a straight finished stroke as the shaft of an arrow.
+///
+/// The shaft is fitted here instead of being sent through the shape recognizer: a shaft drawn
+/// with a slight bow is a parenthesis to that recognizer, which then hides the line from the arrow
+/// candidate. Only the straightness of the stroke between its own ends matters for a shaft.
 pub(crate) fn line_candidate(path: &PenPath, zoom: f64) -> Option<Arrow> {
-    let Shape::Line(Line { start, end }) =
-        shaperecognition::recognize_shape_with_options(path, zoom, &RecognitionOptions::default())?
-            .shape
-    else {
+    let points = flatten(path);
+    let &start = points.first()?;
+    let &tip = points.last()?;
+    let shaft = Arrow { start, tip };
+    let shaft_len = (tip - start).length();
+    if shaft_len * zoom < MIN_SHAFT_SURFACE {
         return None;
-    };
+    }
 
-    let shaft = Arrow { start, tip: end };
-    ((shaft.tip - shaft.start).length() * zoom >= MIN_SHAFT_SURFACE).then_some(shaft)
+    let max_dev = points
+        .iter()
+        .map(|p| dist_to_segment(*p, start, tip))
+        .fold(0.0, f64::max);
+    (max_dev <= SHAFT_MAX_DEVIATION_RATIO * shaft_len).then_some(shaft)
 }
 
 /// Recognize the second stroke as the head of an arrow whose shaft is `shaft`.
@@ -56,7 +66,7 @@ pub(crate) fn recognize_head(shaft: &Arrow, path: &PenPath, zoom: f64) -> Option
     if vertex_to_tip > (vertex - shaft.start).length() {
         return None;
     }
-    if vertex_to_tip * zoom > (shaft_len * 0.15).max(HEAD_END_TOLERANCE_SURFACE) {
+    if vertex_to_tip * zoom > (shaft_len * 0.20).max(HEAD_END_TOLERANCE_SURFACE) {
         return None;
     }
 
@@ -163,6 +173,21 @@ mod tests {
         let shaft = line_candidate(&path, 1.0).expect("a straight line is a shaft");
         assert!((shaft.start - Vector2::new(0.0, 0.0)).length() < 1.0);
         assert!((shaft.tip - Vector2::new(100.0, 0.0)).length() < 1.0);
+    }
+
+    #[test]
+    fn a_slightly_bowed_stroke_is_a_shaft() {
+        let points = (0..=32)
+            .map(|i| {
+                let t = i as f64 / 32.0;
+                let bow = (t * std::f64::consts::PI).sin() * 6.0;
+                Vector2::new(t * 120.0, bow)
+            })
+            .collect::<Vec<_>>();
+        let path = path_from_points(&points);
+        let shaft = line_candidate(&path, 1.0).expect("a slightly bowed line is still a shaft");
+        assert!((shaft.start - points[0]).length() < 1.0);
+        assert!((shaft.tip - *points.last().unwrap()).length() < 1.0);
     }
 
     #[test]

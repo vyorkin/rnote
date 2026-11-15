@@ -8,16 +8,14 @@ use std::f64::consts::PI;
 
 const HEART_N_RESAMPLE: usize = 128;
 /// The minimum turn at the bottom tip and at the top notch.
-const HEART_TIP_MIN_TURN: f64 = 35.0 * PI / 180.0;
-const HEART_CUSP_MIN_TURN: f64 = 30.0 * PI / 180.0;
-/// A second sharp turn weaker than this share of the stronger ones is accepted as drawing noise.
-const HEART_MAX_OTHER_TURN_RATIO: f64 = 0.55;
+const HEART_TIP_MIN_TURN: f64 = 30.0 * PI / 180.0;
+const HEART_CUSP_MIN_TURN: f64 = 25.0 * PI / 180.0;
 /// The allowed ratio between the width and the distance from the notch to the tip.
-const HEART_MIN_ASPECT: f64 = 0.65;
-const HEART_MAX_ASPECT: f64 = 1.90;
+const HEART_MIN_ASPECT: f64 = 0.60;
+const HEART_MAX_ASPECT: f64 = 2.00;
 /// The fit tolerance of the snapped heart, relative to the bounds diagonal.
-const HEART_MAX_MEAN_DEV_RATIO: f64 = 0.070;
-const HEART_MAX_DEV_RATIO: f64 = 0.18;
+const HEART_MAX_MEAN_DEV_RATIO: f64 = 0.090;
+const HEART_MAX_DEV_RATIO: f64 = 0.24;
 
 /// The canonical heart, in local coordinates: the notch at the origin, the tip at `(0, 1)`,
 /// the lobes rising to `y ≈ -0.46`, the widest points at `x ≈ ±0.8`.
@@ -71,44 +69,53 @@ pub(super) fn recognize_heart(points: &[Vector2], bounds_diag: f64) -> Option<Sh
     let convex = find_cyclic_peaks(&turns, 1.0, HEART_TIP_MIN_TURN, HEART_N_RESAMPLE / 16);
     let concave = find_cyclic_peaks(&turns, -1.0, HEART_CUSP_MIN_TURN, HEART_N_RESAMPLE / 16);
 
-    let strongest = |indices: &[usize]| -> Option<(usize, f64)> {
-        indices
-            .iter()
-            .map(|&i| (i, turns[i].abs()))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-    };
-    let (mut tip_index, mut tip_turn) = strongest(&convex)?;
-    let (mut cusp_index, mut cusp_turn) = strongest(&concave)?;
-    // The sign of a turn depends on the direction the stroke was drawn, so the strongest
-    // positive turn is the bottom tip only half the time. The notch sits closer to the center
-    // of the shape than the tip, which tells the two apart regardless of that direction.
-    let center = resampled.iter().copied().sum::<Vector2>() / resampled.len() as f64;
-    if (resampled[tip_index] - center).length() < (resampled[cusp_index] - center).length() {
-        std::mem::swap(&mut tip_index, &mut cusp_index);
-        std::mem::swap(&mut tip_turn, &mut cusp_turn);
-    }
-    let weaker = tip_turn.min(cusp_turn);
-    if tip_turn < HEART_TIP_MIN_TURN || cusp_turn < HEART_CUSP_MIN_TURN {
-        return None;
-    }
-    // The turn of a sharp corner is spread over a few samples after smoothing, and the samples
-    // on its other side can turn the opposite way. Ignore that neighbourhood; only a corner
-    // away from the two is a drawing noise that makes the shape not a heart.
-    let n = resampled.len();
-    let near_corner = |i: usize, corner: usize| {
-        let dist = i.abs_diff(corner);
-        dist.min(n - dist) <= n / 16
-    };
-    let other_turn = turns
+    // The sign of a turn depends on the direction the stroke was drawn, so the tip and the cusp
+    // are not known by their sign alone. Every pair of opposite-sign corners is fitted to the
+    // canonical heart and the best fit wins: a small loop at the start is then just a worse fit
+    // than the true tip and notch, not a reason to reject the whole heart.
+    let mut best: Option<(Shape, f64)> = None;
+    let corners = convex
         .iter()
-        .enumerate()
-        .filter(|(i, _)| !near_corner(*i, tip_index) && !near_corner(*i, cusp_index))
-        .map(|(_, turn)| turn.abs())
-        .fold(0.0, f64::max);
-    if other_turn > HEART_MAX_OTHER_TURN_RATIO * weaker {
-        return None;
+        .chain(concave.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    for &a in &corners {
+        for &b in &corners {
+            if a == b || turns[a] * turns[b] >= 0.0 {
+                continue;
+            }
+            for (tip_index, cusp_index) in [(a, b), (b, a)] {
+                if turns[tip_index].abs() < HEART_TIP_MIN_TURN
+                    || turns[cusp_index].abs() < HEART_CUSP_MIN_TURN
+                {
+                    continue;
+                }
+                if let Some((shape, score)) =
+                    heart_at(&resampled, tip_index, cusp_index, bounds_diag)
+                    && best
+                        .as_ref()
+                        .is_none_or(|(_, best_score)| score < *best_score)
+                {
+                    best = Some((shape, score));
+                }
+            }
+        }
     }
+    best.map(|(shape, _)| shape)
+}
+
+/// Fit the canonical heart to the stroke with `tip_index` and `cusp_index` as its two corners.
+///
+/// Returns the snapped curve and its fit error relative to the bounds diagonal, or `None` when
+/// the two corners do not frame a heart-shaped stroke.
+fn heart_at(
+    resampled: &[Vector2],
+    tip_index: usize,
+    cusp_index: usize,
+    bounds_diag: f64,
+) -> Option<(Shape, f64)> {
     // The two corners are on opposite sides of the heart.
+    let n = resampled.len();
     let cyclic_dist = tip_index.abs_diff(cusp_index);
     let cyclic_dist = cyclic_dist.min(n - cyclic_dist);
     if cyclic_dist < n / 5 || cyclic_dist > n * 4 / 5 {
@@ -158,7 +165,7 @@ pub(super) fn recognize_heart(points: &[Vector2], bounds_diag: f64) -> Option<Sh
         .map(|p| cusp + perp * (p.x * scale_x) + axis * (p.y * height))
         .collect::<Vec<_>>();
 
-    let (mean_dev, max_dev) = outline_deviation(&resampled, &world_template);
+    let (mean_dev, max_dev) = outline_deviation(resampled, &world_template);
     if mean_dev > HEART_MAX_MEAN_DEV_RATIO * bounds_diag
         || max_dev > HEART_MAX_DEV_RATIO * bounds_diag
     {
@@ -176,7 +183,10 @@ pub(super) fn recognize_heart(points: &[Vector2], bounds_diag: f64) -> Option<Sh
         })
         .collect();
 
-    Some(Shape::Curve(Curve { cubics }))
+    Some((
+        Shape::Curve(Curve { cubics }),
+        mean_dev / bounds_diag + 0.25 * max_dev / bounds_diag,
+    ))
 }
 
 #[cfg(test)]
@@ -211,6 +221,22 @@ mod tests {
         let points = sampled_heart(110.0, 90.0, 0.5, 0.01);
         let (min, max) = super::super::points_bounds(&points);
         assert!(recognize_heart(&points, (max - min).length()).is_some());
+    }
+
+    #[test]
+    fn recognizes_a_heart_with_a_loop_at_the_start() {
+        let mut points = sampled_heart(100.0, 80.0, 0.0, 0.01);
+        let at = points.len() / 4;
+        let p = points[at];
+        let loop_points = (0..8)
+            .map(|k| p + Vector2::from_angle(k as f64 / 8.0 * TAU) * 3.0)
+            .collect::<Vec<_>>();
+        points.splice(at..at, loop_points);
+        let (min, max) = super::super::points_bounds(&points);
+        assert!(
+            recognize_heart(&points, (max - min).length()).is_some(),
+            "a small loop at the start is not a different shape"
+        );
     }
 
     #[test]
