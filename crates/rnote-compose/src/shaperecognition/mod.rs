@@ -9,6 +9,14 @@ use p2d::math::Vector2;
 use p2d::shape::Cuboid;
 use serde::{Deserialize, Serialize};
 
+mod closedcurve;
+mod cloud;
+mod heart;
+mod peaks;
+mod polyline;
+mod speechbubble;
+mod star;
+
 /// The number of points the stroke is resampled to before analyzing it.
 const N_RESAMPLE: usize = 96;
 /// The minimum number of flattened input points needed to attempt a recognition.
@@ -338,6 +346,16 @@ pub struct RecognitionOptions {
     pub curves: bool,
     /// How a bracket is snapped to a canonical one.
     pub bracket: BracketOptions,
+    /// Whether a star outline is recognized as a regular star.
+    pub star: bool,
+    /// Whether a heart is recognized and snapped to a canonical heart.
+    pub heart: bool,
+    /// Whether a scalloped closed loop is recognized as a cloud.
+    pub cloud: bool,
+    /// Whether a rounded body with one tail is recognized as a speech bubble.
+    pub speech_bubble: bool,
+    /// Whether an open stroke with sharp corners is recognized as a polyline.
+    pub polyline: bool,
 }
 
 /// A recognized shape and how the shape is a bracket, if it is one.
@@ -370,8 +388,9 @@ impl RecognizedShape {
 /// Returns the recognized shape when the path resembles one closely enough, `None` otherwise.
 ///
 /// Recognized are: lines, parentheses and curly braces, open curves as a chain of cubic segments,
-/// ellipses and circles, rectangles (possibly rotated) and closed polygons with up to 6 corners
-/// (triangles, quadrilaterals, ..).
+/// open polylines with sharp corners, ellipses and circles, rectangles (possibly rotated), closed
+/// polygons with up to 6 corners (triangles, quadrilaterals, ..), five- and six-pointed stars,
+/// hearts, clouds and speech bubbles.
 ///
 /// `zoom` is the zoom of the view the path was drawn in. It converts the tolerances for the jitter of the hand,
 /// which are defined in surface coordinates, to document coordinates.
@@ -426,7 +445,7 @@ pub fn recognize_shape_with_options(
     let closed = gap < CLOSED_GAP_PERIMETER_RATIO * perimeter;
 
     if closed {
-        recognize_closed(&input_points, bounds_diag).map(RecognizedShape::plain)
+        recognize_closed(&input_points, bounds_diag, options).map(RecognizedShape::plain)
     } else {
         // The glyph is decided before the representation, and a stroke with a cusp is a brace
         // whatever else it looks like: a cornered bracket has a straight middle, and the cusp of a
@@ -452,6 +471,13 @@ pub fn recognize_shape_with_options(
                 options
                     .curves
                     .then(|| recognize_curve(&input_points, zoom))
+                    .flatten()
+                    .map(RecognizedShape::plain)
+            })
+            .or_else(|| {
+                options
+                    .polyline
+                    .then(|| polyline::recognize_polyline(&input_points, bounds_diag))
                     .flatten()
                     .map(RecognizedShape::plain)
             })
@@ -1308,12 +1334,38 @@ fn smooth_loop(points: &[Vector2], iterations: usize) -> Vec<Vector2> {
 }
 
 /// Recognize a closed stroke as an ellipse, rectangle or polygon.
-fn recognize_closed(points: &[Vector2], bounds_diag: f64) -> Option<Shape> {
+fn recognize_closed(
+    points: &[Vector2],
+    bounds_diag: f64,
+    options: &RecognitionOptions,
+) -> Option<Shape> {
     let resampled = resample(points, N_RESAMPLE, true);
     // The ellipse is fitted to what was drawn and not to the segment that closes the loop: on a
     // loop the pen did not close, that segment is a straight chord the pen never drew, and it
     // pulls the fit off the shape the stroke actually has.
     let drawn = resample(points, N_RESAMPLE, false);
+
+    if options.star
+        && let Some(shape) = star::recognize_star(&drawn, bounds_diag)
+    {
+        return Some(shape);
+    }
+    if options.heart
+        && let Some(shape) = heart::recognize_heart(&drawn, bounds_diag)
+    {
+        return Some(shape);
+    }
+    if options.speech_bubble
+        && let Some(shape) = speechbubble::recognize_speech_bubble(&drawn, bounds_diag)
+    {
+        return Some(shape);
+    }
+    if options.cloud
+        && let Some(shape) = cloud::recognize_cloud(&drawn, bounds_diag)
+    {
+        return Some(shape);
+    }
+
     let smoothed = smooth_loop(&resampled, 2);
     let turns = loop_turn_angles(&smoothed);
 
@@ -1646,8 +1698,9 @@ fn solve_linear(mut matrix: [[f64; 5]; 5], mut rhs: [f64; 5]) -> Option<[f64; 5]
 
         for row in (col + 1)..5 {
             let factor = matrix[row][col] / matrix[col][col];
-            for k in col..5 {
-                matrix[row][k] -= factor * matrix[col][k];
+            let pivot_row = matrix[col];
+            for (k, value) in matrix[row].iter_mut().enumerate().skip(col) {
+                *value -= factor * pivot_row[k];
             }
             rhs[row] -= factor * rhs[col];
         }
@@ -2385,6 +2438,7 @@ mod tests {
             &RecognitionOptions {
                 curves: false,
                 bracket,
+                ..RecognitionOptions::default()
             },
         )
     }
@@ -2743,6 +2797,74 @@ mod tests {
         }
     }
 
+    /// Every recognizer the settings can turn on, for the tests that check they do not steal a
+    /// basic shape from its own recognizer.
+    fn all_recognizers() -> RecognitionOptions {
+        RecognitionOptions {
+            curves: true,
+            star: true,
+            heart: true,
+            cloud: true,
+            speech_bubble: true,
+            polyline: true,
+            ..RecognitionOptions::default()
+        }
+    }
+
+    #[test]
+    fn recognize_a_circle_with_all_recognizers_on() {
+        let points = (0..=80).map(|i| {
+            let angle = (i as f64 / 80.0) * std::f64::consts::TAU;
+            Vector2::new(100.0 + 50.0 * angle.cos(), 100.0 + 50.0 * angle.sin()) + jitter(i, 1.5)
+        });
+
+        let recognized =
+            recognize_shape_with_options(&pen_path_from_points(points), 1.0, &all_recognizers());
+        assert!(
+            matches!(recognized.map(|r| r.shape), Some(Shape::Ellipse(_))),
+            "a circle stays an ellipse"
+        );
+    }
+
+    #[test]
+    fn recognize_a_rectangle_with_all_recognizers_on() {
+        let corners = [
+            Vector2::new(50.0, 50.0),
+            Vector2::new(250.0, 50.0),
+            Vector2::new(250.0, 150.0),
+            Vector2::new(50.0, 150.0),
+        ];
+
+        let recognized = recognize_shape_with_options(
+            &pen_path_from_points(closed_polygon_points(&corners, 20)),
+            1.0,
+            &all_recognizers(),
+        );
+        assert!(
+            matches!(recognized.map(|r| r.shape), Some(Shape::Rectangle(_))),
+            "a rectangle stays a rectangle"
+        );
+    }
+
+    #[test]
+    fn recognize_a_triangle_with_all_recognizers_on() {
+        let corners = [
+            Vector2::new(100.0, 40.0),
+            Vector2::new(180.0, 180.0),
+            Vector2::new(20.0, 180.0),
+        ];
+
+        let recognized = recognize_shape_with_options(
+            &pen_path_from_points(closed_polygon_points(&corners, 25)),
+            1.0,
+            &all_recognizers(),
+        );
+        assert!(
+            matches!(recognized.map(|r| r.shape), Some(Shape::Polygon(_))),
+            "a triangle stays a polygon"
+        );
+    }
+
     #[test]
     fn recognize_imperfect_circle_snaps_to_circle() {
         // A slightly squashed circle (radii ratio 0.8) should still snap to a circle.
@@ -3089,6 +3211,7 @@ mod tests {
                     brace: BraceStyle::Curly,
                     corner_radius_ratio,
                 },
+                ..RecognitionOptions::default()
             },
         )
     }

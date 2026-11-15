@@ -3,6 +3,7 @@
 //! The gesture settings live outside the brush configuration: they apply to any pen that
 //! draws ink, and are shared by all of them.
 
+pub mod arrow;
 pub mod circle_lasso;
 
 use rnote_compose::scribblerecognition::ScribbleRecognitionOptions;
@@ -41,6 +42,24 @@ pub struct GestureConfig {
     /// its height.
     #[serde(rename = "bracket_corner_radius_ratio")]
     pub bracket_corner_radius_ratio: f64,
+    /// Whether a held star outline is replaced with a regular star.
+    #[serde(rename = "star_recognition_enabled")]
+    pub star_recognition_enabled: bool,
+    /// Whether a held heart is replaced with a canonical heart.
+    #[serde(rename = "heart_recognition_enabled")]
+    pub heart_recognition_enabled: bool,
+    /// Whether a held scalloped closed loop is replaced with a cloud.
+    #[serde(rename = "cloud_recognition_enabled")]
+    pub cloud_recognition_enabled: bool,
+    /// Whether a held rounded body with a tail is replaced with a speech bubble.
+    #[serde(rename = "speech_bubble_recognition_enabled")]
+    pub speech_bubble_recognition_enabled: bool,
+    /// Whether a held open stroke with sharp corners is replaced with a polyline.
+    #[serde(rename = "polyline_recognition_enabled")]
+    pub polyline_recognition_enabled: bool,
+    /// Whether a straight stroke followed by a V-shaped head becomes an arrow.
+    #[serde(rename = "arrow_recognition_enabled")]
+    pub arrow_recognition_enabled: bool,
     /// Whether a closed loop around ink selects it and switches to the selector.
     #[serde(rename = "circle_lasso_enabled")]
     pub circle_lasso_enabled: bool,
@@ -60,6 +79,12 @@ impl Default for GestureConfig {
             bracket_style: ParenthesisStyle::Rounded,
             brace_style: BraceStyle::Curly,
             bracket_corner_radius_ratio: BRACKET_CORNER_RADIUS_RATIO_DEFAULT,
+            star_recognition_enabled: true,
+            heart_recognition_enabled: true,
+            cloud_recognition_enabled: true,
+            speech_bubble_recognition_enabled: true,
+            polyline_recognition_enabled: true,
+            arrow_recognition_enabled: true,
             circle_lasso_enabled: true,
             multi_touch_undo_redo_enabled: true,
         }

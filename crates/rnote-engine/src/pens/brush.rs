@@ -5,6 +5,7 @@ use super::pensconfig::brushconfig::BrushStyle;
 use super::pensconfig::rulerconfig::{RulerConfig, RulerTurn, RulerView};
 use super::shapeadjust::ShapeAdjust;
 use crate::engine::{EngineTask, EngineTaskSender, EngineView, EngineViewMut};
+use crate::gestures::arrow;
 use crate::gestures::circle_lasso;
 use crate::store::StrokeKey;
 use crate::strokes::BrushStroke;
@@ -78,6 +79,16 @@ enum BrushState {
     },
 }
 
+/// The straight stroke drawn just before the current one, which may be the shaft of an arrow.
+#[derive(Debug)]
+struct ArrowShaft {
+    stroke_key: StrokeKey,
+    /// The line the shaft was recognized as.
+    line: rnote_compose::shapes::Arrow,
+    /// The history index of the shaft, to drop the candidate when the document changed since.
+    history_index: usize,
+}
+
 #[derive(Debug)]
 pub struct Brush {
     state: BrushState,
@@ -87,6 +98,8 @@ pub struct Brush {
     hold_begin: Instant,
     /// Task that fires when the pen was held still long enough to trigger shape recognition.
     hold_task_handle: Option<OneOffTaskHandle>,
+    /// The shaft of a possible arrow, drawn just before the current stroke.
+    arrow_shaft: Option<ArrowShaft>,
 }
 
 impl Default for Brush {
@@ -96,6 +109,7 @@ impl Default for Brush {
             hold_anchor: Vector2::ZERO,
             hold_begin: Instant::now(),
             hold_task_handle: None,
+            arrow_shaft: None,
         }
     }
 }
@@ -548,28 +562,47 @@ impl PenBehaviour for Brush {
                         engine_view
                             .store
                             .update_geometry_for_stroke(*current_stroke_key);
-                        let (gesture_handled, wf) = finish_drawn_stroke(
-                            *current_stroke_key,
-                            now.saturating_duration_since(*begin),
-                            engine_view,
-                        );
-                        widget_flags |= wf;
-                        if !gesture_handled {
-                            engine_view.store.regenerate_rendering_for_stroke_threaded(
-                                engine_view.tasks_tx.clone(),
+
+                        // The stroke may be the head of an arrow whose shaft was drawn just before.
+                        // The arrow replaces both strokes and joins the shaft's history entry, so
+                        // that a single undo removes the whole arrow.
+                        let arrow_shaft = &mut self.arrow_shaft;
+                        if let Some(wf) =
+                            Self::try_complete_arrow(arrow_shaft, *current_stroke_key, engine_view)
+                        {
+                            widget_flags |= wf;
+                            widget_flags |= engine_view
+                                .store
+                                .update_latest_history_entry(Instant::now());
+                        } else {
+                            let (gesture_handled, wf) = finish_drawn_stroke(
                                 *current_stroke_key,
-                                engine_view.camera.viewport(),
-                                engine_view.camera.image_scale(),
+                                now.saturating_duration_since(*begin),
+                                engine_view,
+                            );
+                            widget_flags |= wf;
+                            if !gesture_handled {
+                                engine_view.store.regenerate_rendering_for_stroke_threaded(
+                                    engine_view.tasks_tx.clone(),
+                                    *current_stroke_key,
+                                    engine_view.camera.viewport(),
+                                    engine_view.camera.image_scale(),
+                                );
+                            }
+                            widget_flags |= engine_view
+                                .document
+                                .resize_autoexpand(engine_view.store, engine_view.camera);
+
+                            widget_flags |= engine_view.store.record(Instant::now());
+                            Self::remember_arrow_shaft(
+                                arrow_shaft,
+                                *current_stroke_key,
+                                &engine_view.as_im(),
                             );
                         }
-                        widget_flags |= engine_view
-                            .document
-                            .resize_autoexpand(engine_view.store, engine_view.camera);
 
                         self.state = BrushState::Idle;
                         self.hold_task_handle = None;
-
-                        widget_flags |= engine_view.store.record(Instant::now());
                         widget_flags.store_modified = true;
 
                         PenProgress::Finished
@@ -768,6 +801,11 @@ impl Brush {
                         brace: gestures.brace_style,
                         corner_radius_ratio: gestures.bracket_corner_radius_ratio,
                     },
+                    star: gestures.star_recognition_enabled,
+                    heart: gestures.heart_recognition_enabled,
+                    cloud: gestures.cloud_recognition_enabled,
+                    speech_bubble: gestures.speech_bubble_recognition_enabled,
+                    polyline: gestures.polyline_recognition_enabled,
                 },
             )
             .map(|recognized| {
@@ -825,6 +863,9 @@ impl Brush {
         widget_flags.store_modified = true;
         widget_flags.redraw = true;
 
+        // A shape is no arrow head.
+        self.arrow_shaft = None;
+
         // The pen keeps adjusting the recognized shape until it is lifted
         self.state = BrushState::AdjustingShape {
             stroke_key: shape_stroke_key,
@@ -834,6 +875,112 @@ impl Brush {
         self.hold_task_handle = None;
 
         widget_flags
+    }
+
+    /// Complete an arrow when the finished stroke is the head of the shaft drawn just before it.
+    ///
+    /// Returns the widget flags when the arrow replaced both strokes.
+    fn try_complete_arrow(
+        arrow_shaft: &mut Option<ArrowShaft>,
+        head_key: StrokeKey,
+        engine_view: &mut EngineViewMut,
+    ) -> Option<WidgetFlags> {
+        let shaft = arrow_shaft.take()?;
+        if !engine_view.config.gestures.shape_recognition_enabled
+            || !engine_view.config.gestures.arrow_recognition_enabled
+            || engine_view.store.live_index() != shaft.history_index
+            || engine_view.config.pens_config.brush_config.style == BrushStyle::Marker
+        {
+            return None;
+        }
+
+        let zoom = engine_view.camera.total_zoom();
+        let Some(Stroke::BrushStroke(head_stroke)) = engine_view.store.get_stroke_ref(head_key)
+        else {
+            return None;
+        };
+        let arrow = arrow::recognize_head(&shaft.line, &head_stroke.path, zoom)?;
+        if !matches!(
+            engine_view.store.get_stroke_ref(shaft.stroke_key),
+            Some(Stroke::BrushStroke(_))
+        ) {
+            return None;
+        }
+
+        let width = {
+            let brush_config = &engine_view.config.pens_config.brush_config;
+            match engine_view.store.get_stroke_ref(shaft.stroke_key) {
+                Some(Stroke::BrushStroke(shaft_stroke)) => {
+                    shaperecognition::mean_width(&shaft_stroke.path, zoom, |pressure| {
+                        brush_config.stroke_width_for_pressure(pressure)
+                    })
+                }
+                _ => None,
+            }
+            .unwrap_or_else(|| brush_config.stroke_width_for_pressure(Element::PRESSURE_DEFAULT))
+        };
+
+        let mut widget_flags = WidgetFlags::default();
+        engine_view.store.remove_stroke(head_key);
+        engine_view.store.remove_stroke(shaft.stroke_key);
+        let arrow_key = engine_view.store.insert_stroke(
+            Stroke::ShapeStroke(ShapeStroke::new(
+                Shape::Arrow(arrow),
+                engine_view
+                    .config
+                    .pens_config
+                    .brush_config
+                    .style_for_recognized_shape(width),
+            )),
+            Some(
+                engine_view
+                    .config
+                    .pens_config
+                    .brush_config
+                    .layer_for_current_options(),
+            ),
+        );
+        engine_view.store.update_geometry_for_stroke(arrow_key);
+        engine_view.store.regenerate_rendering_for_stroke_threaded(
+            engine_view.tasks_tx.clone(),
+            arrow_key,
+            engine_view.camera.viewport(),
+            engine_view.camera.image_scale(),
+        );
+        widget_flags |= engine_view
+            .document
+            .resize_autoexpand(engine_view.store, engine_view.camera);
+        widget_flags.store_modified = true;
+        widget_flags.redraw = true;
+
+        Some(widget_flags)
+    }
+
+    /// Remember the finished stroke if it can be the shaft of an arrow drawn next.
+    fn remember_arrow_shaft(
+        arrow_shaft: &mut Option<ArrowShaft>,
+        stroke_key: StrokeKey,
+        engine_view: &EngineView,
+    ) {
+        *arrow_shaft = None;
+        if !engine_view.config.gestures.shape_recognition_enabled
+            || !engine_view.config.gestures.arrow_recognition_enabled
+            || engine_view.config.pens_config.brush_config.style == BrushStyle::Marker
+        {
+            return;
+        }
+        let Some(Stroke::BrushStroke(stroke)) = engine_view.store.get_stroke_ref(stroke_key) else {
+            return;
+        };
+        let Some(line) = arrow::line_candidate(&stroke.path, engine_view.camera.total_zoom())
+        else {
+            return;
+        };
+        *arrow_shaft = Some(ArrowShaft {
+            stroke_key,
+            line,
+            history_index: engine_view.store.live_index(),
+        });
     }
 
     fn get_preview_style(engine_view: &EngineView) -> Style {

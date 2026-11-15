@@ -341,6 +341,18 @@ mod imp {
         #[template_child]
         pub(crate) gestures_curve_recognition_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
+        pub(crate) gestures_star_recognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) gestures_heart_recognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) gestures_cloud_recognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) gestures_speech_bubble_recognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) gestures_polyline_recognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) gestures_arrow_recognition_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
         pub(crate) gestures_circle_lasso_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) gestures_multi_touch_undo_redo_row: TemplateChild<adw::SwitchRow>,
@@ -1711,6 +1723,30 @@ impl RnSettingsPanel {
                         .set_sensitive(row.is_active());
                     settingspanel
                         .imp()
+                        .gestures_star_recognition_row
+                        .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_heart_recognition_row
+                        .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_cloud_recognition_row
+                        .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_speech_bubble_recognition_row
+                        .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_polyline_recognition_row
+                        .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
+                        .gestures_arrow_recognition_row
+                        .set_sensitive(row.is_active());
+                    settingspanel
+                        .imp()
                         .gestures_bracket_style_row
                         .set_sensitive(row.is_active());
                     settingspanel
@@ -1731,6 +1767,84 @@ impl RnSettingsPanel {
                         .write()
                         .gestures
                         .curve_recognition_enabled = row.is_active();
+                }
+            ));
+
+        imp.gestures_star_recognition_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .star_recognition_enabled = row.is_active();
+                }
+            ));
+
+        imp.gestures_heart_recognition_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .heart_recognition_enabled = row.is_active();
+                }
+            ));
+
+        imp.gestures_cloud_recognition_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .cloud_recognition_enabled = row.is_active();
+                }
+            ));
+
+        imp.gestures_speech_bubble_recognition_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .speech_bubble_recognition_enabled = row.is_active();
+                }
+            ));
+
+        imp.gestures_polyline_recognition_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .polyline_recognition_enabled = row.is_active();
+                }
+            ));
+
+        imp.gestures_arrow_recognition_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .gestures
+                        .arrow_recognition_enabled = row.is_active();
                 }
             ));
 
@@ -1873,6 +1987,30 @@ impl RnSettingsPanel {
         imp.gestures_curve_recognition_row
             .set_active(gestures.curve_recognition_enabled);
         imp.gestures_curve_recognition_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_star_recognition_row
+            .set_active(gestures.star_recognition_enabled);
+        imp.gestures_star_recognition_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_heart_recognition_row
+            .set_active(gestures.heart_recognition_enabled);
+        imp.gestures_heart_recognition_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_cloud_recognition_row
+            .set_active(gestures.cloud_recognition_enabled);
+        imp.gestures_cloud_recognition_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_speech_bubble_recognition_row
+            .set_active(gestures.speech_bubble_recognition_enabled);
+        imp.gestures_speech_bubble_recognition_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_polyline_recognition_row
+            .set_active(gestures.polyline_recognition_enabled);
+        imp.gestures_polyline_recognition_row
+            .set_sensitive(gestures.shape_recognition_enabled);
+        imp.gestures_arrow_recognition_row
+            .set_active(gestures.arrow_recognition_enabled);
+        imp.gestures_arrow_recognition_row
             .set_sensitive(gestures.shape_recognition_enabled);
         imp.gestures_bracket_style_row
             .set_selected(match gestures.bracket_style {

@@ -311,6 +311,11 @@ impl StrokeStore {
         widget_flags
     }
 
+    /// The index of the current live document in the history stack.
+    pub(crate) fn live_index(&self) -> usize {
+        self.live_index
+    }
+
     /// Update the state of the latest history entry with the current document state.
     pub(crate) fn update_latest_history_entry(&mut self, _now: Instant) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();

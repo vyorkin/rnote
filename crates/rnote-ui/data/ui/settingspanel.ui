@@ -710,6 +710,42 @@ gets disabled.</property>
                       </object>
                     </child>
                     <child>
+                      <object class="AdwSwitchRow" id="gestures_star_recognition_row">
+                        <property name="title" translatable="yes">Stars</property>
+                        <property name="subtitle" translatable="yes">Hold the pen still at the end of a five- or six-pointed star to replace it with a regular one</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_heart_recognition_row">
+                        <property name="title" translatable="yes">Hearts</property>
+                        <property name="subtitle" translatable="yes">Hold the pen still at the end of a drawn heart to replace it with a regular one</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_cloud_recognition_row">
+                        <property name="title" translatable="yes">Clouds</property>
+                        <property name="subtitle" translatable="yes">Hold the pen still at the end of a scalloped closed outline to replace it with a cloud</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_speech_bubble_recognition_row">
+                        <property name="title" translatable="yes">Speech Bubbles</property>
+                        <property name="subtitle" translatable="yes">Hold the pen still at the end of a rounded outline with a tail to replace it with a speech bubble</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_polyline_recognition_row">
+                        <property name="title" translatable="yes">Polylines</property>
+                        <property name="subtitle" translatable="yes">Hold the pen still at the end of an open stroke with sharp corners to replace the corners with straight segments</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="AdwSwitchRow" id="gestures_arrow_recognition_row">
+                        <property name="title" translatable="yes">Arrows</property>
+                        <property name="subtitle" translatable="yes">Draw a straight line, then a short V at its end: the two strokes become one arrow</property>
+                      </object>
+                    </child>
+                    <child>
                       <object class="AdwSwitchRow" id="gestures_circle_lasso_row">
                         <property name="title" translatable="yes">Circle to Lasso</property>
                         <property name="subtitle" translatable="yes">Draw a closed loop around ink to select it and switch to the selector</property>
