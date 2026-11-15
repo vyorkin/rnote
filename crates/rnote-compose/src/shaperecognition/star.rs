@@ -1,7 +1,7 @@
 // Imports
 use super::closedcurve::outline_deviation;
 use super::peaks::{angle_gap, find_cyclic_peaks, max_abs_turn, signed_turn_angles};
-use super::{resample, smooth_loop};
+use super::{dist_to_segment, resample, smooth_loop};
 use crate::shapes::{Polygon, Shape};
 use p2d::math::Vector2;
 use std::f64::consts::{PI, TAU};
@@ -164,6 +164,184 @@ pub(super) fn recognize_star(points: &[Vector2], bounds_diag: f64) -> Option<Sha
     }))
 }
 
+/// The minimum turn (radians) at a pentagram corner.
+const PENTAGRAM_MIN_TURN: f64 = 100.0 * PI / 180.0;
+/// The maximum turn (radians) at a pentagram corner. A tiny loop at a tip peaks at nearly a half
+/// turn, so this only rejects a corner folded back on itself.
+const PENTAGRAM_MAX_TURN: f64 = PI;
+/// The minimum separation of two pentagram corners, in resampled points. It is wider than the
+/// outline star separation so that a small loop or a spike at a corner cannot become a second
+/// corner.
+const PENTAGRAM_MIN_SEPARATION: usize = STAR_N_RESAMPLE / 8;
+/// How much the drawn corner radii may differ; a pentagram is often drawn by hand.
+const PENTAGRAM_MAX_RADIUS_VARIATION: f64 = 0.45;
+/// How much the stroke may stray from the straight chords between its corners.
+const PENTAGRAM_MAX_MEAN_DEV_RATIO: f64 = 0.075;
+const PENTAGRAM_MAX_DEV_RATIO: f64 = 0.20;
+/// The radius of the notches of a regular five-pointed star outline, relative to the tips.
+const PENTAGRAM_INNER_RATIO: f64 = 0.381_966_011_250_105;
+/// A pentagram crosses itself five times; small loops at the tips add a few more crossings and a
+/// loop may also add a corner of its own, so the crossings limit the false positives where the
+/// corner count alone would not.
+const PENTAGRAM_MIN_CROSSINGS: usize = 5;
+const PENTAGRAM_MAX_CROSSINGS: usize = 10;
+
+/// Recognizes a five-pointed star drawn as one self-crossing stroke (a pentagram).
+///
+/// A pentagram is five straight chords between five sharp tips, so its stroke crosses itself five
+/// times; neither a simple star outline nor a pentagon crosses itself and both have more or
+/// shallower corners. The snapped shape is the regular five-pointed star outline, a simple
+/// polygon.
+pub(super) fn recognize_pentagram(points: &[Vector2], bounds_diag: f64) -> Option<Shape> {
+    if points.len() < 16 {
+        return None;
+    }
+
+    let resampled = resample(points, STAR_N_RESAMPLE, true);
+    let smoothed = smooth_loop(&resampled, 1);
+    let turns = signed_turn_angles(&smoothed, 3);
+
+    let corners = find_turn_peaks(&turns, PENTAGRAM_MIN_TURN, PENTAGRAM_MIN_SEPARATION);
+    if corners.len() != 5 {
+        return None;
+    }
+    if corners
+        .iter()
+        .any(|&i| !(PENTAGRAM_MIN_TURN..=PENTAGRAM_MAX_TURN).contains(&turns[i].abs()))
+    {
+        return None;
+    }
+
+    let crossings = self_intersections(&smoothed);
+    if !(PENTAGRAM_MIN_CROSSINGS..=PENTAGRAM_MAX_CROSSINGS).contains(&crossings) {
+        return None;
+    }
+
+    let vertices = corners.iter().map(|&i| resampled[i]).collect::<Vec<_>>();
+    let center = vertices.iter().copied().sum::<Vector2>() / vertices.len() as f64;
+    let radii = vertices
+        .iter()
+        .map(|p| (*p - center).length())
+        .collect::<Vec<_>>();
+    let tip_radius = mean(&radii);
+    if tip_radius < f64::EPSILON
+        || coefficient_of_variation(&radii) > PENTAGRAM_MAX_RADIUS_VARIATION
+    {
+        return None;
+    }
+
+    // The drawn chords must be straight: measure the stroke against the five corner-to-corner
+    // segments, not against the outline of a simple pentagon.
+    let mut dev_sum = 0.0;
+    let mut dev_max: f64 = 0.0;
+    for p in &resampled {
+        let dist = (0..vertices.len())
+            .map(|i| dist_to_segment(*p, vertices[i], vertices[(i + 1) % vertices.len()]))
+            .fold(f64::MAX, f64::min);
+        dev_sum += dist;
+        dev_max = dev_max.max(dist);
+    }
+    let dev_mean = dev_sum / resampled.len() as f64;
+    if dev_mean > PENTAGRAM_MAX_MEAN_DEV_RATIO * bounds_diag
+        || dev_max > PENTAGRAM_MAX_DEV_RATIO * bounds_diag
+    {
+        return None;
+    }
+
+    // Align the regular star with the drawn tips: a five-fold symmetric set has a well-defined
+    // phase, while the individual corners may be uneven.
+    let (mut sin_sum, mut cos_sum) = (0.0, 0.0);
+    for p in &vertices {
+        let v = *p - center;
+        let angle = v.y.atan2(v.x) * 5.0;
+        sin_sum += angle.sin();
+        cos_sum += angle.cos();
+    }
+    let phase = sin_sum.atan2(cos_sum) / 5.0;
+    let step = TAU / 5.0;
+
+    let mut outline = Vec::with_capacity(10);
+    for k in 0..5 {
+        let tip_angle = phase + k as f64 * step;
+        outline.push(center + Vector2::from_angle(tip_angle) * tip_radius);
+        outline.push(
+            center
+                + Vector2::from_angle(tip_angle + step * 0.5) * tip_radius * PENTAGRAM_INNER_RATIO,
+        );
+    }
+
+    Some(Shape::Polygon(Polygon {
+        start: outline[0],
+        path: outline[1..].to_vec(),
+    }))
+}
+
+/// Finds the strongest turns of either sign, keeping the peaks apart by at least `min_separation`
+/// resampled points.
+fn find_turn_peaks(turns: &[f64], threshold: f64, min_separation: usize) -> Vec<usize> {
+    let n = turns.len();
+    let mut candidates = (0..n)
+        .filter(|&i| {
+            let turn = turns[i].abs();
+            turn > threshold
+                && turn >= turns[(i + n - 1) % n].abs()
+                && turn >= turns[(i + 1) % n].abs()
+                && turn >= turns[(i + n - 2) % n].abs()
+                && turn >= turns[(i + 2) % n].abs()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|&a, &b| turns[b].abs().total_cmp(&turns[a].abs()));
+
+    let cyclic_dist = |a: usize, b: usize| {
+        let d = a.abs_diff(b);
+        d.min(n - d)
+    };
+
+    let mut peaks = Vec::new();
+    for i in candidates {
+        if peaks.iter().all(|&p| cyclic_dist(p, i) >= min_separation) {
+            peaks.push(i);
+        }
+    }
+
+    peaks.sort_unstable();
+    peaks
+}
+
+/// Counts the proper crossings of a closed polyline.
+fn self_intersections(points: &[Vector2]) -> usize {
+    let n = points.len();
+    let mut crossings = 0;
+
+    for i in 0..n {
+        for j in (i + 2)..n {
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            if segments_cross(
+                points[i],
+                points[(i + 1) % n],
+                points[j],
+                points[(j + 1) % n],
+            ) {
+                crossings += 1;
+            }
+        }
+    }
+
+    crossings
+}
+
+fn segments_cross(a: Vector2, b: Vector2, c: Vector2, d: Vector2) -> bool {
+    let cross = |u: Vector2, v: Vector2| u.x * v.y - u.y * v.x;
+    let o1 = cross(b - a, c - a);
+    let o2 = cross(b - a, d - a);
+    let o3 = cross(d - c, a - c);
+    let o4 = cross(d - c, b - c);
+
+    o1 * o2 < 0.0 && o3 * o4 < 0.0
+}
+
 fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
@@ -267,6 +445,82 @@ mod tests {
         points.push(vertices[0]);
         let (min, max) = super::super::points_bounds(&points);
         assert!(recognize_star(&points, (max - min).length()).is_none());
+    }
+
+    fn pentagram(
+        rotation: f64,
+        radius_jitter: f64,
+        angle_jitter: f64,
+        loop_size: f64,
+    ) -> Vec<Vector2> {
+        let mut vertices = Vec::new();
+        for k in 0..5 {
+            let wobble = 1.0 + radius_jitter * ((k as f64 * 2.1).sin());
+            let angle = rotation + k as f64 * TAU / 5.0 + angle_jitter * (k as f64 * 1.7).cos();
+            vertices.push(Vector2::from_angle(angle) * 100.0 * wobble);
+        }
+        let order = [0, 2, 4, 1, 3, 0];
+        let mut points = Vec::new();
+        for pair in order.windows(2) {
+            let a = vertices[pair[0]];
+            let b = vertices[pair[1]];
+            if loop_size > 0.0 && pair[0] == 0 {
+                // A small loop at the corner before continuing along the chord.
+                for i in 0..=16 {
+                    let angle = TAU * i as f64 / 16.0;
+                    points.push(a + Vector2::from_angle(angle) * loop_size);
+                }
+            }
+            for j in 0..=24 {
+                points.push(a + (b - a) * (j as f64 / 24.0));
+            }
+        }
+        points
+    }
+
+    #[test]
+    fn recognizes_a_pentagram() {
+        let points = pentagram(-PI * 0.5, 0.0, 0.0, 0.0);
+        let (min, max) = super::super::points_bounds(&points);
+        match recognize_pentagram(&points, (max - min).length()) {
+            Some(Shape::Polygon(polygon)) => assert_eq!(polygon.path.len() + 1, 10),
+            other => panic!("expected a star polygon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recognizes_a_rough_pentagram() {
+        let points = pentagram(0.4, 0.18, 0.10, 0.0);
+        let (min, max) = super::super::points_bounds(&points);
+        assert!(recognize_pentagram(&points, (max - min).length()).is_some());
+    }
+
+    #[test]
+    fn recognizes_a_pentagram_with_a_small_corner_loop() {
+        let points = pentagram(0.25, 0.12, 0.08, 4.0);
+        let (min, max) = super::super::points_bounds(&points);
+        assert!(recognize_pentagram(&points, (max - min).length()).is_some());
+    }
+
+    #[test]
+    fn rejects_a_pentagon_as_a_pentagram() {
+        let mut points = Vec::new();
+        for k in 0..5 {
+            let a = Vector2::from_angle(k as f64 * TAU / 5.0) * 100.0;
+            let b = Vector2::from_angle((k + 1) as f64 * TAU / 5.0) * 100.0;
+            for j in 0..=24 {
+                points.push(a + (b - a) * (j as f64 / 24.0));
+            }
+        }
+        let (min, max) = super::super::points_bounds(&points);
+        assert!(recognize_pentagram(&points, (max - min).length()).is_none());
+    }
+
+    #[test]
+    fn rejects_a_star_outline_as_a_pentagram() {
+        let points = star_outline(5, 0.40, 0.0, 0.0);
+        let (min, max) = super::super::points_bounds(&points);
+        assert!(recognize_pentagram(&points, (max - min).length()).is_none());
     }
 
     #[test]

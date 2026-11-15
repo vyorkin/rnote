@@ -1346,7 +1346,8 @@ fn recognize_closed(
     let drawn = resample(points, N_RESAMPLE, false);
 
     if options.star
-        && let Some(shape) = star::recognize_star(&drawn, bounds_diag)
+        && let Some(shape) = star::recognize_pentagram(points, bounds_diag)
+            .or_else(|| star::recognize_star(&drawn, bounds_diag))
     {
         return Some(shape);
     }
@@ -2808,6 +2809,28 @@ mod tests {
             speech_bubble: true,
             polyline: true,
             ..RecognitionOptions::default()
+        }
+    }
+
+    #[test]
+    fn recognize_a_pentagram_as_a_star_outline() {
+        let vertices = (0..5)
+            .map(|k| Vector2::from_angle(k as f64 * std::f64::consts::TAU / 5.0) * 100.0)
+            .collect::<Vec<_>>();
+        let mut points = Vec::new();
+        for pair in [0, 2, 4, 1, 3, 0].windows(2) {
+            let (a, b) = (vertices[pair[0]], vertices[pair[1]]);
+            for j in 0..=24 {
+                points.push(a + (b - a) * (j as f64 / 24.0));
+            }
+        }
+
+        match recognize_shape_with_options(&pen_path_from_points(points), 1.0, &all_recognizers()) {
+            Some(RecognizedShape {
+                shape: Shape::Polygon(polygon),
+                ..
+            }) => assert_eq!(polygon.path.len() + 1, 10),
+            other => panic!("expected a star outline, got {other:?}"),
         }
     }
 
