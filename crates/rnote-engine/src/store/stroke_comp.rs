@@ -163,6 +163,7 @@ impl StrokeStore {
     ///
     /// The stroke then needs to update its rendering.
     pub(crate) fn update_geometry_for_stroke(&mut self, key: StrokeKey) {
+        self.content_tiles_hold_keys(&[key]);
         if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
             .get_mut(key)
             .map(Arc::make_mut)
@@ -178,7 +179,6 @@ impl StrokeStore {
     ///
     /// The strokes then need to update their rendering.
     pub(crate) fn update_geometry_for_strokes(&mut self, keys: &[StrokeKey]) {
-        self.content_tiles_hold_keys(keys);
         keys.iter().for_each(|&key| {
             self.update_geometry_for_stroke(key);
         });
@@ -383,6 +383,7 @@ impl StrokeStore {
             return widget_flags;
         }
 
+        let mut changed_keys = Vec::new();
         keys.iter().for_each(|&key| {
             if let Some(stroke) = Arc::make_mut(&mut self.stroke_components)
                 .get_mut(key)
@@ -392,9 +393,12 @@ impl StrokeStore {
 
                 if stroke_modified {
                     self.set_rendering_dirty(key);
+                    changed_keys.push(key);
                 }
             }
         });
+
+        self.content_tiles_hold_keys(&changed_keys);
 
         widget_flags.redraw = true;
         widget_flags.store_modified = true;

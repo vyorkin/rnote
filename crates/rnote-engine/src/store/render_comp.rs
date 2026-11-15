@@ -724,6 +724,15 @@ impl StrokeStore {
             .and_then(|rc| rc.images.first().map(|i| (i.pixel_width, i.pixel_height)))
     }
 
+    #[cfg(test)]
+    /// How many renderings are in the given state.
+    pub(crate) fn debug_render_state_count(&self, state: RenderCompState) -> usize {
+        self.render_components
+            .iter()
+            .filter(|(_, render_comp)| render_comp.state == state)
+            .count()
+    }
+
     #[cfg(all(test, feature = "ui"))]
     pub(crate) fn debug_image_textures(&self, key: StrokeKey) -> Vec<crate::image::ImageTexture> {
         self.render_components
@@ -793,7 +802,6 @@ impl StrokeStore {
     }
 
     /// The strokes a content tile of the cell rasterizes: the visible strokes intersecting it.
-    #[allow(unused)]
     pub(crate) fn content_tile_keys(&self, cell_bounds: Aabb) -> HashSet<StrokeKey> {
         self.stroke_keys_as_rendered_intersecting_bounds_partitioned(cell_bounds)
             .0

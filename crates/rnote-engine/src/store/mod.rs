@@ -114,7 +114,7 @@ pub struct StrokeStore {
     /// The strokes the content tiles drawn by the engine were rasterized from.
     ///
     /// Set by the engine when a new grid is swapped in, so that a change of any of them can be
-    /// told from a stroke the tiles do not hold (see [Self::content_tiles_hold_old_content]).
+    /// told from a stroke the tiles do not hold (see [Self::content_tiles_are_stale]).
     #[serde(skip)]
     content_tiles_keys: HashSet<StrokeKey>,
     /// Whether a stroke the content tiles were rasterized from changed since.
@@ -124,7 +124,7 @@ pub struct StrokeStore {
     /// not hold, above all the ones inserted after the grid was built, are drawn per stroke on top
     /// of it, so adding content never sets this.
     #[serde(skip)]
-    content_tiles_hold_old_content: bool,
+    content_tiles_are_stale: bool,
     /// An rtree backed by the slotmap store, for faster spatial queries.
     ///
     /// Needs to be updated with `update_with_key()` when strokes changed their geometry or position!
@@ -148,7 +148,7 @@ impl Default for StrokeStore {
             live_index: 0,
             content_revision: 0,
             content_tiles_keys: HashSet::new(),
-            content_tiles_hold_old_content: false,
+            content_tiles_are_stale: false,
 
             key_tree: KeyTree::default(),
 
@@ -174,18 +174,18 @@ impl StrokeStore {
     /// The content tile grid now draws these strokes, and all of them as they are.
     pub(crate) fn content_tiles_are_current(&mut self, keys: HashSet<StrokeKey>) {
         self.content_tiles_keys = keys;
-        self.content_tiles_hold_old_content = false;
+        self.content_tiles_are_stale = false;
     }
 
     /// No content tile grid is drawn anymore.
     pub(crate) fn content_tiles_forget(&mut self) {
         self.content_tiles_keys.clear();
-        self.content_tiles_hold_old_content = false;
+        self.content_tiles_are_stale = false;
     }
 
     /// Whether a stroke the content tiles were rasterized from changed since.
-    pub(crate) fn content_tiles_hold_old_content(&self) -> bool {
-        self.content_tiles_hold_old_content
+    pub(crate) fn content_tiles_are_stale(&self) -> bool {
+        self.content_tiles_are_stale
     }
 
     /// Whether any stroke is currently drawn from its geometry instead of its images.
@@ -195,10 +195,10 @@ impl StrokeStore {
 
     /// Mark the content tiles as holding older content if they draw any of the given strokes.
     fn content_tiles_hold_keys(&mut self, keys: &[StrokeKey]) {
-        if !self.content_tiles_hold_old_content
+        if !self.content_tiles_are_stale
             && keys.iter().any(|key| self.content_tiles_keys.contains(key))
         {
-            self.content_tiles_hold_old_content = true;
+            self.content_tiles_are_stale = true;
         }
     }
 
@@ -260,7 +260,7 @@ impl StrokeStore {
         self.chrono_counter = history_entry.chrono_counter;
         // Undo and redo bring strokes back or take them away: the tiles cannot tell what changed
         // without re-rasterizing, so they are replaced.
-        self.content_tiles_hold_old_content = true;
+        self.content_tiles_are_stale = true;
 
         // Since we don't store the rtree in the history, we need to rebuild it.
         self.rebuild_rtree();

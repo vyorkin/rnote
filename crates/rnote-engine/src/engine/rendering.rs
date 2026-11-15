@@ -321,7 +321,7 @@ impl Engine {
         // the view falls back to per-stroke images until the rebuild lands. While strokes are
         // previewed the grid is kept: dropping it would blank every stroke it holds, and the
         // previews stand in for the changed ones until the drag ends.
-        if self.store.content_tiles_hold_old_content() && !self.store.has_previews() {
+        if self.store.content_tiles_are_stale() && !self.store.has_previews() {
             self.clear_content_tiles();
             widget_flags.redraw = true;
         }
@@ -511,6 +511,7 @@ impl Engine {
                 // no regular per-stroke image is generated, uploaded or kept for a view that
                 // draws tiles
                 self.store.clear_rendering();
+                self.per_stroke_rendering_cleared = true;
             }
             // highlighter strokes are blended over the regular layer as a whole, so they stay
             // per-stroke renderings in the multiply layer
@@ -518,18 +519,23 @@ impl Engine {
             widget_flags.redraw = true;
             return widget_flags;
         }
+        // The grid that served the last frame is gone - a change it could not draw dropped it -
+        // and its per-stroke images were cleared while it served. The fallback path needs them,
+        // so the frame regenerates them instead of drawing placeholder rects until the grid lands.
+        let per_stroke_images_are_cleared = std::mem::take(&mut self.per_stroke_rendering_cleared);
         self.content_tiles_served = false;
 
         // The tiles for this view are being rasterized, or a zoom gesture is in progress on a
         // view dense enough to be tiled once it ends. The images at hand stay drawn scaled until
         // then: rasterizing every visible stroke, per wheel tick or once for a view that is about
         // to draw tiles, is the work the tiles exist to avoid.
-        if self.content_tile_request.is_some()
-            || (self.camera.temporary_zoom() != 1.0
-                && self
-                    .store
-                    .visible_non_highlighter_stroke_count(self.camera.viewport())
-                    > CONTENT_TILE_MIN_STROKES)
+        if !per_stroke_images_are_cleared
+            && (self.content_tile_request.is_some()
+                || (self.camera.temporary_zoom() != 1.0
+                    && self
+                        .store
+                        .visible_non_highlighter_stroke_count(self.camera.viewport())
+                        > CONTENT_TILE_MIN_STROKES))
         {
             if self.content_tile_request.is_some() {
                 // the highlighter layer is per-stroke also while the first grid is rasterized,
@@ -577,6 +583,7 @@ impl Engine {
         let mut widget_flags = WidgetFlags::default();
         self.store.clear_rendering();
         self.clear_content_tiles();
+        self.per_stroke_rendering_cleared = false;
         self.background_tile_image.take();
         self.origin_indicator_image.take();
         #[cfg(feature = "ui")]
@@ -626,6 +633,9 @@ impl Engine {
     }
 
     /// Draws the entire engine (doc, pens, strokes, selection, ..) to a GTK snapshot.
+    ///
+    /// May drop a stale content tile grid and start its rebuild, so a snapshot can update the
+    /// engine's rendering state in addition to drawing it.
     #[cfg(feature = "ui")]
     /// `surface_bounds` are the bounds of the canvas itself, `visible_bounds` the area that is
     /// visible on screen, both in surface coordinates. In the bounded layouts the canvas is only as
@@ -651,7 +661,7 @@ impl Engine {
         //
         // While a stroke is in progress the grid stays: dropping it would blank every stroke it
         // holds, and the preview is drawn over the stale one until the stroke is committed.
-        if self.store.content_tiles_hold_old_content()
+        if self.store.content_tiles_are_stale()
             && self.content_tile_cache.is_some()
             && !self.penholder.pen_state_down()
             && !self.store.has_previews()
@@ -1370,7 +1380,7 @@ mod tests {
             engine.content_tile_cache.is_none(),
             "the stale grid is dropped"
         );
-        assert!(!engine.store.content_tiles_hold_old_content());
+        assert!(!engine.store.content_tiles_are_stale());
         assert!(
             engine.content_tile_request.is_some(),
             "the rebuild is requested"
@@ -1444,7 +1454,78 @@ mod tests {
             engine.content_tile_cache.is_none(),
             "a grid drawing a stroke where it no longer is, is not drawn"
         );
-        assert!(!engine.store.content_tiles_hold_old_content());
+        assert!(!engine.store.content_tiles_are_stale());
+    }
+
+    /// The single-stroke geometry update the selector and the brush recognizer call drops the
+    /// grid as well: it is a change to a stroke the grid holds, like the batch path.
+    #[test]
+    fn a_singular_geometry_update_drops_the_grid() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        assert!(engine.content_tile_cache.is_some());
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        engine.store.update_geometry_for_stroke(key);
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(
+            engine.content_tile_cache.is_none(),
+            "a geometry change moves the stroke, the grid holds its old position"
+        );
+    }
+
+    /// Flipping a stroke's brightness is a content change, not a rendering-only one.
+    #[test]
+    fn an_inversion_drops_the_grid() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        assert!(engine.content_tile_cache.is_some());
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        let _ = engine.store.invert_color_brightness(&[key]);
+
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(
+            engine.content_tile_cache.is_none(),
+            "an inverted stroke is different content"
+        );
+    }
+
+    /// A grid dropped for a change leaves no per-stroke images behind (they are cleared while it
+    /// serves), so the fallback frame has to rasterize them: drawing placeholder rects until the
+    /// replacement lands would blank the whole view for it.
+    #[test]
+    fn a_dropped_grid_falls_back_to_per_stroke_images() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let _ = engine.update_content_rendering_current_viewport();
+        assert!(engine.content_tiles_served, "the grid serves the view");
+        assert!(
+            engine
+                .store
+                .debug_render_state_count(RenderCompState::Dirty)
+                > CONTENT_TILE_MIN_STROKES,
+            "the per-stroke images are cleared while the grid serves"
+        );
+
+        let key = engine.store.keys_sorted_chrono()[0];
+        engine
+            .store
+            .translate_strokes(&[key], Vector2::new(20., 0.));
+        let _ = engine.update_content_rendering_current_viewport();
+
+        assert!(engine.content_tile_cache.is_none());
+        assert!(
+            engine
+                .store
+                .debug_render_state_count(RenderCompState::BusyRenderingInTask)
+                > 0,
+            "the fallback path regenerates the per-stroke images"
+        );
     }
 
     /// A change to a stroke the grid does not hold cannot make it draw stale content.
@@ -1465,7 +1546,7 @@ mod tests {
 
         let _ = engine.update_content_tile_cache_current_viewport();
         assert!(engine.content_tile_cache.is_some());
-        assert!(!engine.store.content_tiles_hold_old_content());
+        assert!(!engine.store.content_tiles_are_stale());
     }
 
     /// While a stroke is previewed, the grid stays: dropping it would blank every stroke it
@@ -1481,7 +1562,7 @@ mod tests {
         engine
             .store
             .translate_strokes(&[key], Vector2::new(20., 0.));
-        assert!(engine.store.content_tiles_hold_old_content());
+        assert!(engine.store.content_tiles_are_stale());
 
         let _ = engine.update_content_tile_cache_current_viewport();
         assert!(

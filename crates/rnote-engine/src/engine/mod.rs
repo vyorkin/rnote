@@ -283,6 +283,10 @@ pub struct Engine {
     /// Whether the per-stroke renderings are left out because content tiles serve the view.
     #[serde(skip)]
     content_tiles_served: bool,
+    /// Whether the per-stroke renderings were cleared while content tiles served the view, so
+    /// that the fallback to them has to rasterize them again.
+    #[serde(skip)]
+    per_stroke_rendering_cleared: bool,
     // Origin indicator rendering
     #[serde(skip)]
     origin_indicator_image: Option<Image>,
@@ -324,6 +328,7 @@ impl Default for Engine {
             content_tile_request: None,
             content_tile_staging: None,
             content_tiles_served: false,
+            per_stroke_rendering_cleared: false,
             origin_indicator_image: None,
             #[cfg(feature = "ui")]
             origin_indicator_texture: None,
@@ -578,6 +583,9 @@ impl Engine {
                         && let Err(e) = staging.push_tile(cell_bounds, image)
                     {
                         error!("Failed to add a content tile to the cache, Err: {e:?}");
+                        // the cell's tile never arrives: count it as failed so the rebuild
+                        // completes instead of waiting for it forever
+                        staging.failed_cells += 1;
                     }
 
                     // The stale cache stays drawable (with the camera transform) until the
