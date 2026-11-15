@@ -8,6 +8,7 @@ use crate::strokes::Content;
 use crate::strokes::content::GeneratedContentImages;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
 use rnote_compose::ext::AabbExt;
+#[cfg(feature = "ui")]
 use rnote_compose::shapes::Shapeable;
 use std::collections::HashSet;
 use std::sync::Arc;

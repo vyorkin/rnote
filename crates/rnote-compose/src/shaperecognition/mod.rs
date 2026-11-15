@@ -84,6 +84,11 @@ const POLYGON_MAX_DEV_RATIO: f64 = 0.08;
 const ELLIPSE_MAX_MEAN_RESIDUAL: f64 = 0.10;
 /// The maximum single normalized ellipse fit residual for an ellipse to be accepted.
 const ELLIPSE_MAX_RESIDUAL: f64 = 0.25;
+/// The maximum number of corners a closed stroke may have and still be taken for an ellipse.
+///
+/// A hand-drawn ellipse is smooth, except for the flat ends of a long one. More corners mean a
+/// closed scribble that happens to lie near an ellipse.
+const ELLIPSE_MAX_CORNERS: usize = 2;
 /// The minimum ratio between the minor and major ellipse radii for the ellipse to be snapped to a circle.
 const CIRCLE_RADII_RATIO: f64 = 0.75;
 /// The maximum deviation (radians) of a corner angle from a right angle for a quadrilateral to become a rectangle.
@@ -396,6 +401,38 @@ impl RecognizedShape {
 /// which are defined in surface coordinates, to document coordinates.
 pub fn recognize_shape(path: &PenPath, zoom: f64) -> Option<Shape> {
     recognize_shape_with_kind(path, zoom, true).map(|recognized| recognized.shape)
+}
+
+/// Recognize a closed loop drawn around strokes as the circle lasso.
+///
+/// A lasso is drawn quickly and need not be smooth, so unlike [`recognize_shape`] it is not held
+/// against an ellipse for its corners: it only has to be closed and fit an ellipse.
+pub fn recognize_lasso_ellipse(path: &PenPath, zoom: f64) -> Option<Ellipse> {
+    let points = flattened_points(path);
+    if points.len() < MIN_INPUT_POINTS {
+        return None;
+    }
+    let points = collapse_resting_tail(points, HOLD_RADIUS_SURFACE / zoom);
+
+    let (min, max) = points_bounds(&points);
+    let extents = max - min;
+    if extents.x.max(extents.y) < MIN_EXTENT_SURFACE / zoom {
+        return None;
+    }
+    let perimeter = polyline_len(&points);
+    if perimeter < f64::EPSILON {
+        return None;
+    }
+    let gap = (*points.last()? - *points.first()?).length();
+    if gap >= CLOSED_GAP_PERIMETER_RATIO * perimeter {
+        return None;
+    }
+
+    // The closing chord was not drawn, so the fit leaves it out.
+    match recognize_ellipse(&resample(&points, N_RESAMPLE, false))? {
+        Shape::Ellipse(ellipse) => Some(ellipse),
+        _ => None,
+    }
 }
 
 /// Like [`recognize_shape`], and tells a canonical bracket from an ordinary open curve.
@@ -1392,18 +1429,23 @@ fn recognize_closed(
     let cornerness: f64 =
         turns.iter().filter(|&&t| t > 1.5 * mean_turn).sum::<f64>() / total_turning;
 
-    if cornerness < CORNERNESS_POLYGON_THRESHOLD {
-        recognize_ellipse(&drawn)
-    } else {
-        let corners = detect_corners(&resampled, &turns, mean_turn);
+    let corners = detect_corners(&resampled, &turns, mean_turn);
+    // A hand-drawn ellipse is smooth; at most the flat ends of a long one are corners. A closed
+    // scribble with several corners lies close to an ellipse but is not one.
+    let ellipse_allowed = corners.len() <= ELLIPSE_MAX_CORNERS;
 
+    if cornerness < CORNERNESS_POLYGON_THRESHOLD {
+        ellipse_allowed
+            .then(|| recognize_ellipse(&drawn))
+            .flatten()
+    } else {
         (3..=POLYGON_MAX_CORNERS)
             .contains(&corners.len())
             .then(|| recognize_polygon(&resampled, &corners, bounds_diag))
             .flatten()
             // Flat ellipses concentrate their turning at the high-curvature ends of the
             // major axis and can end up here, so fall back to the ellipse fit.
-            .or_else(|| recognize_ellipse(&drawn))
+            .or_else(|| ellipse_allowed.then(|| recognize_ellipse(&drawn)).flatten())
     }
 }
 
@@ -2977,6 +3019,26 @@ mod tests {
             }
             other => panic!("expected ellipse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_a_jagged_blob() {
+        // A closed stroke with many sharp bumps lies close to an ellipse, but it is a scribble,
+        // not an ellipse the pen drew.
+        let points = (0..=160)
+            .map(|i| {
+                let angle = i as f64 / 160.0 * std::f64::consts::TAU;
+                let radius = if i % 12 < 6 { 50.0 } else { 43.0 };
+                Vector2::new(100.0 + radius * angle.cos(), 100.0 + radius * angle.sin())
+                    + jitter(i, 0.5)
+            })
+            .collect::<Vec<_>>();
+
+        let shape = recognize_shape(&pen_path_from_points(points), 1.0);
+        assert!(
+            !matches!(shape, Some(Shape::Ellipse(_))),
+            "a jagged blob is not an ellipse, got {shape:?}"
+        );
     }
 
     fn closed_polygon_points(corners: &[Vector2], per_edge: usize) -> Vec<Vector2> {

@@ -37,7 +37,7 @@ A mode of the Shape tool that fits a shape to a rough stroke without a hold.
 _Avoid_: Draw-and-Hold
 
 **Two-Stroke Arrow**:
-A pen gesture that joins a straight shaft and a V-shaped head, drawn as two strokes, into one arrow.
+A pen gesture that joins a straight shaft and a V-shaped head, drawn as two strokes in either order, into one arrow.
 _Avoid_: arrow drawing, line arrow
 
 ## Recognition
@@ -55,11 +55,11 @@ A completed stroke kept briefly because a later input may confirm a two-phase ge
 _Avoid_: pending gesture, waiting stroke
 
 **Arrow shaft**:
-The straight first stroke of the Two-Stroke Arrow, which becomes the arrow when the head follows.
+The straight stroke of the Two-Stroke Arrow; it may be drawn before or after the head.
 _Avoid_: arrow line, candidate line
 
 **Arrow head**:
-The V-shaped second stroke of the Two-Stroke Arrow, drawn at the end of the shaft.
+The V-shaped stroke of the Two-Stroke Arrow, drawn at either end of the shaft.
 _Avoid_: arrowhead stroke
 
 **Gesture recognizer**:

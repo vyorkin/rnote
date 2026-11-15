@@ -79,13 +79,13 @@ enum BrushState {
     },
 }
 
-/// The straight stroke drawn just before the current one, which may be the shaft of an arrow.
+/// The stroke drawn just before the current one, which may be either stroke of an arrow.
+///
+/// Both drawing orders are accepted: the shaft then the head, or the head then the shaft.
 #[derive(Debug)]
-struct ArrowShaft {
+struct ArrowCandidate {
     stroke_key: StrokeKey,
-    /// The line the shaft was recognized as.
-    line: rnote_compose::shapes::Arrow,
-    /// The history index of the shaft, to drop the candidate when the document changed since.
+    /// The history index of the stroke, to drop the candidate when the document changed since.
     history_index: usize,
 }
 
@@ -98,8 +98,8 @@ pub struct Brush {
     hold_begin: Instant,
     /// Task that fires when the pen was held still long enough to trigger shape recognition.
     hold_task_handle: Option<OneOffTaskHandle>,
-    /// The shaft of a possible arrow, drawn just before the current stroke.
-    arrow_shaft: Option<ArrowShaft>,
+    /// The stroke drawn just before the current one, a possible half of an arrow.
+    arrow_candidate: Option<ArrowCandidate>,
 }
 
 impl Default for Brush {
@@ -109,7 +109,7 @@ impl Default for Brush {
             hold_anchor: Vector2::ZERO,
             hold_begin: Instant::now(),
             hold_task_handle: None,
-            arrow_shaft: None,
+            arrow_candidate: None,
         }
     }
 }
@@ -563,13 +563,15 @@ impl PenBehaviour for Brush {
                             .store
                             .update_geometry_for_stroke(*current_stroke_key);
 
-                        // The stroke may be the head of an arrow whose shaft was drawn just before.
-                        // The arrow replaces both strokes and joins the shaft's history entry, so
-                        // that a single undo removes the whole arrow.
-                        let arrow_shaft = &mut self.arrow_shaft;
-                        if let Some(wf) =
-                            Self::try_complete_arrow(arrow_shaft, *current_stroke_key, engine_view)
-                        {
+                        // The previous stroke and this one may be the two strokes of an arrow.
+                        // The arrow replaces both and joins the history entry of the previous
+                        // stroke, so that a single undo removes the whole arrow.
+                        let arrow_candidate = &mut self.arrow_candidate;
+                        if let Some(wf) = Self::try_complete_arrow(
+                            arrow_candidate,
+                            *current_stroke_key,
+                            engine_view,
+                        ) {
                             widget_flags |= wf;
                             widget_flags |= engine_view
                                 .store
@@ -594,11 +596,13 @@ impl PenBehaviour for Brush {
                                 .resize_autoexpand(engine_view.store, engine_view.camera);
 
                             widget_flags |= engine_view.store.record(Instant::now());
-                            Self::remember_arrow_shaft(
-                                arrow_shaft,
-                                *current_stroke_key,
-                                &engine_view.as_im(),
-                            );
+                            if !gesture_handled {
+                                Self::remember_arrow_candidate(
+                                    arrow_candidate,
+                                    *current_stroke_key,
+                                    &engine_view.as_im(),
+                                );
+                            }
                         }
 
                         self.state = BrushState::Idle;
@@ -758,6 +762,46 @@ impl Brush {
         if ruler_snap_side.is_some() {
             return widget_flags;
         }
+        // The second stroke of an arrow must survive as a brush stroke until the pen is lifted,
+        // where it is paired with the first. Snapping it to a shape here would consume it first.
+        if engine_view.config.gestures.arrow_recognition_enabled
+            && engine_view.config.pens_config.brush_config.style != BrushStyle::Marker
+        {
+            if let Some(candidate) = &self.arrow_candidate {
+                if candidate.history_index == engine_view.store.live_index() {
+                    let zoom = engine_view.camera.total_zoom();
+                    let is_arrow = if let (
+                        Some(Stroke::BrushStroke(candidate_stroke)),
+                        Some(Stroke::BrushStroke(current_stroke)),
+                    ) = (
+                        engine_view.store.get_stroke_ref(candidate.stroke_key),
+                        engine_view.store.get_stroke_ref(current_stroke_key),
+                    ) {
+                        arrow::recognize_pair(&candidate_stroke.path, &current_stroke.path, zoom)
+                            .is_some()
+                    } else {
+                        false
+                    };
+                    if is_arrow {
+                        // Complete it now, while the pen is still down, so the snapped arrow
+                        // is the feedback that the gesture was recognized.
+                        if let Some(wf) = Self::try_complete_arrow(
+                            &mut self.arrow_candidate,
+                            current_stroke_key,
+                            engine_view,
+                        ) {
+                            widget_flags |= wf;
+                            widget_flags |= engine_view
+                                .store
+                                .update_latest_history_entry(Instant::now());
+                            self.state = BrushState::Idle;
+                            self.hold_task_handle = None;
+                        }
+                        return widget_flags;
+                    }
+                }
+            }
+        }
         // Guard against the timeout task and the pen resuming movement racing each other:
         // only recognize when the pen actually rested at the hold anchor for the entire hold duration.
         let hold_duration = engine_view.config.gestures.shape_recognition_delay;
@@ -863,8 +907,8 @@ impl Brush {
         widget_flags.store_modified = true;
         widget_flags.redraw = true;
 
-        // A shape is no arrow head.
-        self.arrow_shaft = None;
+        // A shape is no arrow stroke.
+        self.arrow_candidate = None;
 
         // The pen keeps adjusting the recognized shape until it is lifted
         self.state = BrushState::AdjustingShape {
@@ -877,52 +921,63 @@ impl Brush {
         widget_flags
     }
 
-    /// Complete an arrow when the finished stroke is the head of the shaft drawn just before it.
+    /// Complete an arrow when the previous stroke and the finished one are its two strokes.
     ///
-    /// Returns the widget flags when the arrow replaced both strokes.
+    /// Both drawing orders are accepted - the shaft then the head, or the head then the shaft -
+    /// and the head may sit at either end of the shaft. Returns the widget flags when the arrow
+    /// replaced both strokes.
     fn try_complete_arrow(
-        arrow_shaft: &mut Option<ArrowShaft>,
-        head_key: StrokeKey,
+        arrow_candidate: &mut Option<ArrowCandidate>,
+        current_key: StrokeKey,
         engine_view: &mut EngineViewMut,
     ) -> Option<WidgetFlags> {
-        let shaft = arrow_shaft.take()?;
+        let candidate = arrow_candidate.take()?;
         if !engine_view.config.gestures.shape_recognition_enabled
             || !engine_view.config.gestures.arrow_recognition_enabled
-            || engine_view.store.live_index() != shaft.history_index
+            || engine_view.store.live_index() != candidate.history_index
             || engine_view.config.pens_config.brush_config.style == BrushStyle::Marker
         {
             return None;
         }
 
-        let zoom = engine_view.camera.total_zoom();
-        let Some(Stroke::BrushStroke(head_stroke)) = engine_view.store.get_stroke_ref(head_key)
-        else {
-            return None;
+        let candidate_path = match engine_view.store.get_stroke_ref(candidate.stroke_key) {
+            Some(Stroke::BrushStroke(stroke)) => stroke.path.clone(),
+            _ => return None,
         };
-        let arrow = arrow::recognize_head(&shaft.line, &head_stroke.path, zoom)?;
-        if !matches!(
-            engine_view.store.get_stroke_ref(shaft.stroke_key),
-            Some(Stroke::BrushStroke(_))
-        ) {
-            return None;
-        }
+        let current_path = match engine_view.store.get_stroke_ref(current_key) {
+            Some(Stroke::BrushStroke(stroke)) => stroke.path.clone(),
+            _ => return None,
+        };
+        let zoom = engine_view.camera.total_zoom();
+
+        // First the previous stroke as the shaft, then the finished one as its head. If the
+        // previous stroke is not a shaft, the finished stroke is, and the previous one is the head.
+        let (shaft_key, shaft_path, head_key, arrow) =
+            match arrow::line_candidate(&candidate_path, zoom) {
+                Some(line) => (
+                    candidate.stroke_key,
+                    candidate_path,
+                    current_key,
+                    arrow::recognize_head(&line, &current_path, zoom)?,
+                ),
+                None => {
+                    let line = arrow::line_candidate(&current_path, zoom)?;
+                    let arrow = arrow::recognize_head(&line, &candidate_path, zoom)?;
+                    (current_key, current_path, candidate.stroke_key, arrow)
+                }
+            };
 
         let width = {
             let brush_config = &engine_view.config.pens_config.brush_config;
-            match engine_view.store.get_stroke_ref(shaft.stroke_key) {
-                Some(Stroke::BrushStroke(shaft_stroke)) => {
-                    shaperecognition::mean_width(&shaft_stroke.path, zoom, |pressure| {
-                        brush_config.stroke_width_for_pressure(pressure)
-                    })
-                }
-                _ => None,
-            }
+            shaperecognition::mean_width(&shaft_path, zoom, |pressure| {
+                brush_config.stroke_width_for_pressure(pressure)
+            })
             .unwrap_or_else(|| brush_config.stroke_width_for_pressure(Element::PRESSURE_DEFAULT))
         };
 
         let mut widget_flags = WidgetFlags::default();
         engine_view.store.remove_stroke(head_key);
-        engine_view.store.remove_stroke(shaft.stroke_key);
+        engine_view.store.remove_stroke(shaft_key);
         let arrow_key = engine_view.store.insert_stroke(
             Stroke::ShapeStroke(ShapeStroke::new(
                 Shape::Arrow(arrow),
@@ -956,29 +1011,25 @@ impl Brush {
         Some(widget_flags)
     }
 
-    /// Remember the finished stroke if it can be the shaft of an arrow drawn next.
-    fn remember_arrow_shaft(
-        arrow_shaft: &mut Option<ArrowShaft>,
+    /// Remember the finished stroke as a possible half of an arrow drawn next.
+    fn remember_arrow_candidate(
+        arrow_candidate: &mut Option<ArrowCandidate>,
         stroke_key: StrokeKey,
         engine_view: &EngineView,
     ) {
-        *arrow_shaft = None;
+        *arrow_candidate = None;
         if !engine_view.config.gestures.shape_recognition_enabled
             || !engine_view.config.gestures.arrow_recognition_enabled
             || engine_view.config.pens_config.brush_config.style == BrushStyle::Marker
+            || !matches!(
+                engine_view.store.get_stroke_ref(stroke_key),
+                Some(Stroke::BrushStroke(_))
+            )
         {
             return;
         }
-        let Some(Stroke::BrushStroke(stroke)) = engine_view.store.get_stroke_ref(stroke_key) else {
-            return;
-        };
-        let Some(line) = arrow::line_candidate(&stroke.path, engine_view.camera.total_zoom())
-        else {
-            return;
-        };
-        *arrow_shaft = Some(ArrowShaft {
+        *arrow_candidate = Some(ArrowCandidate {
             stroke_key,
-            line,
             history_index: engine_view.store.live_index(),
         });
     }
@@ -1315,6 +1366,80 @@ mod tests {
             (0..n_points).map(|i| Element::new(Vector2::new(i as f64, 0.0), 1.0)),
         )
         .unwrap()
+    }
+
+    fn brush_stroke(points: &[Vector2], style: Style) -> BrushStroke {
+        let path = PenPath::try_from_elements(
+            points
+                .iter()
+                .map(|p| Element::new(*p, Element::PRESSURE_DEFAULT)),
+        )
+        .unwrap();
+        let mut stroke = BrushStroke::new(path.start, style);
+        stroke.path = path;
+        stroke
+    }
+
+    /// The head is drawn first, from one barb through the vertex to the other, then the shaft
+    /// from the vertex to the tail. The arrow must still be recognized.
+    #[test]
+    fn an_arrow_is_recognized_with_the_head_drawn_first() {
+        use crate::Engine;
+        use crate::strokes::Stroke;
+        use rnote_compose::shapes::Shape;
+
+        let mut engine = Engine::default();
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+        let style = engine
+            .config
+            .0
+            .read()
+            .unwrap()
+            .pens_config
+            .brush_config
+            .style_for_current_options();
+
+        let head_key = engine.store.insert_stroke(
+            Stroke::BrushStroke(brush_stroke(
+                &[
+                    Vector2::new(320., 280.),
+                    Vector2::new(300., 300.),
+                    Vector2::new(320., 320.),
+                ],
+                style.clone(),
+            )),
+            None,
+        );
+        let shaft_key = engine.store.insert_stroke(
+            Stroke::BrushStroke(brush_stroke(
+                &[Vector2::new(300., 300.), Vector2::new(500., 300.)],
+                style,
+            )),
+            None,
+        );
+
+        let mut candidate = Some(ArrowCandidate {
+            stroke_key: head_key,
+            history_index: engine.store.live_index(),
+        });
+        let flags =
+            engine.with_view_mut(|view| Brush::try_complete_arrow(&mut candidate, shaft_key, view));
+        assert!(flags.is_some(), "the head-then-shaft arrow is recognized");
+
+        let keys = engine.store.stroke_keys_unordered();
+        assert_eq!(
+            keys.len(),
+            1,
+            "both drawn strokes are replaced by the arrow"
+        );
+        let Some(Stroke::ShapeStroke(shape_stroke)) = engine.store.get_stroke_ref(keys[0]) else {
+            panic!("the arrow is a shape stroke");
+        };
+        let Shape::Arrow(arrow) = &shape_stroke.shape else {
+            panic!("the shape is an arrow");
+        };
+        assert!((arrow.start - Vector2::new(500., 300.)).length() < 1.0);
+        assert!((arrow.tip - Vector2::new(300., 300.)).length() < 1.0);
     }
 
     #[test]

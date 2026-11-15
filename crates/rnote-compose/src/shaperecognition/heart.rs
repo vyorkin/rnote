@@ -69,6 +69,13 @@ pub(super) fn recognize_heart(points: &[Vector2], bounds_diag: f64) -> Option<Sh
     let convex = find_cyclic_peaks(&turns, 1.0, HEART_TIP_MIN_TURN, HEART_N_RESAMPLE / 16);
     let concave = find_cyclic_peaks(&turns, -1.0, HEART_CUSP_MIN_TURN, HEART_N_RESAMPLE / 16);
 
+    // A heart has one strong convex corner, the tip; a loop at the start can add one more. A star
+    // or a scribble has several, and fitting any one of them to the template would otherwise
+    // accept the whole scribble.
+    if convex.len() > 2 {
+        return None;
+    }
+
     // The sign of a turn depends on the direction the stroke was drawn, so the tip and the cusp
     // are not known by their sign alone. Every pair of opposite-sign corners is fitted to the
     // canonical heart and the best fit wins: a small loop at the start is then just a worse fit
@@ -237,6 +244,25 @@ mod tests {
             recognize_heart(&points, (max - min).length()).is_some(),
             "a small loop at the start is not a different shape"
         );
+    }
+
+    #[test]
+    fn rejects_a_star_scribble() {
+        let mut points = Vec::new();
+        let n = 5;
+        for i in 0..n * 2 {
+            let angle = i as f64 / (n * 2) as f64 * TAU;
+            let radius = if i % 2 == 0 { 100.0 } else { 45.0 };
+            let vertex = Vector2::from_angle(angle) * radius;
+            let next_angle = (i + 1) as f64 / (n * 2) as f64 * TAU;
+            let next_radius = if (i + 1) % 2 == 0 { 100.0 } else { 45.0 };
+            let next = Vector2::from_angle(next_angle) * next_radius;
+            for step in 0..8 {
+                points.push(vertex.lerp(next, step as f64 / 8.0));
+            }
+        }
+        let (min, max) = super::super::points_bounds(&points);
+        assert!(recognize_heart(&points, (max - min).length()).is_none());
     }
 
     #[test]

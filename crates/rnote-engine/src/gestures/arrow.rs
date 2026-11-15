@@ -1,4 +1,4 @@
-//! Recognizing an arrow drawn in two strokes: the shaft, then the V-shaped head.
+//! Recognizing an arrow drawn in two strokes: the shaft and the V-shaped head.
 
 use p2d::math::Vector2;
 use rnote_compose::penpath::PenPath;
@@ -21,6 +21,17 @@ const MAX_HEAD_ANGLE: f64 = 120.0 * std::f64::consts::PI / 180.0;
 const HEAD_END_TOLERANCE_SURFACE: f64 = 25.0;
 /// The deviation (in surface coordinates) the head may have from its two straight segments.
 const HEAD_STRAIGHTNESS_TOLERANCE_SURFACE: f64 = 6.0;
+
+/// Recognize the two finished strokes of an arrow, in either drawing order.
+pub(crate) fn recognize_pair(first: &PenPath, second: &PenPath, zoom: f64) -> Option<Arrow> {
+    if let Some(line) = line_candidate(first, zoom) {
+        if let Some(arrow) = recognize_head(&line, second, zoom) {
+            return Some(arrow);
+        }
+    }
+    let line = line_candidate(second, zoom)?;
+    recognize_head(&line, first, zoom)
+}
 
 /// Recognize a straight finished stroke as the shaft of an arrow.
 ///
@@ -45,7 +56,16 @@ pub(crate) fn line_candidate(path: &PenPath, zoom: f64) -> Option<Arrow> {
 }
 
 /// Recognize the second stroke as the head of an arrow whose shaft is `shaft`.
+///
+/// The head may sit at either end of the shaft; the returned arrow points from the far end of
+/// the shaft through the head.
 pub(crate) fn recognize_head(shaft: &Arrow, path: &PenPath, zoom: f64) -> Option<Arrow> {
+    recognize_head_at(shaft.start, shaft.tip, path, zoom)
+        .or_else(|| recognize_head_at(shaft.tip, shaft.start, path, zoom))
+}
+
+/// Recognize the head at `tip`; `tail` is the other end of the shaft.
+fn recognize_head_at(tail: Vector2, tip: Vector2, path: &PenPath, zoom: f64) -> Option<Arrow> {
     let points = flatten(path);
     if points.len() < 3 {
         return None;
@@ -55,15 +75,14 @@ pub(crate) fn recognize_head(shaft: &Arrow, path: &PenPath, zoom: f64) -> Option
     let vertex = points.iter().copied().max_by(|a, b| {
         dist_to_segment(*a, barbs[0], barbs[1]).total_cmp(&dist_to_segment(*b, barbs[0], barbs[1]))
     })?;
-    let tip = shaft.tip;
-    let shaft_len = (tip - shaft.start).length();
+    let shaft_len = (tip - tail).length();
     if shaft_len <= f64::EPSILON {
         return None;
     }
 
-    // The head is drawn at the end of the shaft, not at its start.
+    // The head has to sit at the tested end of the shaft.
     let vertex_to_tip = (vertex - tip).length();
-    if vertex_to_tip > (vertex - shaft.start).length() {
+    if vertex_to_tip > (vertex - tail).length() {
         return None;
     }
     if vertex_to_tip * zoom > (shaft_len * 0.20).max(HEAD_END_TOLERANCE_SURFACE) {
@@ -90,7 +109,7 @@ pub(crate) fn recognize_head(shaft: &Arrow, path: &PenPath, zoom: f64) -> Option
         return None;
     }
 
-    let axis = tip - shaft.start;
+    let axis = tip - tail;
     let a = barbs[0] - vertex;
     let b = barbs[1] - vertex;
     let cross_a = axis.perp_dot(a);
@@ -107,7 +126,7 @@ pub(crate) fn recognize_head(shaft: &Arrow, path: &PenPath, zoom: f64) -> Option
     }
 
     Some(Arrow {
-        start: shaft.start,
+        start: tail,
         tip: vertex,
     })
 }
@@ -214,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn a_v_at_the_shaft_start_is_no_head() {
+    fn a_v_at_the_shaft_start_is_a_head_pointing_back() {
         let shaft = Arrow {
             start: Vector2::new(0.0, 0.0),
             tip: Vector2::new(100.0, 0.0),
@@ -225,7 +244,10 @@ mod tests {
             Vector2::new(20.0, 20.0),
         ]);
 
-        assert!(recognize_head(&shaft, &head, 1.0).is_none());
+        let arrow = recognize_head(&shaft, &head, 1.0)
+            .expect("a V at the start is a head for a shaft drawn from its head");
+        assert!((arrow.tip - Vector2::new(0.0, 0.0)).length() < 1.0);
+        assert!((arrow.start - Vector2::new(100.0, 0.0)).length() < 1.0);
     }
 
     #[test]
