@@ -1606,4 +1606,96 @@ mod preview_draw {
              the darkest pixel around {on_surface:?} is {darkest}"
         );
     }
+
+    /// Draws a horizontal line with the pen, from x = 300 to x = 500 at `y`, without lifting it.
+    fn draw_line_with_pen(engine: &mut Engine, y: f64) {
+        use rnote_compose::penevent::PenEvent;
+        use std::collections::HashSet;
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let pen_event = |x: f64| PenEvent::Down {
+            element: Element::new(Vector2::new(x, y), Element::PRESSURE_DEFAULT),
+            modifier_keys: HashSet::new(),
+        };
+        let _ = engine.handle_pen_event(pen_event(300.), None, now);
+        for i in 1..=10 {
+            let _ = engine.handle_pen_event(
+                pen_event(300. + i as f64 * 20.),
+                None,
+                now + Duration::from_millis(16 * i),
+            );
+        }
+    }
+
+    /// The darkest pixel along the line `draw_line_with_pen()` draws at `y`.
+    fn darkest_on_drawn_line(engine: &mut Engine, y: f64) -> u8 {
+        let frame = render_canvas(engine);
+        let mut darkest = 255;
+        for x in (320..480).step_by(4) {
+            let px = frame.get_pixel(x, y as u32);
+            darkest = darkest.min(px.0[0]).min(px.0[1]).min(px.0[2]);
+        }
+        darkest
+    }
+
+    /// What the pen draws has to be on the canvas before the pen lifts.
+    #[gtk4::test]
+    fn the_stroke_being_drawn_is_visible_on_the_canvas() {
+        let mut engine = engine_with_view_of(Vector2::new(400., 300.), 1.);
+        draw_line_with_pen(&mut engine, 300.);
+
+        let darkest = darkest_on_drawn_line(&mut engine, 300.);
+        assert!(
+            darkest < 128,
+            "the stroke being drawn is on the canvas, the darkest pixel is {darkest}"
+        );
+    }
+
+    /// The same on a view dense enough to draw content tiles: the grid that serves it was built
+    /// for the committed content, so the stroke being drawn is not in it and has to be drawn per
+    /// stroke above the tiles.
+    #[gtk4::test]
+    fn a_stroke_being_drawn_is_visible_over_content_tiles() {
+        let mut engine = engine_with_view_of(Vector2::new(400., 300.), 1.);
+        // enough strokes to make the view tiled, all clear of the line the pen draws below
+        for x in (0..=800).step_by(40) {
+            for y in (0..=600).step_by(40) {
+                let key = engine.store.insert_stroke(
+                    Stroke::BrushStroke(BrushStroke::from_penpath(
+                        PenPath::try_from_elements([
+                            Element::new(
+                                Vector2::new(x as f64, y as f64),
+                                Element::PRESSURE_DEFAULT,
+                            ),
+                            Element::new(
+                                Vector2::new(x as f64 + 10., y as f64 + 10.),
+                                Element::PRESSURE_DEFAULT,
+                            ),
+                        ])
+                        .unwrap(),
+                        Style::default(),
+                    )),
+                    None,
+                );
+                engine.store.update_geometry_for_stroke(key);
+            }
+        }
+        let mut rx = engine
+            .take_engine_tasks_rx()
+            .expect("the engine holds its task receiver");
+        let _ = engine.update_content_tile_cache_current_viewport();
+        while let Some(task) = rx.try_recv() {
+            let _ = engine.handle_engine_task(task);
+        }
+        let _ = render_canvas(&mut engine);
+
+        draw_line_with_pen(&mut engine, 345.);
+
+        let darkest = darkest_on_drawn_line(&mut engine, 345.);
+        assert!(
+            darkest < 128,
+            "the stroke being drawn is on the canvas over the tiles, the darkest pixel is {darkest}"
+        );
+    }
 }
