@@ -4,10 +4,10 @@ use anyhow::Context;
 use core::fmt::Debug;
 use image::ImageReader;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
+#[cfg(feature = "ui")]
 use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use piet::RenderContext;
-use rayon::prelude::*;
 use rnote_compose::Transformable;
 use rnote_compose::ext::{AabbExt, DAffine2Ext};
 use rnote_compose::shapes::{Rectangle, Shapeable};
@@ -430,18 +430,21 @@ impl Image {
         let tolerance = (options.tolerance.clamp(0.0, 1.0) * 255.0).round() as i32;
         let feather = ((options.feather.clamp(0.0, 1.0) * 255.0).round() as i32).max(1);
 
+        // Deliberately serial: this runs inside `BitmapImage::effective_image`'s
+        // `OnceLock` initializer, which in turn is called from Rayon tile jobs. Nested Rayon
+        // work there deadlocks when the pool's workers wait for this initialization.
         let mut data = self.data.as_ref().to_vec();
-        data.par_chunks_exact_mut(4).for_each(|px| {
+        for px in data.chunks_exact_mut(4) {
             let alpha = px[3];
             if alpha == 0 {
-                return;
+                continue;
             }
 
             let distance = max_channel_distance(straight_rgb(px, is_straight), key) as i32;
             let factor = if distance <= tolerance {
                 0.0f32
             } else if distance >= tolerance + feather {
-                return;
+                continue;
             } else {
                 (distance - tolerance) as f32 / feather as f32
             };
@@ -451,7 +454,7 @@ impl Image {
             px[1] = scale(px[1]);
             px[2] = scale(px[2]);
             px[3] = scale(alpha);
-        });
+        }
 
         Image {
             data: glib::Bytes::from_owned(data),
@@ -468,11 +471,12 @@ impl Image {
         }
 
         let is_straight = is_straight_alpha(self.data.as_ref());
+        // Serial for the same reason as `with_transparent_background`.
         let mut data = self.data.as_ref().to_vec();
-        data.par_chunks_exact_mut(4).for_each(|px| {
+        for px in data.chunks_exact_mut(4) {
             if is_straight {
                 if px[3] == 0 {
-                    return;
+                    continue;
                 }
                 px[0] = 255 - px[0];
                 px[1] = 255 - px[1];
@@ -483,7 +487,7 @@ impl Image {
                 px[1] = px[3].saturating_sub(px[1]);
                 px[2] = px[3].saturating_sub(px[2]);
             }
-        });
+        }
 
         Image {
             data: glib::Bytes::from_owned(data),
