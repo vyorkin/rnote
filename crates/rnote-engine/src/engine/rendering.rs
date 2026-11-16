@@ -342,6 +342,48 @@ impl Engine {
         self.store.content_tiles_forget();
     }
 
+    /// Bring the content tiles to the state the next frame draws.
+    ///
+    /// A commit - a stroke, a trashed stroke, a cut - changes the content without moving the
+    /// camera, and no viewport update follows it. A change the grid cannot draw - a stroke it
+    /// holds erased, moved or recolored, older content restored - leaves it showing content that
+    /// is no longer there; it is dropped here, before it is drawn.
+    ///
+    /// Dropping the grid takes the per-stroke images of the view with it: they were cleared while
+    /// it served. Whatever draws the view is therefore restarted from this frame, instead of the
+    /// strokes being drawn as their bounds placeholders until the next pan or zoom.
+    fn update_content_tiles_for_frame(&mut self) {
+        // While a stroke is in progress the grid stays: dropping it would blank every stroke it
+        // holds.
+        if self.store.content_tiles_are_stale()
+            && self.content_tile_cache.is_some()
+            && !self.penholder.pen_state_down()
+            && !self.store.has_previews()
+        {
+            self.clear_content_tiles();
+        }
+
+        let revision = self.store.content_revision();
+        let grid_is_stale = self
+            .content_tile_cache
+            .as_ref()
+            .is_some_and(|cache| !cache.is_for_revision(revision));
+        let rebuild_is_for_current_content = self
+            .content_tile_request
+            .as_ref()
+            .is_some_and(|request| request.revision == revision);
+        if grid_is_stale && !rebuild_is_for_current_content {
+            let _ = self.update_content_tile_cache_current_viewport();
+        }
+
+        // The cache update drops the grid too - a change it cannot draw, a view that became too
+        // sparse to tile. Either way nothing is left that draws the strokes whose per-stroke
+        // images the grid replaced.
+        if self.content_tile_cache.is_none() && self.per_stroke_rendering_cleared {
+            let _ = self.update_content_rendering_current_viewport();
+        }
+    }
+
     /// Update the content tile cache for the current viewport.
     ///
     /// A dense view is drawn from rasterized content tiles instead of a render node per stroke
@@ -836,36 +878,13 @@ impl Engine {
         use gtk4::{graphene, prelude::*};
         use rnote_compose::ext::DAffine2Ext;
 
-        // A commit - a stroke, a trashed stroke - changes the content without moving the camera,
-        // and no viewport update follows it. A change the grid cannot draw - a stroke it holds
-        // erased, moved or recolored, older content restored - leaves it showing content that is
-        // no longer there; it is dropped here, before it is drawn. The replacement is started from
-        // this frame, so the committed content cannot stay hidden until the next pan or zoom.
-        //
-        // While a stroke is in progress the grid stays: dropping it would blank every stroke it
-        // holds. A grid holding a stroke being previewed is not drawn over the preview either:
-        // the cells holding such a stroke are repainted without it, below.
-        if self.store.content_tiles_are_stale()
-            && self.content_tile_cache.is_some()
-            && !self.penholder.pen_state_down()
-            && !self.store.has_previews()
-        {
-            self.clear_content_tiles();
-        }
+        // A grid showing content that is no longer there is dropped, and what draws the view -
+        // the grid's rebuild or the per-stroke images - is started, before anything is drawn. A
+        // grid holding a stroke being previewed is not drawn over the preview either: the cells
+        // holding such a stroke are repainted without it, below.
+        self.update_content_tiles_for_frame();
 
         let revision = self.store.content_revision();
-        let grid_is_stale = self
-            .content_tile_cache
-            .as_ref()
-            .is_some_and(|cache| !cache.is_for_revision(revision));
-        let rebuild_is_for_current_content = self
-            .content_tile_request
-            .as_ref()
-            .is_some_and(|request| request.revision == revision);
-        if grid_is_stale && !rebuild_is_for_current_content {
-            let _ = self.update_content_tile_cache_current_viewport();
-        }
-
         let doc_bounds = self.document.bounds();
         let viewport = self.camera.viewport();
         let camera_transform = self.camera.transform_for_gtk_snapshot();
@@ -1714,6 +1733,40 @@ mod tests {
                 .debug_render_state_count(RenderCompState::BusyRenderingInTask)
                 > 0,
             "the fallback path regenerates the per-stroke images"
+        );
+    }
+
+    /// A change that only redraws - a cut, a deletion - is followed by no viewport update: the
+    /// frame drops the stale grid itself, and has to restart the per-stroke images with it.
+    /// Otherwise every stroke stays drawn as its bounds placeholder until the next pan or zoom.
+    #[test]
+    fn a_grid_dropped_by_a_frame_restarts_its_renderings() {
+        let (mut engine, mut rx) = dense_engine();
+        let _ = engine.update_content_tile_cache_current_viewport();
+        assert!(handle_tile_tasks(&mut engine, &mut rx) > 0);
+        let _ = engine.update_content_rendering_current_viewport();
+        assert!(engine.content_tiles_served, "the grid serves the view");
+
+        // the change, and no viewport update after it
+        let key = engine.store.keys_sorted_chrono()[0];
+        engine
+            .store
+            .translate_strokes(&[key], Vector2::new(20., 0.));
+        assert!(engine.store.content_tiles_are_stale());
+
+        engine.update_content_tiles_for_frame();
+
+        assert!(engine.content_tile_cache.is_none());
+        assert!(
+            engine
+                .store
+                .debug_render_state_count(RenderCompState::BusyRenderingInTask)
+                > 0,
+            "the per-stroke images the fallback draws are started again"
+        );
+        assert!(
+            engine.content_tile_request.is_some(),
+            "the grid of the changed content is rebuilt"
         );
     }
 
