@@ -27,7 +27,7 @@ use rnote_compose::penevent::{PenEvent, PenProgress};
 use rnote_compose::penpath::{Element, PenPath, Segment};
 use rnote_compose::scribblerecognition;
 use rnote_compose::shaperecognition;
-use rnote_compose::shapes::{Shape, Shapeable};
+use rnote_compose::shapes::{Arrow, Shape, Shapeable};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
@@ -87,6 +87,15 @@ struct ArrowCandidate {
     stroke_key: StrokeKey,
     /// The history index of the stroke, to drop the candidate when the document changed since.
     history_index: usize,
+}
+
+/// The two strokes an arrow is made of, and which of them is its shaft.
+#[derive(Debug)]
+struct ArrowPair {
+    shaft_key: StrokeKey,
+    shaft_path: PenPath,
+    head_key: StrokeKey,
+    arrow: Arrow,
 }
 
 #[derive(Debug)]
@@ -762,45 +771,23 @@ impl Brush {
         if ruler_snap_side.is_some() {
             return widget_flags;
         }
-        // The second stroke of an arrow must survive as a brush stroke until the pen is lifted,
-        // where it is paired with the first. Snapping it to a shape here would consume it first.
-        if engine_view.config.gestures.arrow_recognition_enabled
-            && engine_view.config.pens_config.brush_config.style != BrushStyle::Marker
-        {
-            if let Some(candidate) = &self.arrow_candidate {
-                if candidate.history_index == engine_view.store.live_index() {
-                    let zoom = engine_view.camera.total_zoom();
-                    let is_arrow = if let (
-                        Some(Stroke::BrushStroke(candidate_stroke)),
-                        Some(Stroke::BrushStroke(current_stroke)),
-                    ) = (
-                        engine_view.store.get_stroke_ref(candidate.stroke_key),
-                        engine_view.store.get_stroke_ref(current_stroke_key),
-                    ) {
-                        arrow::recognize_pair(&candidate_stroke.path, &current_stroke.path, zoom)
-                            .is_some()
-                    } else {
-                        false
-                    };
-                    if is_arrow {
-                        // Complete it now, while the pen is still down, so the snapped arrow
-                        // is the feedback that the gesture was recognized.
-                        if let Some(wf) = Self::try_complete_arrow(
-                            &mut self.arrow_candidate,
-                            current_stroke_key,
-                            engine_view,
-                        ) {
-                            widget_flags |= wf;
-                            widget_flags |= engine_view
-                                .store
-                                .update_latest_history_entry(Instant::now());
-                            self.state = BrushState::Idle;
-                            self.hold_task_handle = None;
-                        }
-                        return widget_flags;
-                    }
-                }
-            }
+        // The two strokes of an arrow are paired as soon as they are drawn: a hold on the second
+        // one completes the arrow while the pen is still down, so the snapped arrow is the
+        // feedback that the gesture was recognized. A pair that is no arrow falls through to the
+        // shape recognition below instead of being consumed here.
+        if let Some(pair) = Self::arrow_pair(
+            &self.arrow_candidate,
+            current_stroke_key,
+            &engine_view.as_im(),
+        ) {
+            self.arrow_candidate = None;
+            widget_flags |= Self::complete_arrow(pair, engine_view);
+            widget_flags |= engine_view
+                .store
+                .update_latest_history_entry(Instant::now());
+            self.state = BrushState::Idle;
+            self.hold_task_handle = None;
+            return widget_flags;
         }
         // Guard against the timeout task and the pen resuming movement racing each other:
         // only recognize when the pen actually rested at the hold anchor for the entire hold duration.
@@ -921,17 +908,16 @@ impl Brush {
         widget_flags
     }
 
-    /// Complete an arrow when the previous stroke and the finished one are its two strokes.
+    /// The arrow the candidate stroke and the current one are the two strokes of, if they are.
     ///
     /// Both drawing orders are accepted - the shaft then the head, or the head then the shaft -
-    /// and the head may sit at either end of the shaft. Returns the widget flags when the arrow
-    /// replaced both strokes.
-    fn try_complete_arrow(
-        arrow_candidate: &mut Option<ArrowCandidate>,
+    /// and the head may sit at either end of the shaft.
+    fn arrow_pair(
+        arrow_candidate: &Option<ArrowCandidate>,
         current_key: StrokeKey,
-        engine_view: &mut EngineViewMut,
-    ) -> Option<WidgetFlags> {
-        let candidate = arrow_candidate.take()?;
+        engine_view: &EngineView,
+    ) -> Option<ArrowPair> {
+        let candidate = arrow_candidate.as_ref()?;
         if !engine_view.config.gestures.shape_recognition_enabled
             || !engine_view.config.gestures.arrow_recognition_enabled
             || engine_view.store.live_index() != candidate.history_index
@@ -941,32 +927,94 @@ impl Brush {
         }
 
         let candidate_path = match engine_view.store.get_stroke_ref(candidate.stroke_key) {
-            Some(Stroke::BrushStroke(stroke)) => stroke.path.clone(),
+            Some(Stroke::BrushStroke(stroke)) => &stroke.path,
             _ => return None,
         };
         let current_path = match engine_view.store.get_stroke_ref(current_key) {
-            Some(Stroke::BrushStroke(stroke)) => stroke.path.clone(),
+            Some(Stroke::BrushStroke(stroke)) => &stroke.path,
             _ => return None,
         };
         let zoom = engine_view.camera.total_zoom();
 
-        // First the previous stroke as the shaft, then the finished one as its head. If the
-        // previous stroke is not a shaft, the finished stroke is, and the previous one is the head.
+        // First the previous stroke as the shaft, then the current one as its head. If the
+        // previous stroke is not a shaft, the current stroke is, and the previous one is the head.
         let (shaft_key, shaft_path, head_key, arrow) =
-            match arrow::line_candidate(&candidate_path, zoom) {
+            match arrow::line_candidate(candidate_path, zoom) {
                 Some(line) => (
                     candidate.stroke_key,
                     candidate_path,
                     current_key,
-                    arrow::recognize_head(&line, &current_path, zoom)?,
+                    arrow::recognize_head(&line, current_path, zoom)?,
                 ),
                 None => {
-                    let line = arrow::line_candidate(&current_path, zoom)?;
-                    let arrow = arrow::recognize_head(&line, &candidate_path, zoom)?;
+                    let line = arrow::line_candidate(current_path, zoom)?;
+                    let arrow = arrow::recognize_head(&line, candidate_path, zoom)?;
                     (current_key, current_path, candidate.stroke_key, arrow)
                 }
             };
 
+        // A shaft another stroke doubles is no arrow: the two strokes then belong to a sign like
+        // "⇒", where one of its bars paired with the V-shaped head leaves the other bar behind.
+        if Self::shaft_is_doubled(shaft_key, head_key, &arrow, engine_view) {
+            return None;
+        }
+
+        Some(ArrowPair {
+            shaft_key,
+            shaft_path: shaft_path.clone(),
+            head_key,
+            arrow,
+        })
+    }
+
+    /// Whether another stroke of the same layer doubles the shaft, running alongside it.
+    fn shaft_is_doubled(
+        shaft_key: StrokeKey,
+        head_key: StrokeKey,
+        arrow: &Arrow,
+        engine_view: &EngineView,
+    ) -> bool {
+        let zoom = engine_view.camera.total_zoom();
+        let layer = engine_view.store.stroke_layer(shaft_key);
+        let others = engine_view
+            .store
+            .stroke_keys_as_rendered_intersecting_bounds(arrow::twin_search_bounds(arrow, zoom))
+            .into_iter()
+            .filter(|&key| {
+                key != shaft_key && key != head_key && engine_view.store.stroke_layer(key) == layer
+            })
+            .filter_map(|key| match engine_view.store.get_stroke_ref(key) {
+                Some(Stroke::BrushStroke(stroke)) => Some(&stroke.path),
+                _ => None,
+            })
+            .collect::<Vec<&PenPath>>();
+
+        arrow::shaft_is_doubled(arrow, others, zoom)
+    }
+
+    /// Complete an arrow when the previous stroke and the finished one are its two strokes.
+    ///
+    /// Returns the widget flags when the arrow replaced both strokes.
+    fn try_complete_arrow(
+        arrow_candidate: &mut Option<ArrowCandidate>,
+        current_key: StrokeKey,
+        engine_view: &mut EngineViewMut,
+    ) -> Option<WidgetFlags> {
+        let pair = Self::arrow_pair(arrow_candidate, current_key, &engine_view.as_im());
+        *arrow_candidate = None;
+
+        Some(Self::complete_arrow(pair?, engine_view))
+    }
+
+    /// Replace the two strokes of `pair` with the arrow they make.
+    fn complete_arrow(pair: ArrowPair, engine_view: &mut EngineViewMut) -> WidgetFlags {
+        let ArrowPair {
+            shaft_key,
+            shaft_path,
+            head_key,
+            arrow,
+        } = pair;
+        let zoom = engine_view.camera.total_zoom();
         let width = {
             let brush_config = &engine_view.config.pens_config.brush_config;
             shaperecognition::mean_width(&shaft_path, zoom, |pressure| {
@@ -1008,7 +1056,7 @@ impl Brush {
         widget_flags.store_modified = true;
         widget_flags.redraw = true;
 
-        Some(widget_flags)
+        widget_flags
     }
 
     /// Remember the finished stroke as a possible half of an arrow drawn next.
@@ -1440,6 +1488,77 @@ mod tests {
         };
         assert!((arrow.start - Vector2::new(500., 300.)).length() < 1.0);
         assert!((arrow.tip - Vector2::new(300., 300.)).length() < 1.0);
+    }
+
+    /// The "⇒" sign is drawn as two bars and a V-shaped head. The head paired with one bar is no
+    /// arrow: the other bar would be left behind, so all three strokes stay as they were drawn.
+    #[test]
+    fn the_bars_of_a_consequence_sign_are_no_arrow() {
+        use crate::Engine;
+        use crate::strokes::Stroke;
+
+        let mut engine = Engine::default();
+        let _ = engine.camera.set_size(Vector2::new(800., 600.));
+        let style = engine
+            .config
+            .0
+            .read()
+            .unwrap()
+            .pens_config
+            .brush_config
+            .style_for_current_options();
+
+        let upper_bar_key = engine.store.insert_stroke(
+            Stroke::BrushStroke(brush_stroke(
+                &[Vector2::new(300., 290.), Vector2::new(500., 290.)],
+                style.clone(),
+            )),
+            None,
+        );
+        let lower_bar_key = engine.store.insert_stroke(
+            Stroke::BrushStroke(brush_stroke(
+                &[Vector2::new(300., 320.), Vector2::new(500., 320.)],
+                style.clone(),
+            )),
+            None,
+        );
+        let head_key = engine.store.insert_stroke(
+            Stroke::BrushStroke(brush_stroke(
+                &[
+                    Vector2::new(480., 300.),
+                    Vector2::new(500., 320.),
+                    Vector2::new(480., 340.),
+                ],
+                style,
+            )),
+            None,
+        );
+
+        let mut candidate = Some(ArrowCandidate {
+            stroke_key: upper_bar_key,
+            history_index: engine.store.live_index(),
+        });
+        let flags = engine
+            .with_view_mut(|view| Brush::try_complete_arrow(&mut candidate, lower_bar_key, view));
+        assert!(flags.is_none(), "two parallel bars are no arrow");
+        assert!(candidate.is_none(), "a failed pair drops the candidate");
+
+        let mut candidate = Some(ArrowCandidate {
+            stroke_key: lower_bar_key,
+            history_index: engine.store.live_index(),
+        });
+        let flags =
+            engine.with_view_mut(|view| Brush::try_complete_arrow(&mut candidate, head_key, view));
+        assert!(
+            flags.is_none(),
+            "the bar doubled by the upper one is no arrow shaft"
+        );
+
+        assert_eq!(
+            engine.store.stroke_keys_unordered().len(),
+            3,
+            "the sign is left as three drawn strokes"
+        );
     }
 
     #[test]

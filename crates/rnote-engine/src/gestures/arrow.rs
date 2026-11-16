@@ -1,5 +1,9 @@
 //! Recognizing an arrow drawn in two strokes: the shaft and the V-shaped head.
+//!
+//! A shaft that another stroke doubles, as the two bars of the "⇒" sign double each other, is no
+//! arrow: pairing one of the bars with the V-shaped head would leave the other bar behind.
 
+use p2d::bounding_volume::Aabb;
 use p2d::math::Vector2;
 use rnote_compose::penpath::PenPath;
 use rnote_compose::shapes::Arrow;
@@ -21,17 +25,16 @@ const MAX_HEAD_ANGLE: f64 = 120.0 * std::f64::consts::PI / 180.0;
 const HEAD_END_TOLERANCE_SURFACE: f64 = 25.0;
 /// The deviation (in surface coordinates) the head may have from its two straight segments.
 const HEAD_STRAIGHTNESS_TOLERANCE_SURFACE: f64 = 6.0;
-
-/// Recognize the two finished strokes of an arrow, in either drawing order.
-pub(crate) fn recognize_pair(first: &PenPath, second: &PenPath, zoom: f64) -> Option<Arrow> {
-    if let Some(line) = line_candidate(first, zoom) {
-        if let Some(arrow) = recognize_head(&line, second, zoom) {
-            return Some(arrow);
-        }
-    }
-    let line = line_candidate(second, zoom)?;
-    recognize_head(&line, first, zoom)
-}
+/// The angle a stroke has to keep to the shaft to run alongside it.
+const TWIN_MAX_ANGLE: f64 = 10.0 * std::f64::consts::PI / 180.0;
+/// How far (in surface coordinates) a stroke doubling the shaft may run from it.
+const TWIN_MAX_OFFSET_SURFACE: f64 = 40.0;
+/// How far a stroke doubling the shaft may run from it, relative to the shaft's length.
+const TWIN_MAX_OFFSET_RATIO: f64 = 0.20;
+/// How much of the shaft's length a doubling stroke has to run alongside it.
+const TWIN_MIN_OVERLAP_RATIO: f64 = 0.5;
+/// How much shorter or longer a doubling stroke may be than the shaft.
+const TWIN_MAX_LENGTH_DIFF_RATIO: f64 = 0.5;
 
 /// Recognize a straight finished stroke as the shaft of an arrow.
 ///
@@ -62,6 +65,76 @@ pub(crate) fn line_candidate(path: &PenPath, zoom: f64) -> Option<Arrow> {
 pub(crate) fn recognize_head(shaft: &Arrow, path: &PenPath, zoom: f64) -> Option<Arrow> {
     recognize_head_at(shaft.start, shaft.tip, path, zoom)
         .or_else(|| recognize_head_at(shaft.tip, shaft.start, path, zoom))
+}
+
+/// The largest distance from the shaft's line a stroke doubling it may lie at.
+fn twin_max_offset(shaft_len: f64, zoom: f64) -> f64 {
+    (TWIN_MAX_OFFSET_SURFACE / zoom).max(shaft_len * TWIN_MAX_OFFSET_RATIO)
+}
+
+/// The area around `shaft` that a stroke doubling it can lie in.
+pub(crate) fn twin_search_bounds(shaft: &Arrow, zoom: f64) -> Aabb {
+    let margin = twin_max_offset((shaft.tip - shaft.start).length(), zoom);
+    Aabb::new(
+        Vector2::new(
+            shaft.start.x.min(shaft.tip.x),
+            shaft.start.y.min(shaft.tip.y),
+        ) - Vector2::splat(margin),
+        Vector2::new(
+            shaft.start.x.max(shaft.tip.x),
+            shaft.start.y.max(shaft.tip.y),
+        ) + Vector2::splat(margin),
+    )
+}
+
+/// Whether one of `others` doubles the shaft, running alongside it.
+///
+/// The bars of a "⇒" sign double each other, so a pair of one bar and the V-shaped head looks like
+/// an arrow to [line_candidate] and [recognize_head], while the other bar is left behind. Such a
+/// pair is no arrow.
+pub(crate) fn shaft_is_doubled<'a>(
+    shaft: &Arrow,
+    others: impl IntoIterator<Item = &'a PenPath>,
+    zoom: f64,
+) -> bool {
+    let axis = shaft.tip - shaft.start;
+    let shaft_len = axis.length();
+    if shaft_len <= f64::EPSILON {
+        return false;
+    }
+    let along = axis / shaft_len;
+    let max_offset = twin_max_offset(shaft_len, zoom);
+    let max_length_diff = shaft_len * TWIN_MAX_LENGTH_DIFF_RATIO;
+    let min_parallel_cos = TWIN_MAX_ANGLE.cos();
+    let min_overlap = shaft_len * TWIN_MIN_OVERLAP_RATIO;
+
+    others.into_iter().any(|other| {
+        let points = flatten(other);
+        let (Some(&other_start), Some(&other_tip)) = (points.first(), points.last()) else {
+            return false;
+        };
+        let other_axis = other_tip - other_start;
+        let other_len = other_axis.length();
+        if other_len <= f64::EPSILON
+            || (other_len - shaft_len).abs() > max_length_diff
+            || (other_axis / other_len).dot(along).abs() < min_parallel_cos
+        {
+            return false;
+        }
+        // Both ends have to run alongside the shaft, not merely pass it by: a stroke drawn across
+        // the shaft is no doubling of it.
+        let offset = |p: Vector2| {
+            let rel = p - shaft.start;
+            (rel - along * rel.dot(along)).length()
+        };
+        if offset(other_start) > max_offset || offset(other_tip) > max_offset {
+            return false;
+        }
+        let from = (other_start - shaft.start).dot(along);
+        let to = (other_tip - shaft.start).dot(along);
+        let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
+        hi.min(shaft_len) - lo.max(0.0) >= min_overlap
+    })
 }
 
 /// Recognize the head at `tip`; `tail` is the other end of the shaft.
@@ -259,6 +332,53 @@ mod tests {
         let head = path_from_points(&[Vector2::new(100.0, 0.0), Vector2::new(80.0, -20.0)]);
 
         assert!(recognize_head(&shaft, &head, 1.0).is_none());
+    }
+
+    #[test]
+    fn a_bar_beside_the_shaft_doubles_it() {
+        let shaft = Arrow {
+            start: Vector2::new(0.0, 0.0),
+            tip: Vector2::new(100.0, 0.0),
+        };
+        let upper_bar = straight_line(Vector2::new(0.0, -20.0), Vector2::new(100.0, -20.0));
+
+        assert!(shaft_is_doubled(&shaft, [&upper_bar], 1.0));
+    }
+
+    #[test]
+    fn a_single_arrow_has_no_twin() {
+        let shaft = Arrow {
+            start: Vector2::new(0.0, 0.0),
+            tip: Vector2::new(100.0, 0.0),
+        };
+
+        assert!(!shaft_is_doubled(&shaft, std::iter::empty(), 1.0));
+    }
+
+    #[test]
+    fn a_stroke_across_or_slanted_to_the_shaft_is_no_twin() {
+        let shaft = Arrow {
+            start: Vector2::new(0.0, 0.0),
+            tip: Vector2::new(100.0, 0.0),
+        };
+        let across = straight_line(Vector2::new(50.0, -60.0), Vector2::new(50.0, 60.0));
+        let slanted = straight_line(Vector2::new(80.0, -60.0), Vector2::new(20.0, 60.0));
+
+        assert!(!shaft_is_doubled(&shaft, [&across], 1.0));
+        assert!(!shaft_is_doubled(&shaft, [&slanted], 1.0));
+    }
+
+    #[test]
+    fn a_parallel_stroke_that_is_far_off_or_short_is_no_twin() {
+        let shaft = Arrow {
+            start: Vector2::new(0.0, 0.0),
+            tip: Vector2::new(100.0, 0.0),
+        };
+        let far = straight_line(Vector2::new(0.0, -60.0), Vector2::new(100.0, -60.0));
+        let short = straight_line(Vector2::new(0.0, -20.0), Vector2::new(30.0, -20.0));
+
+        assert!(!shaft_is_doubled(&shaft, [&far], 1.0));
+        assert!(!shaft_is_doubled(&shaft, [&short], 1.0));
     }
 
     #[test]
