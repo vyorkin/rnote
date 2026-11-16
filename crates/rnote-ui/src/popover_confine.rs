@@ -67,6 +67,16 @@ struct State {
     has_arrow: Cell<bool>,
     /// The scrolled child's `max-content-height` before we capped it.
     original_max_height: Cell<i32>,
+    /// What the popover adds around its child: padding, shadow and the arrow.
+    ///
+    /// `GtkPopover::measure()` counts the arrow in the size it reports, and
+    /// hiding the arrow when the popover is shifted away from its anchor takes
+    /// that space away again. Measured afresh every tick, that made the size
+    /// follow the arrow, and the arrow follow the size: a popover sitting on
+    /// the edge between fitting and not knocked twenty times a second, hiding
+    /// and showing the arrow (and moving by its length) each time. The chrome
+    /// is therefore measured once and added to the child's own size.
+    chrome: Cell<Option<(i32, i32)>>,
     last: RefCell<Option<(Measured, Placement)>>,
     follow: RefCell<Option<glib::SourceId>>,
 }
@@ -84,6 +94,7 @@ pub(crate) fn confine(popover: &Popover) {
         applied: Cell::new(None),
         has_arrow: Cell::new(popover.has_arrow()),
         original_max_height: Cell::new(i32::MIN),
+        chrome: Cell::new(None),
         last: RefCell::new(None),
         follow: RefCell::new(None),
     });
@@ -190,9 +201,9 @@ fn update(popover: &Popover, state: &State) {
     }
 
     let available_height = (window_size.1 - 2 * WINDOW_MARGIN).max(0);
-    let mut size = popover_size(popover);
+    let mut size = popover_size(popover, state);
     if cap_scrolled(popover, state, available_height) {
-        size = popover_size(popover);
+        size = popover_size(popover, state);
     }
 
     let measured = Measured {
@@ -274,13 +285,44 @@ fn cap_scrolled(popover: &Popover, state: &State, available_height: i32) -> bool
     true
 }
 
-/// The size the popover surface will get, margins included.
-fn popover_size(popover: &Popover) -> (i32, i32) {
+/// The size the popover surface will get, margins included, keeping the size it
+/// had while its arrow was shown even once the arrow is hidden.
+///
+/// The measurement is split into the child's own size and the chrome the
+/// popover adds around it, and the chrome is taken once, so that hiding the
+/// arrow (see [apply]) does not change the size the placement is computed from.
+fn popover_size(popover: &Popover, state: &State) -> (i32, i32) {
     let (_, natural_width, _, _) = popover.measure(Orientation::Horizontal, -1);
     let width = natural_width + popover.margin_start() + popover.margin_end();
     let (_, natural_height, _, _) = popover.measure(Orientation::Vertical, width.max(-1));
     let height = natural_height + popover.margin_top() + popover.margin_bottom();
-    (width.max(0), height.max(0))
+    let measured = (width.max(0), height.max(0));
+
+    let Some(child) = popover.child() else {
+        return measured;
+    };
+    let (_, child_width, _, _) = child.measure(Orientation::Horizontal, -1);
+    let (_, child_height, _, _) = child.measure(Orientation::Vertical, child_width.max(-1));
+    normalized_size(
+        measured,
+        (child_width.max(0), child_height.max(0)),
+        &state.chrome,
+    )
+}
+
+/// Adds the chrome around the child to the child's own size, taking the chrome
+/// from the first measurement it makes.
+fn normalized_size(
+    measured: (i32, i32),
+    child: (i32, i32),
+    cell: &Cell<Option<(i32, i32)>>,
+) -> (i32, i32) {
+    let chrome = cell.get().unwrap_or_else(|| {
+        let chrome = (measured.0 - child.0, measured.1 - child.1);
+        cell.set(Some(chrome));
+        chrome
+    });
+    ((child.0 + chrome.0).max(0), (child.1 + chrome.1).max(0))
 }
 
 /// Picks the side of the anchor the popover fits on, keeping `preferred` when
@@ -450,5 +492,28 @@ mod tests {
         assert_eq!(placement.position, PositionType::Right);
         // Natural left is the anchor's right edge, the clamp puts it at 0.
         assert_eq!(placement.offset, (0 - 440, 0));
+    }
+
+    #[test]
+    fn hiding_the_arrow_does_not_change_the_measured_size() {
+        // GTK counts the arrow in the popover's measured size, so hiding the
+        // arrow makes the next measurement 12 px shorter. The placement must
+        // not follow that: it would hide the arrow, fit, show it, overflow,
+        // hide it again, once per follow tick.
+        let chrome = Cell::new(None);
+        let child = (300, 200);
+        let with_arrow = normalized_size((310, 212), child, &chrome);
+        let without_arrow = normalized_size((310, 200), child, &chrome);
+        assert_eq!(with_arrow, without_arrow);
+        assert_eq!(with_arrow, (310, 212));
+    }
+
+    #[test]
+    fn a_bigger_child_still_changes_the_measured_size() {
+        let chrome = Cell::new(None);
+        let child = (300, 200);
+        assert_eq!(normalized_size((310, 212), child, &chrome), (310, 212));
+        // The chrome is reused, the child's own growth is not lost.
+        assert_eq!(normalized_size((310, 240), (300, 228), &chrome), (310, 240));
     }
 }
