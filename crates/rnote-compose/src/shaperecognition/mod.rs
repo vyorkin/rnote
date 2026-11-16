@@ -8,6 +8,7 @@ use p2d::glamx::DAffine2;
 use p2d::math::Vector2;
 use p2d::shape::Cuboid;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 mod closedcurve;
 mod cloud;
@@ -23,9 +24,23 @@ const N_RESAMPLE: usize = 96;
 const MIN_INPUT_POINTS: usize = 8;
 /// The radius (in surface coordinates) the pen may wobble around while being held still.
 ///
-/// The brush uses it to detect the pen being held still at the end of a stroke, which triggers the recognition,
-/// and the recognition uses it to discard the jitter of the resting pen.
+/// The recognition uses it to discard the jitter of the resting pen, so that the resting tail does
+/// not fail the recognition. A hold of [`HOLD_RADIUS_REFERENCE_DELAY`] is measured within it.
 pub const HOLD_RADIUS_SURFACE: f64 = 6.0;
+/// The hold duration [`HOLD_RADIUS_SURFACE`] is calibrated for.
+///
+/// The wobble of the resting pen, and not the hold the setting was set to, sets the radius: a held
+/// pen drifts at most so far in this long, whatever the hold it is given.
+pub const HOLD_RADIUS_REFERENCE_DELAY: Duration = Duration::from_millis(400);
+/// The smallest radius (in surface coordinates) a hold is measured within, whatever its duration.
+///
+/// A held pen trembles, so the radius does not shrink with the duration all the way down: a hold
+/// measured within less than this could not be recognized on a hand that shakes.
+const HOLD_RADIUS_MIN_SURFACE: f64 = 2.5;
+/// The largest radius (in surface coordinates) a hold is measured within, whatever its duration.
+///
+/// A pen held still may drift a little, but a stroke that travels further than this is drawn.
+const HOLD_RADIUS_MAX_SURFACE: f64 = 10.0;
 /// The minimum extent (in surface coordinates) of the stroke bounds on its larger axis needed to attempt a recognition.
 const MIN_EXTENT_SURFACE: f64 = 10.0;
 /// The maximum gap between the endpoints relative to the perimeter for the stroke to be considered closed.
@@ -530,6 +545,19 @@ pub fn recognize_shape_with_options(
                     .map(RecognizedShape::plain)
             })
     }
+}
+
+/// The radius (in surface coordinates) a hold of the given duration is measured within.
+///
+/// A pen that is held still may drift at some speed; a hold measures the pen staying within the
+/// radius that speed covers in the duration it asks for. The radius therefore follows the
+/// duration: [`HOLD_RADIUS_REFERENCE_DELAY`] within [`HOLD_RADIUS_SURFACE`], a shorter hold within
+/// proportionally less. A radius fixed whatever the duration accepts a pen that is still drawing,
+/// since it covers that radius long before a short hold is over - and the first side of a rectangle
+/// is snapped to a line at its corner.
+pub fn hold_radius(hold_duration: Duration) -> f64 {
+    let share = hold_duration.as_secs_f64() / HOLD_RADIUS_REFERENCE_DELAY.as_secs_f64();
+    (HOLD_RADIUS_SURFACE * share).clamp(HOLD_RADIUS_MIN_SURFACE, HOLD_RADIUS_MAX_SURFACE)
 }
 
 /// How many times the set duration the pen has to be held still on the given stroke for it to be
@@ -1901,6 +1929,32 @@ mod tests {
                 .map(|(p, pressure)| Element::new(p, pressure)),
         )
         .unwrap()
+    }
+
+    /// The radius a hold is measured within follows its duration, so that a short hold does not
+    /// accept a pen that is still drawing: a pen covers a fixed radius in less than the hold, which
+    /// is what snapped the first side of a rectangle to a line at its corner.
+    #[test]
+    fn a_hold_is_measured_within_the_radius_its_duration_allows() {
+        assert_eq!(
+            hold_radius(HOLD_RADIUS_REFERENCE_DELAY),
+            HOLD_RADIUS_SURFACE,
+            "the calibrated hold keeps the radius the resting wobble was measured at"
+        );
+        assert!(
+            hold_radius(Duration::from_millis(100)) < hold_radius(Duration::from_millis(300)),
+            "a shorter hold is measured within a smaller radius"
+        );
+        assert_eq!(
+            hold_radius(Duration::from_millis(1)),
+            HOLD_RADIUS_MIN_SURFACE,
+            "the trembling of the hand is forgiven whatever the hold"
+        );
+        assert_eq!(
+            hold_radius(Duration::from_secs(10)),
+            HOLD_RADIUS_MAX_SURFACE,
+            "a pen that travels further than this over any hold is drawn, not held"
+        );
     }
 
     #[test]

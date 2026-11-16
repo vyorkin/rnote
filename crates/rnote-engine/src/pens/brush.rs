@@ -442,8 +442,9 @@ impl PenBehaviour for Brush {
                 if engine_view.config.gestures.shape_recognition_enabled
                     && let PenEvent::Down { element, .. } = &pen_event
                 {
-                    let hold_radius =
-                        shaperecognition::HOLD_RADIUS_SURFACE / engine_view.camera.total_zoom();
+                    let hold_radius = shaperecognition::hold_radius(
+                        engine_view.config.gestures.shape_recognition_delay,
+                    ) / engine_view.camera.total_zoom();
                     if (element.pos - self.hold_anchor).length() > hold_radius {
                         self.hold_anchor = element.pos;
                         self.hold_begin = now;
