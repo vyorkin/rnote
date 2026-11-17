@@ -1738,6 +1738,103 @@ mod tests {
         );
     }
 
+    /// The palette color is the ink for typing, not a repaint: focusing a box and picking a color
+    /// with nothing selected must leave the box alone. Only a text selection changes existing text.
+    #[test]
+    fn a_picked_color_recolors_text_only_through_a_selection() {
+        use rnote_compose::Color;
+
+        let white = Color::new(1.0, 1.0, 1.0, 1.0);
+        let magenta = Color::new(1.0, 0.0, 0.72, 1.0);
+
+        let mut engine = Engine::default();
+        let now = Instant::now();
+        start_textbox(&mut engine, now);
+        press(&mut engine, 'h', &[], now);
+
+        // The box was written in white, then the session was left.
+        engine.with_view_mut(|view| {
+            let keys = view.store.stroke_keys_unordered();
+            for key in keys {
+                if let Some(Stroke::TextStroke(textstroke)) = view.store.get_stroke_mut(key) {
+                    textstroke.text_style.color = white;
+                }
+            }
+        });
+        let _ = engine.handle_pen_event(PenEvent::Cancel, None, now);
+
+        // The ink is picked in the toolbar, then the box is clicked to edit it.
+        engine.with_view_mut(|view| view.config.pens_config.set_all_stroke_colors(magenta));
+        let _ = engine.handle_pen_event(
+            PenEvent::Down {
+                element: Element::new(Vector2::new(100.0, 100.0), Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            now,
+        );
+        assert!(
+            engine.penholder.is_handling_text_input(),
+            "the click must open the text box"
+        );
+
+        // The palette sync that focus triggers must not repaint the box.
+        let widget_flags = engine.text_change_color(magenta);
+        assert!(
+            !widget_flags.store_modified,
+            "a color picked with nothing selected must not record an edit"
+        );
+        let (box_color, colors) = engine.with_view_mut(|view| {
+            let textstroke = view
+                .store
+                .stroke_keys_unordered()
+                .into_iter()
+                .find_map(|key| match view.store.get_stroke_ref(key) {
+                    Some(Stroke::TextStroke(textstroke)) => Some(textstroke),
+                    _ => None,
+                })
+                .unwrap();
+            let colors = textstroke
+                .text
+                .char_indices()
+                .map(|(index, _)| textstroke.text_color_at(index))
+                .collect::<Vec<_>>();
+            (textstroke.text_style.color, colors)
+        });
+        assert_eq!(box_color, white, "focus must not repaint the box");
+        assert_eq!(colors, vec![white], "the 'h' keeps its color");
+
+        // Selecting the text and picking the color does recolor it.
+        press(&mut engine, 'a', &[ModifierKey::KeyboardCtrl], now);
+        let widget_flags = engine.text_change_color(magenta);
+        assert!(
+            widget_flags.store_modified,
+            "a color picked with a selection records the edit"
+        );
+        let (box_color, colors) = engine.with_view_mut(|view| {
+            let textstroke = view
+                .store
+                .stroke_keys_unordered()
+                .into_iter()
+                .find_map(|key| match view.store.get_stroke_ref(key) {
+                    Some(Stroke::TextStroke(textstroke)) => Some(textstroke),
+                    _ => None,
+                })
+                .unwrap();
+            let colors = textstroke
+                .text
+                .char_indices()
+                .map(|(index, _)| textstroke.text_color_at(index))
+                .collect::<Vec<_>>();
+            (textstroke.text_style.color, colors)
+        });
+        assert_eq!(
+            box_color, white,
+            "the selection is rendered in the picked color, the box's base color stays"
+        );
+        assert_eq!(colors, vec![magenta], "the selected 'h' takes the color");
+    }
+
     #[test]
     fn ctrl_a_still_selects_the_whole_text() {
         let mut engine = Engine::default();

@@ -436,9 +436,20 @@ impl RnColorPicker {
         self.property::<gdk::RGBA>("stroke-color")
     }
 
+    // A boxed property notifies even when set to the value it already holds, and the palette's
+    // notify handler treats a change as a color picked by the writer. Syncing the palette to the
+    // ink (`refresh_ui`) must therefore not notify when nothing changed: that sync is what used to
+    // repaint a text box the moment it got focus (ADR-0017).
     #[allow(unused)]
     pub(crate) fn set_stroke_color(&self, color: gdk::RGBA) {
-        self.set_property("stroke-color", color.to_value());
+        let current = self.stroke_color();
+        if current.red() != color.red()
+            || current.green() != color.green()
+            || current.blue() != color.blue()
+            || current.alpha() != color.alpha()
+        {
+            self.set_property("stroke-color", color.to_value());
+        }
     }
 
     #[allow(unused)]
@@ -448,7 +459,14 @@ impl RnColorPicker {
 
     #[allow(unused)]
     pub(crate) fn set_fill_color(&self, color: gdk::RGBA) {
-        self.set_property("fill-color", color.to_value());
+        let current = self.fill_color();
+        if current.red() != color.red()
+            || current.green() != color.green()
+            || current.blue() != color.blue()
+            || current.alpha() != color.alpha()
+        {
+            self.set_property("fill-color", color.to_value());
+        }
     }
 
     pub(crate) fn setter_1(&self) -> RnColorSetter {

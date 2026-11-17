@@ -39,7 +39,8 @@ commits, paste). Typing over a selection colors the replacement too.
   the ink, and entering a box does not change either.
 - A box can now hold more than one color without a selection ever being made — that is the price of
   typing in the chosen color into existing text, and it is what a text editor does.
-- `text_change_color` still recolors the base color of the whole stroke and the selection, so a
-  writer can still repaint a box in one action; ranges written by typing are left alone.
+- Recoloring existing text stays a selection action: ranges written by typing are left alone, and
+  `text_change_color` also repainted the whole stroke at first; [ADR-0017](0017-a-picked-color-recolors-only-a-selection.md)
+  narrowed it to the selection, because the palette sync on focus made that repaint fire on its own.
 - Font changes still flow from the box into the config, which is what makes editing an old box keep
   its look; only the color stopped following.

@@ -1245,20 +1245,20 @@ impl Engine {
         widget_flags
     }
 
+    /// Recolor the selected range of the text being edited.
+    ///
+    /// With nothing selected this is a no-op on strokes: the picked color is the ink for what is
+    /// typed next, and it must not repaint a box that merely has focus. Recoloring existing text is
+    /// a selection action, see [ADR-0017](../../../../docs/adr/0017-a-picked-color-recolors-only-a-selection.md).
     pub fn text_change_color(&mut self, color: Color) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
-        if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
-            if typewriter.selection_range().is_some() {
-                widget_flags |= typewriter.replace_text_attribute_current_selection(
-                    TextAttribute::TextColor(color),
-                    &mut engine_view_mut!(self),
-                )
-            } else {
-                widget_flags |= typewriter.change_text_style_in_modifying_stroke(
-                    |style| style.color = color,
-                    &mut engine_view_mut!(self),
-                )
-            }
+        if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut()
+            && typewriter.selection_range().is_some()
+        {
+            widget_flags |= typewriter.replace_text_attribute_current_selection(
+                TextAttribute::TextColor(color),
+                &mut engine_view_mut!(self),
+            );
         }
         widget_flags
     }
