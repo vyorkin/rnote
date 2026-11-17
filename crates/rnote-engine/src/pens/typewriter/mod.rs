@@ -7,7 +7,7 @@ use super::PenStyle;
 use super::pensconfig::TypewriterConfig;
 use crate::engine::{EngineTask, EngineView, EngineViewMut};
 use crate::formula::{FormulaSource, Segment, split_text};
-use crate::store::StrokeKey;
+use crate::store::{StrokeKey, StrokeStore};
 use crate::strokes::resize::ImageSizeOption;
 use crate::strokes::textstroke::{RangedTextAttribute, TextAttribute, TextStyle};
 use crate::strokes::{Stroke, TextStroke, VectorImage};
@@ -76,6 +76,17 @@ pub(super) enum TypewriterState {
     },
 }
 
+/// One line of a converted text box: its text runs and inline formulas read as one source line.
+struct InlineLine {
+    keys: Vec<StrokeKey>,
+    source: String,
+    bounds: Aabb,
+    /// The first inline formula, whose baseline anchors the re-laid-out line.
+    origin: Option<VectorImage>,
+    /// The style of the first text run; the typewriter default when the line has no text.
+    text_style: Option<TextStyle>,
+}
+
 /// The outcome of converting the display formulas in a text stroke.
 pub(crate) enum FormulaConversion {
     /// The stroke was split into text and formula objects.
@@ -94,6 +105,8 @@ pub struct Typewriter {
     cursor_visible: bool,
     /// The formula object a source editor replaced, restored when a commit fails.
     formula_origin: Option<VectorImage>,
+    /// The strokes a line source editor replaced, restored when a commit fails.
+    edit_origin_strokes: Vec<Stroke>,
 }
 
 impl Default for Typewriter {
@@ -104,6 +117,7 @@ impl Default for Typewriter {
             blink_task_handle: None,
             cursor_visible: true,
             formula_origin: None,
+            edit_origin_strokes: Vec::new(),
         }
     }
 }
@@ -1109,7 +1123,7 @@ impl Typewriter {
                         if let Some(extents) =
                             insert_stroke(engine_view, Stroke::TextStroke(textstroke))
                         {
-                            cursor_x += extents[0];
+                            cursor_x += Self::text_advance(&style, part).unwrap_or(extents[0]);
                             line_extent = line_extent.max(extents[1]);
                         }
                     }
@@ -1134,7 +1148,8 @@ impl Typewriter {
                             if let Some(extents) =
                                 insert_stroke(engine_view, Stroke::TextStroke(textstroke))
                             {
-                                cursor_x += extents[0];
+                                cursor_x +=
+                                    Self::text_advance(&style, &formula.raw).unwrap_or(extents[0]);
                                 line_extent = line_extent.max(extents[1]);
                             }
                             continue;
@@ -1164,7 +1179,8 @@ impl Typewriter {
                             if let Some(extents) =
                                 insert_stroke(engine_view, Stroke::TextStroke(textstroke))
                             {
-                                cursor_x += extents[0];
+                                cursor_x +=
+                                    Self::text_advance(&style, &formula.raw).unwrap_or(extents[0]);
                                 line_extent = line_extent.max(extents[1]);
                             }
                             continue;
@@ -1263,6 +1279,246 @@ impl Typewriter {
         widget_flags
     }
 
+    /// The horizontal advance of a text run, including its trailing whitespace.
+    ///
+    /// `TextStroke` measures ink, and pango drops trailing spaces from the layout width. A formula
+    /// placed after such a run would sit on its last glyph. A zero-width sentinel makes the
+    /// trailing spaces interior, so the measured width includes them.
+    fn text_advance(text_style: &TextStyle, text: &str) -> Option<f64> {
+        let mut piet_text = piet_cairo::CairoText::new();
+        let with_sentinel = text_style
+            .untransformed_size(&mut piet_text, format!("{text}\u{200B}"))
+            .ok()?[0];
+        let sentinel = text_style
+            .untransformed_size(&mut piet_text, "\u{200B}".to_string())
+            .ok()?[0];
+        Some((with_sentinel - sentinel).max(0.0))
+    }
+
+    /// A stroke that can be part of a text line read as one LaTeX source line.
+    fn is_line_member(stroke: &Stroke) -> bool {
+        match stroke {
+            // A wrapped box is not a line; it stays edited on its own.
+            Stroke::TextStroke(textstroke) => textstroke.text_style.max_width().is_none(),
+            Stroke::VectorImage(vectorimage) => vectorimage
+                .formula_src
+                .as_ref()
+                .is_some_and(|source| source.inline),
+            _ => false,
+        }
+    }
+
+    /// The horizontal and vertical extents of a line member, in document coordinates.
+    fn line_member_extents(stroke: &Stroke) -> Option<((f64, f64), (f64, f64))> {
+        match stroke {
+            Stroke::TextStroke(textstroke) => {
+                let bounds = textstroke.bounds();
+                let width = Self::text_advance(&textstroke.text_style, &textstroke.text)
+                    .unwrap_or_else(|| bounds.extents()[0]);
+                Some((
+                    (bounds.mins[0], bounds.mins[0] + width),
+                    (bounds.mins[1], bounds.maxs[1]),
+                ))
+            }
+            Stroke::VectorImage(vectorimage) => {
+                let bounds = vectorimage.bounds();
+                Some((
+                    (bounds.mins[0], bounds.maxs[0]),
+                    (bounds.mins[1], bounds.maxs[1]),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The line of text runs and inline formulas the stroke belongs to, if it touches a formula.
+    ///
+    /// A converted text box is laid out as separate text and image objects that read as one
+    /// source line; editing any part of it edits the whole line, so text next to a formula can
+    /// move it.
+    fn inline_line_of(store: &StrokeStore, start_key: StrokeKey) -> Option<InlineLine> {
+        let start = store.get_stroke_ref(start_key)?;
+        if !Self::is_line_member(start) {
+            return None;
+        }
+
+        let ((mut left, mut right), (mut top, mut bottom)) = Self::line_member_extents(start)?;
+        let mut keys = vec![start_key];
+
+        loop {
+            let mut grew = false;
+            for key in store.keys_unordered() {
+                if keys.contains(&key) {
+                    continue;
+                }
+                let Some(stroke) = store.get_stroke_ref(key) else {
+                    continue;
+                };
+                if !Self::is_line_member(stroke) {
+                    continue;
+                }
+                let Some(((cand_left, cand_right), (cand_top, cand_bottom))) =
+                    Self::line_member_extents(stroke)
+                else {
+                    continue;
+                };
+                if cand_bottom <= top || cand_top >= bottom {
+                    continue;
+                }
+                // Layout places neighbours edge to edge; one document unit absorbs rounding.
+                let gap = (cand_left - right).max(left - cand_right);
+                if gap > 1.0 {
+                    continue;
+                }
+                keys.push(key);
+                left = left.min(cand_left);
+                right = right.max(cand_right);
+                top = top.min(cand_top);
+                bottom = bottom.max(cand_bottom);
+                grew = true;
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        let mut members: Vec<(StrokeKey, Stroke)> = keys
+            .into_iter()
+            .filter_map(|key| {
+                store
+                    .get_stroke_ref(key)
+                    .map(|stroke| (key, stroke.clone()))
+            })
+            .collect();
+
+        if !members.iter().any(|(_, stroke)| {
+            matches!(stroke, Stroke::VectorImage(vectorimage)
+                if vectorimage.formula_src.as_ref().is_some_and(|source| source.inline))
+        }) {
+            return None;
+        }
+
+        members.sort_by(|(_, a), (_, b)| {
+            let a = Self::line_member_extents(a)
+                .map(|(h, _)| h)
+                .unwrap_or((0.0, 0.0));
+            let b = Self::line_member_extents(b)
+                .map(|(h, _)| h)
+                .unwrap_or((0.0, 0.0));
+            a.0.total_cmp(&b.0)
+        });
+
+        let mut source = String::new();
+        let mut origin = None;
+        let mut text_style = None;
+        for (_, stroke) in &members {
+            match stroke {
+                Stroke::TextStroke(textstroke) => {
+                    source.push_str(&textstroke.text);
+                    if text_style.is_none() {
+                        text_style = Some(textstroke.text_style.clone());
+                    }
+                }
+                Stroke::VectorImage(vectorimage) => {
+                    let formula = vectorimage.formula_src.as_ref()?;
+                    source.push_str(&format!("\\({}\\)", formula.latex));
+                    if origin.is_none() {
+                        origin = Some(vectorimage.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Some(InlineLine {
+            keys: members.into_iter().map(|(key, _)| key).collect(),
+            source,
+            bounds: Aabb::new(Vector2::new(left, top), Vector2::new(right, bottom)),
+            origin,
+            text_style,
+        })
+    }
+
+    /// Open the source of the line a clicked inline formula belongs to.
+    pub(crate) fn start_editing_inline_formula(
+        &mut self,
+        engine_view: &mut EngineViewMut,
+        stroke_key: StrokeKey,
+        formula: crate::formula::FormulaSource,
+        origin: VectorImage,
+    ) -> WidgetFlags {
+        if formula.inline
+            && let Some(line) = Self::inline_line_of(engine_view.store, stroke_key)
+        {
+            return self.start_editing_inline_line(engine_view, line, None, false);
+        }
+
+        self.start_editing_formula(engine_view, stroke_key, formula, origin)
+    }
+
+    /// Replace a line of text runs and inline formulas with one source stroke, and start editing it.
+    fn start_editing_inline_line(
+        &mut self,
+        engine_view: &mut EngineViewMut,
+        line: InlineLine,
+        click_pos: Option<Vector2>,
+        pen_down: bool,
+    ) -> WidgetFlags {
+        let mut widget_flags = WidgetFlags::default();
+
+        let mut text_style = line.text_style.unwrap_or_else(|| {
+            engine_view
+                .config
+                .pens_config
+                .typewriter_config
+                .text_style
+                .clone()
+        });
+        text_style.ranged_text_attributes.clear();
+        text_style.set_max_width(None);
+
+        let textstroke = TextStroke::new(line.source.clone(), line.bounds.mins, text_style);
+        let mut originals = Vec::with_capacity(line.keys.len());
+        for key in &line.keys {
+            if let Some(stroke) = engine_view.store.remove_stroke(*key) {
+                originals.push(stroke);
+            }
+        }
+        let stroke_key = engine_view
+            .store
+            .insert_stroke(Stroke::TextStroke(textstroke), None);
+        engine_view.store.update_geometry_for_stroke(stroke_key);
+        engine_view.store.regenerate_rendering_for_stroke(
+            stroke_key,
+            engine_view.camera.viewport(),
+            engine_view.camera.image_scale(),
+        );
+
+        let cursor_index = click_pos
+            .and_then(|pos| match engine_view.store.get_stroke_ref(stroke_key) {
+                Some(Stroke::TextStroke(textstroke)) => {
+                    textstroke.get_cursor_for_global_coord(pos).ok()
+                }
+                _ => None,
+            })
+            .map(|cursor| cursor.cur_cursor())
+            .unwrap_or(line.source.len());
+        let cursor = GraphemeCursor::new(cursor_index, line.source.len(), true);
+
+        self.formula_origin = line.origin;
+        self.edit_origin_strokes = originals;
+        self.state = TypewriterState::Modifying {
+            modify_state: ModifyState::Idle,
+            stroke_key,
+            cursor,
+            pen_down,
+        };
+        self.reset_blink();
+        widget_flags.redraw = true;
+
+        widget_flags
+    }
+
     /// Replace a formula object with a text stroke holding its source, and start editing it.
     ///
     /// Committing the text (clicking away, `Escape`, a new text box) recognizes the formula again.
@@ -1334,8 +1590,9 @@ impl Typewriter {
         let Some(stroke_key) = stroke_key else {
             return widget_flags;
         };
-        let strict = self.formula_origin.is_some();
+        let strict = self.formula_origin.is_some() || !self.edit_origin_strokes.is_empty();
         let origin = self.formula_origin.take();
+        let originals = std::mem::take(&mut self.edit_origin_strokes);
 
         match self.convert_formulas_in_stroke(engine_view, stroke_key, strict, origin.as_ref()) {
             FormulaConversion::Converted(formula_flags) => {
@@ -1345,7 +1602,14 @@ impl Typewriter {
             FormulaConversion::Failed(err) => {
                 // A rejected commit leaves the formula as it was.
                 error!("Rejected the formula commit, rendering it failed, Err: {err:?}");
-                if let Some(origin) = origin
+                if !originals.is_empty() {
+                    engine_view.store.remove_stroke(stroke_key);
+                    for stroke in originals {
+                        engine_view.store.insert_stroke(stroke, None);
+                    }
+                    widget_flags |= engine_view.store.record(Instant::now());
+                    widget_flags.store_modified = true;
+                } else if let Some(origin) = origin
                     && let Some(stroke) = engine_view.store.get_stroke_mut(stroke_key)
                 {
                     *stroke = Stroke::VectorImage(origin);
@@ -1792,7 +2056,7 @@ mod tests {
         );
     }
 
-    /// Double-clicking an inline formula edits its source and commits it back inline.
+    /// Double-clicking an inline formula edits its whole line source and commits it back inline.
     #[test]
     fn an_inline_formula_edit_keeps_inline_delimiters_and_flow() {
         let mut engine = Engine::default();
@@ -1835,7 +2099,7 @@ mod tests {
                     })
             })
             .expect("the inline formula was replaced by its source");
-        assert_eq!(source_text, "\\(w\\)");
+        assert_eq!(source_text, "before \\(w\\) after");
 
         let _ = engine.handle_pen_event(
             PenEvent::KeyPressed {
@@ -1863,5 +2127,182 @@ mod tests {
             .expect("the source renders as a formula again");
         assert!(inline, "the committed object is still an inline formula");
         assert!(baseline > 0.0);
+    }
+
+    /// A formula is placed after the trailing spaces of the text run before it.
+    #[test]
+    fn an_inline_formula_is_placed_after_trailing_spaces() {
+        let mut engine = Engine::default();
+        let mut typewriter = Typewriter::default();
+
+        let _ = engine.with_view_mut(|engine_view| {
+            typewriter.insert_text(
+                "a \\(x\\)".to_string(),
+                Some(Vector2::new(10.0, 10.0)),
+                engine_view,
+            )
+        });
+
+        let (text, image_mins) = engine.with_view_mut(|engine_view| {
+            let mut text = None;
+            let mut image_mins = None;
+            for key in engine_view.store.keys_unordered() {
+                match engine_view.store.get_stroke_ref(key) {
+                    Some(Stroke::TextStroke(textstroke)) => text = Some(textstroke.clone()),
+                    Some(Stroke::VectorImage(vectorimage)) => {
+                        image_mins = Some(vectorimage.bounds().mins)
+                    }
+                    _ => {}
+                }
+            }
+            (
+                text.expect("the text run exists"),
+                image_mins.expect("the formula exists"),
+            )
+        });
+
+        let ink_width = text.bounds().extents()[0];
+        let advance = Typewriter::text_advance(&text.text_style, &text.text)
+            .expect("the text width is measurable");
+        assert!(
+            advance - ink_width > 1.0,
+            "the trailing space adds width: advance {advance}, ink {ink_width}"
+        );
+        assert!(
+            (image_mins[0] - (text.bounds().mins[0] + advance)).abs() < 0.01,
+            "the formula starts after the space, not on the last glyph"
+        );
+    }
+
+    /// Clicking a text run next to an inline formula edits the whole line source.
+    #[test]
+    fn clicking_a_text_run_edits_the_line_with_its_formula() {
+        let mut engine = Engine::default();
+        let mut typewriter = Typewriter::default();
+
+        let _ = engine.with_view_mut(|engine_view| {
+            typewriter.insert_text(
+                "before \\(w\\) after".to_string(),
+                Some(Vector2::new(10.0, 10.0)),
+                engine_view,
+            )
+        });
+
+        let click_pos = engine
+            .with_view_mut(|engine_view| {
+                engine_view
+                    .store
+                    .keys_unordered()
+                    .into_iter()
+                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                        Some(Stroke::TextStroke(textstroke)) if textstroke.text == "before " => {
+                            Some(textstroke.bounds().mins + textstroke.bounds().extents() * 0.5)
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("the leading text run exists");
+
+        let _ = engine.change_pen_style(PenStyle::Typewriter);
+        let (_, flags) = engine.handle_pen_event(
+            PenEvent::Down {
+                element: Element::new(click_pos, Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            Instant::now(),
+        );
+        assert!(flags.redraw);
+
+        let (sources, image_count) = engine.with_view_mut(|engine_view| {
+            let mut sources = Vec::new();
+            let mut image_count = 0;
+            for key in engine_view.store.keys_unordered() {
+                match engine_view.store.get_stroke_ref(key) {
+                    Some(Stroke::TextStroke(textstroke)) => sources.push(textstroke.text.clone()),
+                    Some(Stroke::VectorImage(_)) => image_count += 1,
+                    _ => {}
+                }
+            }
+            (sources, image_count)
+        });
+        assert_eq!(sources, vec!["before \\(w\\) after".to_string()]);
+        assert_eq!(image_count, 0, "the line is edited as one source");
+    }
+
+    /// Typing a space before the formula in the line source moves the formula right.
+    #[test]
+    fn editing_text_before_a_formula_moves_it() {
+        let mut engine = Engine::default();
+        let mut typewriter = Typewriter::default();
+
+        let _ = engine.with_view_mut(|engine_view| {
+            typewriter.insert_text(
+                "a \\(x\\)".to_string(),
+                Some(Vector2::new(10.0, 10.0)),
+                engine_view,
+            )
+        });
+
+        let (formula_pos, before) = engine
+            .with_view_mut(|engine_view| {
+                engine_view
+                    .store
+                    .keys_unordered()
+                    .into_iter()
+                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                        Some(Stroke::VectorImage(vectorimage)) => {
+                            let bounds = vectorimage.bounds();
+                            Some((bounds.mins + bounds.extents() * 0.5, bounds.mins[0]))
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("the inline formula exists");
+
+        let _ = engine.formula_edit_at(formula_pos);
+
+        engine.with_view_mut(|engine_view| {
+            for key in engine_view.store.keys_unordered() {
+                if let Some(Stroke::TextStroke(textstroke)) = engine_view.store.get_stroke_mut(key)
+                {
+                    textstroke.text = textstroke.text.replacen("\\(", " \\(", 1);
+                    engine_view.store.update_geometry_for_stroke(key);
+                    engine_view.store.regenerate_rendering_for_stroke(
+                        key,
+                        engine_view.camera.viewport(),
+                        engine_view.camera.image_scale(),
+                    );
+                }
+            }
+        });
+
+        let _ = engine.handle_pen_event(
+            PenEvent::KeyPressed {
+                keyboard_key: rnote_compose::penevent::KeyboardKey::Escape,
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            Instant::now(),
+        );
+
+        let after = engine
+            .with_view_mut(|engine_view| {
+                engine_view
+                    .store
+                    .keys_unordered()
+                    .into_iter()
+                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                        Some(Stroke::VectorImage(vectorimage)) => {
+                            Some(vectorimage.bounds().mins[0])
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("the formula is rendered again");
+        assert!(
+            after - before > 1.0,
+            "the extra space moved the formula: before {before}, after {after}"
+        );
     }
 }

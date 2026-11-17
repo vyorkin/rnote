@@ -38,6 +38,7 @@ impl Typewriter {
                         .snap_position(element.pos, engine_view.config),
                 );
 
+                let mut inline_line_edit = false;
                 if let Some(&stroke_key) = engine_view
                     .store
                     .stroke_hitboxes_contain_coord(engine_view.camera.viewport(), element.pos)
@@ -47,29 +48,43 @@ impl Typewriter {
                     if let Some(Stroke::TextStroke(textstroke)) =
                         engine_view.store.get_stroke_ref(stroke_key)
                     {
-                        let cursor = if let Ok(new_cursor) =
-                            // get the cursor for the current position
-                            textstroke.get_cursor_for_global_coord(element.pos)
-                        {
-                            new_cursor
+                        if let Some(line) = Self::inline_line_of(engine_view.store, stroke_key) {
+                            // A text run next to a formula edits the whole line.
+                            widget_flags |= self.start_editing_inline_line(
+                                engine_view,
+                                line,
+                                Some(element.pos),
+                                true,
+                            );
+                            inline_line_edit = true;
                         } else {
-                            GraphemeCursor::new(0, textstroke.text.len(), true)
-                        };
+                            let cursor = if let Ok(new_cursor) =
+                                // get the cursor for the current position
+                                textstroke
+                                    .get_cursor_for_global_coord(element.pos)
+                            {
+                                new_cursor
+                            } else {
+                                GraphemeCursor::new(0, textstroke.text.len(), true)
+                            };
 
-                        engine_view.store.update_chrono_to_last(stroke_key);
+                            engine_view.store.update_chrono_to_last(stroke_key);
 
-                        new_state = TypewriterState::Modifying {
-                            modify_state: ModifyState::Idle,
-                            stroke_key,
-                            cursor,
-                            pen_down: true,
-                        };
-                        refresh_state = true;
+                            new_state = TypewriterState::Modifying {
+                                modify_state: ModifyState::Idle,
+                                stroke_key,
+                                cursor,
+                                pen_down: true,
+                            };
+                            refresh_state = true;
+                        }
                     }
                 }
 
-                self.state = new_state;
-                self.reset_blink();
+                if !inline_line_edit {
+                    self.state = new_state;
+                    self.reset_blink();
+                }
 
                 // after setting new state
                 if refresh_state {

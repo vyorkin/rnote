@@ -820,7 +820,7 @@ impl Engine {
             .penholder
             .change_style(PenStyle::Typewriter, &mut engine_view_mut!(self));
         if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
-            widget_flags |= typewriter.start_editing_formula(
+            widget_flags |= typewriter.start_editing_inline_formula(
                 &mut engine_view_mut!(self),
                 stroke_key,
                 formula,
