@@ -42,7 +42,10 @@ renders through `librsvg`. Without the feature, recognized delimiters stay liter
 formula shows its source — the box's edit mode is the source editor; clicking away, `Esc`, and
 starting a new text box all re-render it, and a commit whose TeX fails to render is rejected and
 restores the original object — and copies it as LaTeX `text/plain`, rendered SVG and the
-stroke-content MIME.
+stroke-content MIME. An inline formula's neighbors are one line of that source: double-clicking the
+formula, or clicking a text run beside it, reopens the whole line (`text \(…\) more text`) as one
+stroke, because editing the text beside a formula is how the formula is moved, and a formula edited
+alone leaves the text next to it stranded.
 
 ## Considered Options
 
@@ -71,3 +74,5 @@ stroke-content MIME.
   unaffected.
 - Editing an inline formula re-renders it on the baseline it had, so the surrounding text runs stay
   aligned; only a failure to typeset puts the original object back.
+- Editing a line of text runs and formulas re-measures that line only. Text on its own line, and
+  the box on another line, does not move; a line that grows wider does not push a neighbor box.

@@ -169,6 +169,11 @@ _Avoid_: block formula, standalone equation
 A formula flowing on the text line, delimited `$…$` or `\(…\)`, its baseline on the text baseline.
 _Avoid_: inline math run, character formula
 
+**Line source**:
+The text of one text box line with its inline formulas written as `\(…\)`, edited as one typewriter
+stroke.
+_Avoid_: row source, formula line
+
 **Literal formula text**:
 Delimited math that stayed plain typewriter text because the delimiters were unbalanced or
 unsupported, or the source did not typeset.
