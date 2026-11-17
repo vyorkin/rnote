@@ -25,6 +25,7 @@ use crate::pens::{Pen, PenStyle};
 use crate::store::StrokeKey;
 use crate::store::render_comp::{self, RenderCompState};
 use crate::strokes::content::GeneratedContentImages;
+use crate::strokes::stroke::Stroke;
 use crate::strokes::textstroke::{TextAttribute, TextStyle};
 use crate::{Camera, Document, PenHolder, StrokeStore};
 use crate::{SelectionCollision, WidgetFlags};
@@ -37,6 +38,7 @@ use rendering::{ContentTileCache, ContentTilePreviewRepaint, ContentTileRequest}
 use rnote_compose::eventresult::EventPropagation;
 use rnote_compose::ext::AabbExt;
 use rnote_compose::penevent::{PenEvent, ShortcutKey};
+use rnote_compose::shapes::Shapeable;
 use rnote_compose::{Color, SplitOrder};
 use serde::{Deserialize, Serialize};
 use snapshot::Snapshotable;
@@ -784,6 +786,51 @@ impl Engine {
     ) -> WidgetFlags {
         self.penholder
             .change_style_override(new_style_override, &mut engine_view_mut!(self))
+    }
+
+    /// Start editing the formula at the given document position, if there is one.
+    ///
+    /// The formula object is replaced by a text stroke holding its LaTeX source, edited with the
+    /// typewriter. Committing the text recognizes the formula again, `Escape` restores the object.
+    pub fn formula_edit_at(&mut self, pos: Vector2) -> WidgetFlags {
+        if cfg!(not(feature = "latex")) {
+            return WidgetFlags::default();
+        }
+
+        let Some((stroke_key, formula, origin)) = ({
+            let engine_view = engine_view!(self);
+            engine_view
+                .store
+                .keys_unordered()
+                .into_iter()
+                .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                    Some(Stroke::VectorImage(vectorimage))
+                        if vectorimage.formula_src.is_some()
+                            && vectorimage.bounds().contains_local_point(pos) =>
+                    {
+                        Some((key, vectorimage.formula_src.clone()?, vectorimage.clone()))
+                    }
+                    _ => None,
+                })
+        }) else {
+            return WidgetFlags::default();
+        };
+
+        let mut widget_flags = self
+            .penholder
+            .change_style(PenStyle::Typewriter, &mut engine_view_mut!(self));
+        if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
+            widget_flags |= typewriter.start_editing_formula(
+                &mut engine_view_mut!(self),
+                stroke_key,
+                formula,
+                origin,
+            );
+            widget_flags.enable_text_input = Some(true);
+            widget_flags.refresh_ui = true;
+        }
+
+        widget_flags
     }
 
     /// Whether the store holds a selection, whichever pen made it.

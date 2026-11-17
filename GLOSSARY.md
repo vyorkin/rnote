@@ -151,6 +151,25 @@ Draw-and-Hold replacing a closed stroke with a circle or an ellipse fitted to th
 drew, kept at the center and orientation it drew them.
 _Avoid_: ideal circle, shape completion
 
+## Formulas
+
+**Formula**:
+A piece of LaTeX math typeset into a vector image on the canvas, carrying the source it was rendered from.
+_Avoid_: equation, math block
+
+**Formula source**:
+The LaTeX text between the delimiters a formula was rendered from.
+_Avoid_: equation text, latex body
+
+**Display formula**:
+A formula set on its own block, as opposed to one running inside a sentence. Every formula is one.
+_Avoid_: block formula, standalone equation
+
+**Literal formula text**:
+Delimited math that stayed plain typewriter text because the delimiters were unbalanced or
+unsupported, or the source did not typeset.
+_Avoid_: failed formula, raw math
+
 ## Pens
 
 **Fountain Pen**:

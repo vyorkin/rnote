@@ -34,6 +34,13 @@ pub struct VectorImage {
     pub intrinsic_size: Vector2,
     #[serde(rename = "rectangle")]
     pub rectangle: Rectangle,
+    /// The LaTeX source this image was rendered from, when it is a formula.
+    #[serde(
+        rename = "formula_src",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub formula_src: Option<crate::formula::FormulaSource>,
 }
 
 impl Default for VectorImage {
@@ -42,6 +49,7 @@ impl Default for VectorImage {
             svg_data: String::default(),
             intrinsic_size: Vector2::ZERO,
             rectangle: Rectangle::default(),
+            formula_src: None,
         }
     }
 }
@@ -202,6 +210,7 @@ impl VectorImage {
             svg_data,
             intrinsic_size,
             rectangle,
+            formula_src: None,
         })
     }
 
@@ -319,5 +328,42 @@ impl VectorImage {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formula::FormulaSource;
+    use rnote_compose::Color;
+
+    #[test]
+    fn an_image_without_a_formula_source_reads_old_files_and_serializes_unchanged() {
+        let image = VectorImage::default();
+        let json = serde_json::to_string(&image).unwrap();
+        assert!(!json.contains("formula_src"));
+        let read: VectorImage = serde_json::from_str(&json).unwrap();
+        assert!(read.formula_src.is_none());
+    }
+
+    #[test]
+    fn a_formula_source_round_trips() {
+        let image = VectorImage {
+            svg_data: "<svg></svg>".into(),
+            formula_src: Some(FormulaSource {
+                latex: "x^2".into(),
+                font_size: 32.0,
+                color: Color::BLACK,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&image).unwrap();
+        let read: VectorImage = serde_json::from_str(&json).unwrap();
+        let formula = read
+            .formula_src
+            .expect("the source survives the round trip");
+        assert_eq!(formula.latex, "x^2");
+        assert_eq!(formula.font_size, 32.0);
+        assert_eq!(formula.color, Color::BLACK);
     }
 }

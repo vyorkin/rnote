@@ -535,7 +535,11 @@ impl Typewriter {
         // idle is the whole of it. Without this the canvas keeps the bare tool keys gated out
         // (`is_handling_text_input`) and no key gets the keyboard back from the text box.
         if keyboard_key == KeyboardKey::Escape && !matches!(self.state, TypewriterState::Idle) {
-            self.state = TypewriterState::Idle;
+            if self.formula_origin.is_some() {
+                widget_flags |= self.cancel_formula_edit(engine_view);
+            } else {
+                self.state = TypewriterState::Idle;
+            }
 
             return (
                 EventResult {

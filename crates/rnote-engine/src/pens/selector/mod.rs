@@ -10,6 +10,7 @@ use crate::engine::{EngineView, EngineViewMut, StrokeContent};
 use crate::snap::SnapCorner;
 use crate::store::StrokeKey;
 use crate::strokes::Content;
+use crate::strokes::Stroke;
 use crate::{Camera, DrawableOnDoc, Engine, WidgetFlags};
 use futures::channel::oneshot;
 use kurbo::Shape;
@@ -174,8 +175,28 @@ impl PenBehaviour for Selector {
             None
         };
 
+        // A single selected formula also goes out as its LaTeX, so it can be pasted elsewhere.
+        let formula_text = match &self.state {
+            SelectorState::ModifySelection { selection, .. } if selection.len() == 1 => {
+                match engine_view.store.get_stroke_ref(selection[0]) {
+                    Some(Stroke::VectorImage(vectorimage)) => vectorimage
+                        .formula_src
+                        .as_ref()
+                        .map(|source| format!("\\[{}\\]", source.latex)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
         rayon::spawn(move || {
             let result = move || {
+                if let Some(formula_text) = formula_text {
+                    clipboard_content.push((
+                        formula_text.into_bytes(),
+                        String::from("text/plain;charset=utf-8"),
+                    ));
+                }
                 if let Some(stroke_content) = stroke_content {
                     let stroke_content_svg = stroke_content.gen_svg(
                         false,

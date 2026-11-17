@@ -1265,7 +1265,7 @@ mod imp {
                 self.canvas_multi_press_gesture.connect_pressed(clone!(
                     #[weak(rename_to=canvaswrapper)]
                     obj,
-                    move |signal, n_press, _, _| {
+                    move |signal, n_press, x, y| {
                         // While Space is held the press pans the view; it must not also
                         // select a word or a line.
                         if canvaswrapper.canvas().imp().space_pan_held.get() {
@@ -1291,7 +1291,22 @@ mod imp {
 
                         match action {
                             // Double press
-                            1 => canvas.engine_mut().text_select_closest_word(),
+                            1 => {
+                                // Editing a formula's source wins over selecting the text under
+                                // the pointer; the text words of the canvas are a fallback.
+                                let pos = canvas
+                                    .engine_ref()
+                                    .camera
+                                    .transform()
+                                    .inverse()
+                                    .transform_point2(Vector2::new(x, y));
+                                let widget_flags = canvas.engine_mut().formula_edit_at(pos);
+                                if widget_flags.redraw {
+                                    canvas.emit_handle_widget_flags(widget_flags);
+                                } else {
+                                    canvas.engine_mut().text_select_closest_word();
+                                }
+                            }
                             // Triple press
                             2 => canvas.engine_mut().text_select_closest_line(),
                             _ => unreachable!(),

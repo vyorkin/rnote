@@ -71,6 +71,10 @@ piet-cairo = "0.8.0"
 rand = "0.10.3"
 rand_distr = "0.6.0"
 rand_pcg = "0.10.2"
+ratex-layout = "0.1.16"
+ratex-parser = "0.1.16"
+ratex-svg = { version = "0.1.16", features = ["standalone", "embed-fonts"] }
+ratex-types = "0.1.16"
 rayon = "1.12"
 regex = "1.13"
 rodio = { version = "0.22.2", default-features = false, features = [

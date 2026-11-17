@@ -38,6 +38,10 @@ piet-cairo = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 rand_pcg = { workspace = true }
+ratex-layout = { workspace = true, optional = true }
+ratex-parser = { workspace = true, optional = true }
+ratex-svg = { workspace = true, optional = true }
+ratex-types = { workspace = true, optional = true }
 rayon = { workspace = true }
 regex = { workspace = true }
 rodio = { workspace = true, optional = true }
@@ -64,5 +68,11 @@ approx = { workspace = true }
 
 [features]
 cli = ["dep:clap"]
-default = []
+default = ["latex"]
+latex = [
+    "dep:ratex-layout",
+    "dep:ratex-parser",
+    "dep:ratex-svg",
+    "dep:ratex-types",
+]
 ui = ["dep:gtk4", "dep:rodio"]
