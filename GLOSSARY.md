@@ -162,8 +162,12 @@ The LaTeX text between the delimiters a formula was rendered from.
 _Avoid_: equation text, latex body
 
 **Display formula**:
-A formula set on its own block, as opposed to one running inside a sentence. Every formula is one.
+A formula set on its own block, delimited `$$…$$` or `\[…\]`.
 _Avoid_: block formula, standalone equation
+
+**Inline formula**:
+A formula flowing on the text line, delimited `$…$` or `\(…\)`, its baseline on the text baseline.
+_Avoid_: inline math run, character formula
 
 **Literal formula text**:
 Delimited math that stayed plain typewriter text because the delimiters were unbalanced or

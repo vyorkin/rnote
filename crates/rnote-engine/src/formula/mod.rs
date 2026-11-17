@@ -1,18 +1,21 @@
-//! Delimited LaTeX display formulas recognized in pasted and typed text.
+//! Delimited LaTeX formulas recognized in pasted and typed text.
 //!
-//! Recognition is strict: only balanced `$$…$$` and `\[…\]` with a non-empty body are formulas.
-//! `$…$`, `\(…\)`, unbalanced delimiters and empty bodies stay literal text.
+//! Recognition is strict: only balanced `$$…$$`, `\[…\]` (display) and `$…$`, `\(…\)` (inline)
+//! with a non-empty body are formulas. Unbalanced delimiters and empty bodies stay literal text,
+//! and an inline formula never spans a line break.
 
 use rnote_compose::Color;
 use serde::{Deserialize, Serialize};
 
-/// A display formula recognized in text.
+/// A formula recognized in text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Formula {
     /// The LaTeX source, trimmed.
     pub latex: String,
     /// The delimited text as it appeared, used when the source does not typeset.
     pub raw: String,
+    /// Whether the formula was set inline (`$…$`, `\(…\)`) instead of as a display block.
+    pub inline: bool,
 }
 
 /// A piece of text, either plain text or a recognized formula.
@@ -32,6 +35,15 @@ pub struct FormulaSource {
     pub font_size: f64,
     #[serde(rename = "color")]
     pub color: Color,
+    /// Whether the image is set inline with the text instead of as a display block.
+    #[serde(rename = "inline")]
+    pub inline: bool,
+    /// The distance from the image top to the formula baseline, in document units.
+    #[serde(rename = "baseline")]
+    pub baseline: f64,
+    /// The image height, in document units.
+    #[serde(rename = "height")]
+    pub height: f64,
 }
 
 impl Default for FormulaSource {
@@ -40,42 +52,89 @@ impl Default for FormulaSource {
             latex: String::default(),
             font_size: 32.0,
             color: Color::default(),
+            inline: false,
+            baseline: 0.0,
+            height: 0.0,
         }
     }
 }
 
-const DELIMITERS: [(&str, &str); 2] = [("\\[", "\\]"), ("$$", "$$")];
+#[derive(Debug, Clone, Copy)]
+struct Delimiter {
+    open: &'static str,
+    close: &'static str,
+    inline: bool,
+}
 
-fn next_delimiter(text: &str, from: usize) -> Option<(usize, &'static str, &'static str)> {
-    let mut best: Option<(usize, &'static str, &'static str)> = None;
-    for (open, close) in DELIMITERS {
-        if let Some(rel_start) = find_unescaped(text, from, open) {
-            let start = from + rel_start;
-            if best.is_none_or(|(best_start, _, _)| start < best_start) {
-                best = Some((start, open, close));
+const DELIMITERS: [Delimiter; 4] = [
+    Delimiter {
+        open: "\\[",
+        close: "\\]",
+        inline: false,
+    },
+    Delimiter {
+        open: "$$",
+        close: "$$",
+        inline: false,
+    },
+    Delimiter {
+        open: "\\(",
+        close: "\\)",
+        inline: true,
+    },
+    Delimiter {
+        open: "$",
+        close: "$",
+        inline: true,
+    },
+];
+
+fn next_delimiter(text: &str, from: usize) -> Option<(usize, Delimiter)> {
+    let bytes = text.as_bytes();
+    let mut at = from;
+    while at < text.len() {
+        if !text.is_char_boundary(at) {
+            at += 1;
+            continue;
+        }
+        for delimiter in DELIMITERS {
+            if text[at..].starts_with(delimiter.open) {
+                let escaped = delimiter.open.starts_with('$') && at > 0 && bytes[at - 1] == b'\\';
+                if !escaped {
+                    return Some((at, delimiter));
+                }
             }
         }
-    }
-    best
-}
-
-/// Find `needle`, ignoring occurrences whose first byte is escaped by a preceding backslash.
-///
-/// Only `$$` can be escaped (`\$`); `\[` is a delimiter in its own right.
-fn find_unescaped(text: &str, from: usize, needle: &str) -> Option<usize> {
-    let mut search_from = from;
-    while let Some(rel) = text[search_from..].find(needle) {
-        let at = search_from + rel;
-        let escaped = at > 0 && text.as_bytes()[at - 1] == b'\\';
-        if !escaped {
-            return Some(at - from);
-        }
-        search_from = at + needle.len();
+        at += text[at..].chars().next().map_or(1, |c| c.len_utf8());
     }
     None
 }
 
-/// Split text into plain text and recognized display formulas, preserving order.
+/// Find the closing delimiter, ignoring escaped `$` and, inline, a doubled `$$`.
+fn find_close(text: &str, from: usize, delimiter: Delimiter) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut at = from;
+    while at < text.len() {
+        if !text.is_char_boundary(at) {
+            at += 1;
+            continue;
+        }
+        if text[at..].starts_with(delimiter.close) {
+            let escaped = delimiter.close.starts_with('$') && at > 0 && bytes[at - 1] == b'\\';
+            if !escaped {
+                if delimiter.close == "$" && text[at..].starts_with("$$") {
+                    at += 2;
+                    continue;
+                }
+                return Some(at);
+            }
+        }
+        at += text[at..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    None
+}
+
+/// Split text into plain text and recognized formulas, preserving order.
 pub fn split_text(text: &str) -> Vec<Segment> {
     let mut segments = Vec::new();
 
@@ -84,18 +143,18 @@ pub fn split_text(text: &str) -> Vec<Segment> {
     let mut cursor = 0;
     let mut search_from = 0;
 
-    while let Some((start, open, close)) = next_delimiter(text, search_from) {
-        let body_start = start + open.len();
-        let Some(rel_close) = text[body_start..].find(close) else {
+    while let Some((start, delimiter)) = next_delimiter(text, search_from) {
+        let body_start = start + delimiter.open.len();
+        let Some(close) = find_close(text, body_start, delimiter) else {
             // Unbalanced opening delimiter: the rest of the text stays literal.
             break;
         };
-        let body = &text[body_start..body_start + rel_close];
-        let end = body_start + rel_close + close.len();
+        let body = &text[body_start..close];
+        let end = close + delimiter.close.len();
 
-        if body.trim().is_empty() {
-            // An empty formula is literal text; keep scanning past the closing delimiter.
-            search_from = end;
+        if body.trim().is_empty() || (delimiter.inline && body.contains('\n')) {
+            // Not a formula: keep the delimiter literal and keep scanning after the opening one.
+            search_from = body_start;
             continue;
         }
 
@@ -105,6 +164,7 @@ pub fn split_text(text: &str) -> Vec<Segment> {
         segments.push(Segment::Formula(Formula {
             latex: body.trim().to_string(),
             raw: text[start..end].to_string(),
+            inline: delimiter.inline,
         }));
         cursor = end;
         search_from = end;
@@ -119,17 +179,58 @@ pub fn split_text(text: &str) -> Vec<Segment> {
     segments
 }
 
-/// Typeset a LaTeX formula to a standalone SVG document, in text document units.
+/// A typeset formula: its SVG document plus the metrics needed to align it with text.
+#[derive(Debug, Clone)]
+pub struct RenderedFormula {
+    /// The standalone SVG document.
+    pub svg: String,
+    /// The distance from the image top to the formula baseline, in document units.
+    pub baseline: f64,
+    /// The image height, in document units.
+    pub height: f64,
+}
+
+/// Typeset a LaTeX display formula to a standalone SVG document, in text document units.
 ///
 /// The SVG is rendered with glyphs as paths, so `librsvg` (canvas rendering and PDF/SVG export)
 /// needs no TeX fonts installed.
 #[cfg(feature = "latex")]
 pub fn render_svg(latex: &str, font_size: f64, color: Color) -> anyhow::Result<String> {
+    Ok(render_formula(
+        latex,
+        font_size,
+        color,
+        ratex_types::math_style::MathStyle::Display,
+    )?
+    .svg)
+}
+
+/// Typeset a LaTeX inline formula, with the metrics needed to sit it on a text baseline.
+#[cfg(feature = "latex")]
+pub fn render_inline_svg(
+    latex: &str,
+    font_size: f64,
+    color: Color,
+) -> anyhow::Result<RenderedFormula> {
+    render_formula(
+        latex,
+        font_size,
+        color,
+        ratex_types::math_style::MathStyle::Text,
+    )
+}
+
+#[cfg(feature = "latex")]
+fn render_formula(
+    latex: &str,
+    font_size: f64,
+    color: Color,
+    style: ratex_types::math_style::MathStyle,
+) -> anyhow::Result<RenderedFormula> {
     use ratex_layout::{LayoutOptions, layout, to_display_list, validate_layout};
     use ratex_parser::parser::parse;
     use ratex_svg::{SvgColorSyntax, SvgOptions, render_to_svg_with_color_syntax};
     use ratex_types::color::Color as RatexColor;
-    use ratex_types::math_style::MathStyle;
 
     // The generated document measures in `pt`; usvg (and therefore the vector image) measures in
     // `px`. Scale down so one document unit ends up as one SVG unit.
@@ -137,7 +238,7 @@ pub fn render_svg(latex: &str, font_size: f64, color: Color) -> anyhow::Result<S
 
     let ast = parse(latex)?;
     let layout_options = LayoutOptions::default()
-        .with_style(MathStyle::Display)
+        .with_style(style)
         .with_color(RatexColor::new(
             color.r as f32,
             color.g as f32,
@@ -156,16 +257,26 @@ pub fn render_svg(latex: &str, font_size: f64, color: Color) -> anyhow::Result<S
         font_dir: String::new(),
     };
 
-    Ok(render_to_svg_with_color_syntax(
-        &display_list,
-        &svg_options,
-        SvgColorSyntax::Rgba,
-    ))
+    Ok(RenderedFormula {
+        svg: render_to_svg_with_color_syntax(&display_list, &svg_options, SvgColorSyntax::Rgba),
+        baseline: lbox.height * font_size,
+        height: (lbox.height + lbox.depth) * font_size,
+    })
 }
 
-/// Typeset a LaTeX formula, or fail when built without the `latex` feature.
+/// Typeset a LaTeX display formula, or fail when built without the `latex` feature.
 #[cfg(not(feature = "latex"))]
 pub fn render_svg(_latex: &str, _font_size: f64, _color: Color) -> anyhow::Result<String> {
+    anyhow::bail!("rnote was built without the `latex` feature")
+}
+
+/// Typeset a LaTeX inline formula, or fail when built without the `latex` feature.
+#[cfg(not(feature = "latex"))]
+pub fn render_inline_svg(
+    _latex: &str,
+    _font_size: f64,
+    _color: Color,
+) -> anyhow::Result<RenderedFormula> {
     anyhow::bail!("rnote was built without the `latex` feature")
 }
 
@@ -200,7 +311,8 @@ mod tests {
                 Segment::Text("before ".into()),
                 Segment::Formula(Formula {
                     latex: "x^2".into(),
-                    raw: "\\[x^2\\]".into()
+                    raw: "\\[x^2\\]".into(),
+                    inline: false,
                 }),
                 Segment::Text(" after".into()),
             ]
@@ -208,10 +320,41 @@ mod tests {
     }
 
     #[test]
-    fn double_dollar_is_a_formula() {
+    fn round_brackets_are_an_inline_formula() {
+        let segments = split_text("вектор \\(w\\) проверен");
+        assert_eq!(
+            segments,
+            vec![
+                Segment::Text("вектор ".into()),
+                Segment::Formula(Formula {
+                    latex: "w".into(),
+                    raw: "\\(w\\)".into(),
+                    inline: true,
+                }),
+                Segment::Text(" проверен".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn double_dollar_is_a_display_formula() {
         let segments = split_text("$$\\alpha$$");
         assert_eq!(segments.len(), 1);
-        assert!(matches!(&segments[0], Segment::Formula(f) if f.latex == "\\alpha"));
+        assert!(matches!(&segments[0], Segment::Formula(f) if f.latex == "\\alpha" && !f.inline));
+    }
+
+    #[test]
+    fn dollars_are_an_inline_formula() {
+        let segments = split_text("x $\\alpha$ y");
+        assert_eq!(texts(&segments), vec!["x ", "$\\alpha$", " y"]);
+        assert!(matches!(&segments[1], Segment::Formula(f) if f.inline && f.latex == "\\alpha"));
+    }
+
+    #[test]
+    fn double_dollars_are_not_split_as_inline() {
+        let segments = split_text("a $$x$$ b");
+        assert_eq!(texts(&segments), vec!["a ", "$$x$$", " b"]);
+        assert!(matches!(&segments[1], Segment::Formula(f) if !f.inline));
     }
 
     #[test]
@@ -224,11 +367,16 @@ mod tests {
     }
 
     #[test]
-    fn single_dollar_and_round_brackets_stay_literal() {
+    fn inline_formula_does_not_span_a_line_break() {
         assert_eq!(
-            split_text("$x$ and \\(y\\)"),
-            vec![Segment::Text("$x$ and \\(y\\)".into())]
+            split_text("\\(x\ny\\)"),
+            vec![Segment::Text("\\(x\ny\\)".into())]
         );
+    }
+
+    #[test]
+    fn whitespace_inline_formula_stays_literal() {
+        assert_eq!(split_text("$ $"), vec![Segment::Text("$ $".into())]);
     }
 
     #[test]
@@ -264,6 +412,20 @@ mod tests {
         assert!(
             !svg.contains("<text"),
             "svg still uses text elements: {svg}"
+        );
+    }
+
+    #[cfg(feature = "latex")]
+    #[test]
+    fn inline_render_reports_a_baseline_inside_the_image() {
+        let rendered = render_inline_svg("y_p", 32.0, Color::BLACK).unwrap();
+        assert!(rendered.svg.contains("<path"));
+        assert!(rendered.baseline > 0.0);
+        assert!(
+            rendered.height > rendered.baseline,
+            "the subscript descends below the baseline, height {} baseline {}",
+            rendered.height,
+            rendered.baseline
         );
     }
 }

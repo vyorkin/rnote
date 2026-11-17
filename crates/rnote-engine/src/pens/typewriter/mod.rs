@@ -732,7 +732,7 @@ impl Typewriter {
                 );
 
                 if let FormulaConversion::Converted(formula_flags) =
-                    self.convert_formulas_in_stroke(engine_view, stroke_key, false)
+                    self.convert_formulas_in_stroke(engine_view, stroke_key, false, None)
                 {
                     self.state = TypewriterState::Idle;
                     widget_flags |= formula_flags;
@@ -767,7 +767,7 @@ impl Typewriter {
                 );
 
                 if let FormulaConversion::Converted(formula_flags) =
-                    self.convert_formulas_in_stroke(engine_view, stroke_key, false)
+                    self.convert_formulas_in_stroke(engine_view, stroke_key, false, None)
                 {
                     self.state = TypewriterState::Idle;
                     widget_flags |= formula_flags;
@@ -861,17 +861,20 @@ impl Typewriter {
         widget_flags
     }
 
-    /// Replace the display formulas recognized in a text stroke with formula objects.
+    /// Replace the formulas recognized in a text stroke with formula objects.
     ///
     /// The stroke is split into a `TextStroke` for every text run and a `VectorImage` for every
-    /// formula, stacked top to bottom in one undo entry. With `strict`, a formula that fails to
-    /// render leaves the stroke untouched and reports `Failed` instead; the source of a formula
-    /// being edited is never destroyed by a bad commit.
+    /// formula, in one undo entry. Display formulas stack top to bottom; inline ones flow on the
+    /// text line and keep their baseline, so a box with inline formulas is laid out line by line
+    /// and no longer wraps. With `strict`, a formula that fails to render leaves the stroke
+    /// untouched and reports `Failed` instead; `origin` is the formula object an edited source
+    /// replaced, used to keep an inline formula on its old baseline.
     pub(crate) fn convert_formulas_in_stroke(
         &mut self,
         engine_view: &mut EngineViewMut,
         stroke_key: StrokeKey,
         strict: bool,
+        origin: Option<&VectorImage>,
     ) -> FormulaConversion {
         if cfg!(not(feature = "latex")) {
             return FormulaConversion::NoFormula;
@@ -893,14 +896,24 @@ impl Typewriter {
 
         if strict {
             for segment in &segments {
-                if let Segment::Formula(formula) = segment
-                    && let Err(err) = crate::formula::render_svg(
-                        &formula.latex,
-                        text_style.font_size,
-                        text_style.color,
-                    )
-                {
-                    return FormulaConversion::Failed(err);
+                if let Segment::Formula(formula) = segment {
+                    let rendered = if formula.inline {
+                        crate::formula::render_inline_svg(
+                            &formula.latex,
+                            text_style.font_size,
+                            text_style.color,
+                        )
+                        .map(|rendered| rendered.svg)
+                    } else {
+                        crate::formula::render_svg(
+                            &formula.latex,
+                            text_style.font_size,
+                            text_style.color,
+                        )
+                    };
+                    if let Err(err) = rendered {
+                        return FormulaConversion::Failed(err);
+                    }
                 }
             }
         }
@@ -909,6 +922,22 @@ impl Typewriter {
         engine_view.store.remove_stroke(stroke_key);
 
         let mut widget_flags = WidgetFlags::default();
+
+        // Inline formulas need a text flow; display-only boxes keep the original stacking.
+        if segments
+            .iter()
+            .any(|segment| matches!(segment, Segment::Formula(formula) if formula.inline))
+        {
+            widget_flags |=
+                Self::lay_out_inline_segments(engine_view, &segments, &text_style, bounds, origin);
+
+            widget_flags.resize = true;
+            widget_flags.store_modified = true;
+            widget_flags |= engine_view.store.record(Instant::now());
+            self.formula_origin = None;
+            return FormulaConversion::Converted(widget_flags);
+        }
+
         let x = bounds.mins[0];
         let mut y = bounds.mins[1];
         let block_gap = text_style.font_size * 0.25;
@@ -966,6 +995,9 @@ impl Typewriter {
                 latex: formula.latex.clone(),
                 font_size: text_style.font_size,
                 color: text_style.color,
+                inline: false,
+                baseline: 0.0,
+                height: vectorimage.bounds().extents()[1],
             });
             let key = engine_view
                 .store
@@ -1008,6 +1040,229 @@ impl Typewriter {
         FormulaConversion::Converted(widget_flags)
     }
 
+    /// Lay text and inline formulas out line by line, a formula sitting on the text baseline.
+    ///
+    /// The text keeps hard line breaks only (the box no longer wraps), because a wrapped line
+    /// would need the formula to be placed mid-flow. A display formula starts a block of its own.
+    fn lay_out_inline_segments(
+        engine_view: &mut EngineViewMut,
+        segments: &[Segment],
+        text_style: &TextStyle,
+        bounds: Aabb,
+        origin: Option<&VectorImage>,
+    ) -> WidgetFlags {
+        let mut widget_flags = WidgetFlags::default();
+        let mut style = text_style.clone();
+        style.set_max_width(None);
+
+        let (line_height, ascent) = style
+            .lines(&mut piet_cairo::CairoText::new(), "Ag".to_string())
+            .ok()
+            .and_then(|lines| lines.first().map(|metric| (metric.height, metric.baseline)))
+            .unwrap_or((text_style.font_size * 1.2, text_style.font_size * 0.8));
+
+        // An edited formula keeps the baseline it had, so the unchanged neighbours stay aligned.
+        let anchor_baseline = origin.and_then(|origin| {
+            let source = origin.formula_src.as_ref()?;
+            source
+                .inline
+                .then(|| origin.bounds().mins[1] + source.baseline)
+        });
+        let mut anchor_pending = anchor_baseline;
+
+        let x = bounds.mins[0];
+        let mut line_top = bounds.mins[1];
+        let mut cursor_x = x;
+        let mut line_extent = line_height;
+        let block_gap = text_style.font_size * 0.25;
+
+        let insert_stroke = |engine_view: &mut EngineViewMut, stroke: Stroke| -> Option<Vector2> {
+            let key = engine_view.store.insert_stroke(stroke, None);
+            engine_view.store.regenerate_rendering_for_stroke(
+                key,
+                engine_view.camera.viewport(),
+                engine_view.camera.image_scale(),
+            );
+            engine_view
+                .store
+                .get_stroke_ref(key)
+                .map(|stroke| stroke.bounds().extents())
+        };
+
+        for segment in segments {
+            match segment {
+                Segment::Text(text) => {
+                    for (index, part) in text.split('\n').enumerate() {
+                        if index > 0 {
+                            line_top += line_extent;
+                            cursor_x = x;
+                            line_extent = line_height;
+                        }
+                        if part.is_empty() {
+                            continue;
+                        }
+                        let textstroke = TextStroke::new(
+                            part.to_string(),
+                            Vector2::new(cursor_x, line_top),
+                            style.clone(),
+                        );
+                        if let Some(extents) =
+                            insert_stroke(engine_view, Stroke::TextStroke(textstroke))
+                        {
+                            cursor_x += extents[0];
+                            line_extent = line_extent.max(extents[1]);
+                        }
+                    }
+                }
+                Segment::Formula(formula) if formula.inline => {
+                    let rendered = match crate::formula::render_inline_svg(
+                        &formula.latex,
+                        text_style.font_size,
+                        text_style.color,
+                    ) {
+                        Ok(rendered) => rendered,
+                        Err(err) => {
+                            error!(
+                                latex = formula.latex,
+                                "Falling back to literal text, rendering the formula failed, Err: {err:?}"
+                            );
+                            let textstroke = TextStroke::new(
+                                formula.raw.clone(),
+                                Vector2::new(cursor_x, line_top),
+                                style.clone(),
+                            );
+                            if let Some(extents) =
+                                insert_stroke(engine_view, Stroke::TextStroke(textstroke))
+                            {
+                                cursor_x += extents[0];
+                                line_extent = line_extent.max(extents[1]);
+                            }
+                            continue;
+                        }
+                    };
+                    let top = if let Some(baseline) = anchor_pending.take() {
+                        baseline - rendered.baseline
+                    } else {
+                        line_top + ascent - rendered.baseline
+                    };
+                    let mut vectorimage = match VectorImage::from_svg_str(
+                        &rendered.svg,
+                        Vector2::new(cursor_x, top),
+                        ImageSizeOption::RespectOriginalSize,
+                    ) {
+                        Ok(vectorimage) => vectorimage,
+                        Err(err) => {
+                            error!(
+                                latex = formula.latex,
+                                "Falling back to literal text, parsing the rendered formula failed, Err: {err:?}"
+                            );
+                            let textstroke = TextStroke::new(
+                                formula.raw.clone(),
+                                Vector2::new(cursor_x, line_top),
+                                style.clone(),
+                            );
+                            if let Some(extents) =
+                                insert_stroke(engine_view, Stroke::TextStroke(textstroke))
+                            {
+                                cursor_x += extents[0];
+                                line_extent = line_extent.max(extents[1]);
+                            }
+                            continue;
+                        }
+                    };
+                    vectorimage.formula_src = Some(FormulaSource {
+                        latex: formula.latex.clone(),
+                        font_size: text_style.font_size,
+                        color: text_style.color,
+                        inline: true,
+                        baseline: rendered.baseline,
+                        height: rendered.height,
+                    });
+                    if let Some(extents) =
+                        insert_stroke(engine_view, Stroke::VectorImage(vectorimage))
+                    {
+                        cursor_x += extents[0];
+                        line_extent = line_extent.max((top - line_top) + rendered.height);
+                        line_extent = line_extent.max(extents[1]);
+                    }
+                }
+                Segment::Formula(formula) => {
+                    // A display formula always starts its own block.
+                    line_top += line_extent;
+                    cursor_x = x;
+                    line_extent = line_height;
+
+                    let svg = match crate::formula::render_svg(
+                        &formula.latex,
+                        text_style.font_size,
+                        text_style.color,
+                    ) {
+                        Ok(svg) => svg,
+                        Err(err) => {
+                            error!(
+                                latex = formula.latex,
+                                "Falling back to literal text, rendering the formula failed, Err: {err:?}"
+                            );
+                            let textstroke = TextStroke::new(
+                                formula.raw.clone(),
+                                Vector2::new(cursor_x, line_top),
+                                style.clone(),
+                            );
+                            if let Some(extents) =
+                                insert_stroke(engine_view, Stroke::TextStroke(textstroke))
+                            {
+                                line_extent = line_extent.max(extents[1]);
+                            }
+                            continue;
+                        }
+                    };
+                    let mut vectorimage = match VectorImage::from_svg_str(
+                        &svg,
+                        Vector2::new(x, line_top),
+                        ImageSizeOption::RespectOriginalSize,
+                    ) {
+                        Ok(vectorimage) => vectorimage,
+                        Err(err) => {
+                            error!(
+                                latex = formula.latex,
+                                "Falling back to literal text, parsing the rendered formula failed, Err: {err:?}"
+                            );
+                            let textstroke = TextStroke::new(
+                                formula.raw.clone(),
+                                Vector2::new(cursor_x, line_top),
+                                style.clone(),
+                            );
+                            if let Some(extents) =
+                                insert_stroke(engine_view, Stroke::TextStroke(textstroke))
+                            {
+                                line_extent = line_extent.max(extents[1]);
+                            }
+                            continue;
+                        }
+                    };
+                    vectorimage.formula_src = Some(FormulaSource {
+                        latex: formula.latex.clone(),
+                        font_size: text_style.font_size,
+                        color: text_style.color,
+                        inline: false,
+                        baseline: 0.0,
+                        height: vectorimage.bounds().extents()[1],
+                    });
+                    if let Some(extents) =
+                        insert_stroke(engine_view, Stroke::VectorImage(vectorimage))
+                    {
+                        line_top += extents[1] + block_gap;
+                        cursor_x = x;
+                        line_extent = line_height;
+                    }
+                }
+            }
+        }
+
+        widget_flags.redraw = true;
+        widget_flags
+    }
+
     /// Replace a formula object with a text stroke holding its source, and start editing it.
     ///
     /// Committing the text (clicking away, `Escape`, a new text box) recognizes the formula again.
@@ -1032,7 +1287,11 @@ impl Typewriter {
         text_style.ranged_text_attributes.clear();
         text_style.set_max_width(None);
 
-        let text = format!("\\[{}\\]", formula.latex);
+        let text = if formula.inline {
+            format!("\\({}\\)", formula.latex)
+        } else {
+            format!("\\[{}\\]", formula.latex)
+        };
         let cursor = GraphemeCursor::new(text.len(), text.len(), true);
         let textstroke = TextStroke::new(text, pos, text_style);
 
@@ -1078,7 +1337,7 @@ impl Typewriter {
         let strict = self.formula_origin.is_some();
         let origin = self.formula_origin.take();
 
-        match self.convert_formulas_in_stroke(engine_view, stroke_key, strict) {
+        match self.convert_formulas_in_stroke(engine_view, stroke_key, strict, origin.as_ref()) {
             FormulaConversion::Converted(formula_flags) => {
                 widget_flags |= formula_flags;
             }
@@ -1477,5 +1736,132 @@ mod tests {
         assert_eq!(image_count, 1, "the edited source renders as a formula");
         assert_eq!(text_count, 0, "the source text stroke is gone");
         assert_eq!(latex.as_deref(), Some("x^3"));
+    }
+
+    /// An inline formula flows on the text line between the text runs around it.
+    #[test]
+    fn a_committed_text_box_with_an_inline_formula_flows_on_one_line() {
+        let mut engine = Engine::default();
+        let mut typewriter = Typewriter::default();
+
+        let _ = engine.with_view_mut(|engine_view| {
+            typewriter.insert_text(
+                "before \\(w\\) after".to_string(),
+                Some(Vector2::new(10.0, 10.0)),
+                engine_view,
+            )
+        });
+
+        let (mut texts, images) = engine.with_view_mut(|engine_view| {
+            let mut texts = Vec::new();
+            let mut images = Vec::new();
+            for key in engine_view.store.keys_unordered() {
+                match engine_view.store.get_stroke_ref(key) {
+                    Some(Stroke::TextStroke(textstroke)) => {
+                        texts.push((textstroke.text.clone(), textstroke.bounds().mins));
+                    }
+                    Some(Stroke::VectorImage(vectorimage)) => {
+                        images.push((
+                            vectorimage.formula_src.clone(),
+                            vectorimage.bounds().mins,
+                            vectorimage.bounds().maxs,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            (texts, images)
+        });
+        texts.sort_by(|a, b| a.1[0].total_cmp(&b.1[0]));
+
+        assert_eq!(images.len(), 1, "one inline formula object");
+        assert_eq!(texts.len(), 2, "the text around it stays two runs");
+        let source = images[0].0.as_ref().expect("the object keeps its source");
+        assert!(source.inline, "the formula kept its inline delimiters");
+        assert_eq!(source.latex, "w");
+        assert!(source.baseline > 0.0);
+        assert_eq!(texts[0].0, "before ");
+        assert_eq!(texts[1].0, " after");
+        assert_eq!(
+            texts[0].1[1], texts[1].1[1],
+            "both text runs sit on one line"
+        );
+        assert!(
+            texts[1].1[0] >= images[0].2[0],
+            "the text follows the formula"
+        );
+    }
+
+    /// Double-clicking an inline formula edits its source and commits it back inline.
+    #[test]
+    fn an_inline_formula_edit_keeps_inline_delimiters_and_flow() {
+        let mut engine = Engine::default();
+        let mut typewriter = Typewriter::default();
+
+        let _ = engine.with_view_mut(|engine_view| {
+            typewriter.insert_text(
+                "before \\(w\\) after".to_string(),
+                Some(Vector2::new(10.0, 10.0)),
+                engine_view,
+            )
+        });
+
+        let formula_mins = engine
+            .with_view_mut(|engine_view| {
+                engine_view
+                    .store
+                    .keys_unordered()
+                    .into_iter()
+                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                        Some(Stroke::VectorImage(vectorimage)) => Some(vectorimage.bounds().mins),
+                        _ => None,
+                    })
+            })
+            .expect("the inline formula exists");
+
+        let _ = engine.formula_edit_at(formula_mins);
+
+        let source_text = engine
+            .with_view_mut(|engine_view| {
+                engine_view
+                    .store
+                    .keys_unordered()
+                    .into_iter()
+                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                        Some(Stroke::TextStroke(textstroke)) if textstroke.text.contains("\\(") => {
+                            Some(textstroke.text.clone())
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("the inline formula was replaced by its source");
+        assert_eq!(source_text, "\\(w\\)");
+
+        let _ = engine.handle_pen_event(
+            PenEvent::KeyPressed {
+                keyboard_key: rnote_compose::penevent::KeyboardKey::Escape,
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            Instant::now(),
+        );
+
+        let (inline, baseline) = engine
+            .with_view_mut(|engine_view| {
+                engine_view
+                    .store
+                    .keys_unordered()
+                    .into_iter()
+                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                        Some(Stroke::VectorImage(vectorimage)) => vectorimage
+                            .formula_src
+                            .as_ref()
+                            .map(|source| (source.inline, source.baseline)),
+                        _ => None,
+                    })
+            })
+            .expect("the source renders as a formula again");
+        assert!(inline, "the committed object is still an inline formula");
+        assert!(baseline > 0.0);
     }
 }

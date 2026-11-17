@@ -354,6 +354,9 @@ mod tests {
                 latex: "x^2".into(),
                 font_size: 32.0,
                 color: Color::BLACK,
+                inline: true,
+                baseline: 12.0,
+                height: 20.0,
             }),
             ..Default::default()
         };
@@ -365,5 +368,8 @@ mod tests {
         assert_eq!(formula.latex, "x^2");
         assert_eq!(formula.font_size, 32.0);
         assert_eq!(formula.color, Color::BLACK);
+        assert!(formula.inline);
+        assert_eq!(formula.baseline, 12.0);
+        assert_eq!(formula.height, 20.0);
     }
 }
