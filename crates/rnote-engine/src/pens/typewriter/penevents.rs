@@ -170,8 +170,8 @@ impl Typewriter {
                                     }
                                 }
                             } else {
-                                // If we click outside, reset to idle
-                                self.state = TypewriterState::Idle;
+                                // If we click outside, the session ends and its formulas render.
+                                widget_flags |= self.finish_editing(engine_view);
                                 progress = PenProgress::Finished;
                             }
                         }
@@ -270,8 +270,8 @@ impl Typewriter {
                                     }
                                 }
                             } else {
-                                // If we click outside, reset to idle
-                                self.state = TypewriterState::Idle;
+                                // If we click outside, the session ends and its formulas render.
+                                widget_flags |= self.finish_editing(engine_view);
                                 progress = PenProgress::Finished;
                             }
                         }
@@ -531,15 +531,12 @@ impl Typewriter {
         self.pos = None;
 
         // `Escape` leaves the text input session, the way it leaves editing in any text field.
-        // The text stroke is written key by key, so there is nothing left to commit - dropping to
-        // idle is the whole of it. Without this the canvas keeps the bare tool keys gated out
+        // The text stroke is written key by key, so there is nothing left to cancel: leaving
+        // renders any display formula the session left, and keeps the typed text otherwise.
+        // Without this the canvas keeps the bare tool keys gated out
         // (`is_handling_text_input`) and no key gets the keyboard back from the text box.
         if keyboard_key == KeyboardKey::Escape && !matches!(self.state, TypewriterState::Idle) {
-            if self.formula_origin.is_some() {
-                widget_flags |= self.cancel_formula_edit(engine_view);
-            } else {
-                self.state = TypewriterState::Idle;
-            }
+            widget_flags |= self.finish_editing(engine_view);
 
             return (
                 EventResult {
@@ -1358,38 +1355,34 @@ impl Typewriter {
         _now: Instant,
         engine_view: &mut EngineViewMut,
     ) -> (EventResult<PenProgress>, WidgetFlags) {
-        let widget_flags = WidgetFlags::default();
+        let mut widget_flags = WidgetFlags::default();
         self.pos = None;
 
-        let event_result = match &mut self.state {
-            TypewriterState::Idle => EventResult {
-                handled: false,
-                propagate: EventPropagation::Proceed,
-                progress: PenProgress::Idle,
+        if matches!(self.state, TypewriterState::Idle) {
+            return (
+                EventResult {
+                    handled: false,
+                    propagate: EventPropagation::Proceed,
+                    progress: PenProgress::Idle,
+                },
+                widget_flags,
+            );
+        }
+
+        if let TypewriterState::Modifying { stroke_key, .. } = &self.state {
+            // a translate drag left mid-way must not keep its text in vector preview
+            engine_view.store.set_previewing(&[*stroke_key], false);
+        }
+        widget_flags |= self.finish_editing(engine_view);
+
+        (
+            EventResult {
+                handled: true,
+                propagate: EventPropagation::Stop,
+                progress: PenProgress::Finished,
             },
-            TypewriterState::Modifying { stroke_key, .. } => {
-                // a translate drag left mid-way must not keep its text in vector preview
-                engine_view.store.set_previewing(&[*stroke_key], false);
-                self.state = TypewriterState::Idle;
-
-                EventResult {
-                    handled: true,
-                    propagate: EventPropagation::Stop,
-                    progress: PenProgress::Finished,
-                }
-            }
-            _ => {
-                self.state = TypewriterState::Idle;
-
-                EventResult {
-                    handled: true,
-                    propagate: EventPropagation::Stop,
-                    progress: PenProgress::Finished,
-                }
-            }
-        };
-
-        (event_result, widget_flags)
+            widget_flags,
+        )
     }
 
     pub fn select_closest_word(&mut self, engine_view: &mut EngineViewMut) {

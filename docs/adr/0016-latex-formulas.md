@@ -33,10 +33,10 @@ so the file does not stop opening in older builds, and no format version bump is
 Rendering sits behind the `latex` compile-time feature, implemented with the pure-Rust RaTeX crates
 (`ratex-parser`, `ratex-layout`, `ratex-svg`) and gated behind a spike that the generated SVG
 renders through `librsvg`. Without the feature, recognized delimiters stay literal text. Editing a
-formula shows its source — the box's edit mode is the source editor, commit re-renders, `Esc`
-cancels by restoring the object, and a commit whose TeX fails to render is rejected and restores
-the original object — and copies it as LaTeX `text/plain`, rendered SVG and the stroke-content
-MIME.
+formula shows its source — the box's edit mode is the source editor; clicking away, `Esc`, and
+starting a new text box all re-render it, and a commit whose TeX fails to render is rejected and
+restores the original object — and copies it as LaTeX `text/plain`, rendered SVG and the
+stroke-content MIME.
 
 ## Considered Options
 

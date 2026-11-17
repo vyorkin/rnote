@@ -92,11 +92,7 @@ pub struct Typewriter {
     pos: Option<Vector2>,
     blink_task_handle: Option<crate::tasks::PeriodicTaskHandle>,
     cursor_visible: bool,
-    /// The text stroke being edited, converted for formulas once editing ends.
-    last_edited_key: Option<StrokeKey>,
-    /// Whether the previous `update_state` saw an active text input session.
-    was_editing: bool,
-    /// The formula object a source editor replaced, restored when editing is cancelled.
+    /// The formula object a source editor replaced, restored when a commit fails.
     formula_origin: Option<VectorImage>,
 }
 
@@ -107,8 +103,6 @@ impl Default for Typewriter {
             pos: None,
             blink_task_handle: None,
             cursor_visible: true,
-            last_edited_key: None,
-            was_editing: false,
             formula_origin: None,
         }
     }
@@ -404,43 +398,6 @@ impl PenBehaviour for Typewriter {
                 }
             },
         }
-
-        // A text input session that just ended may have left display formulas in the stroke.
-        let editing_now = matches!(self.state, TypewriterState::Modifying { .. });
-        if editing_now {
-            if let TypewriterState::Modifying { stroke_key, .. } = &self.state {
-                self.last_edited_key = Some(*stroke_key);
-            }
-        } else if self.was_editing {
-            let strict = self.formula_origin.is_some();
-            let origin = self.formula_origin.take();
-            if let Some(stroke_key) = self.last_edited_key.take() {
-                match self.convert_formulas_in_stroke(engine_view, stroke_key, strict) {
-                    FormulaConversion::Converted(formula_flags) => {
-                        widget_flags |= formula_flags;
-                    }
-                    FormulaConversion::NoFormula => {}
-                    FormulaConversion::Failed(err) => {
-                        // A rejected commit leaves the formula as it was.
-                        error!("Rejected the formula commit, rendering it failed, Err: {err:?}");
-                        if let Some(origin) = origin
-                            && let Some(stroke) = engine_view.store.get_stroke_mut(stroke_key)
-                        {
-                            *stroke = Stroke::VectorImage(origin);
-                            engine_view.store.update_geometry_for_stroke(stroke_key);
-                            engine_view.store.regenerate_rendering_for_stroke(
-                                stroke_key,
-                                engine_view.camera.viewport(),
-                                engine_view.camera.image_scale(),
-                            );
-                            widget_flags |= engine_view.store.record(Instant::now());
-                            widget_flags.store_modified = true;
-                        }
-                    }
-                }
-            }
-        }
-        self.was_editing = editing_now;
 
         widget_flags.redraw = true;
 
@@ -1046,7 +1003,6 @@ impl Typewriter {
         widget_flags.redraw = true;
         widget_flags.store_modified = true;
 
-        self.last_edited_key = None;
         self.formula_origin = None;
 
         FormulaConversion::Converted(widget_flags)
@@ -1054,7 +1010,7 @@ impl Typewriter {
 
     /// Replace a formula object with a text stroke holding its source, and start editing it.
     ///
-    /// Committing the text recognizes the formula again; `Escape` restores the original object.
+    /// Committing the text (clicking away, `Escape`, a new text box) recognizes the formula again.
     pub(crate) fn start_editing_formula(
         &mut self,
         engine_view: &mut EngineViewMut,
@@ -1103,27 +1059,48 @@ impl Typewriter {
         widget_flags
     }
 
-    /// Restore the formula object whose source is being edited.
-    pub(crate) fn cancel_formula_edit(&mut self, engine_view: &mut EngineViewMut) -> WidgetFlags {
-        let mut widget_flags = WidgetFlags::default();
-
-        if let (Some(origin), TypewriterState::Modifying { stroke_key, .. }) =
-            (self.formula_origin.take(), &self.state)
-        {
-            if let Some(stroke) = engine_view.store.get_stroke_mut(*stroke_key) {
-                *stroke = Stroke::VectorImage(origin);
-            }
-            engine_view.store.update_geometry_for_stroke(*stroke_key);
-            engine_view.store.regenerate_rendering_for_stroke(
-                *stroke_key,
-                engine_view.camera.viewport(),
-                engine_view.camera.image_scale(),
-            );
-            // No undo entry: the store is back to its last recorded state.
-        }
-
+    /// End the current text input session, rendering the display formulas it left.
+    ///
+    /// This is the commit path shared by clicking away, `Escape` and a cancelled pen: the stroke
+    /// keeps what the user typed, and a formula that fails to typeset falls back to its original
+    /// object instead of destroying it.
+    pub(super) fn finish_editing(&mut self, engine_view: &mut EngineViewMut) -> WidgetFlags {
+        let stroke_key = match &self.state {
+            TypewriterState::Modifying { stroke_key, .. } => Some(*stroke_key),
+            _ => None,
+        };
         self.state = TypewriterState::Idle;
-        self.last_edited_key = None;
+
+        let mut widget_flags = WidgetFlags::default();
+        let Some(stroke_key) = stroke_key else {
+            return widget_flags;
+        };
+        let strict = self.formula_origin.is_some();
+        let origin = self.formula_origin.take();
+
+        match self.convert_formulas_in_stroke(engine_view, stroke_key, strict) {
+            FormulaConversion::Converted(formula_flags) => {
+                widget_flags |= formula_flags;
+            }
+            FormulaConversion::NoFormula => {}
+            FormulaConversion::Failed(err) => {
+                // A rejected commit leaves the formula as it was.
+                error!("Rejected the formula commit, rendering it failed, Err: {err:?}");
+                if let Some(origin) = origin
+                    && let Some(stroke) = engine_view.store.get_stroke_mut(stroke_key)
+                {
+                    *stroke = Stroke::VectorImage(origin);
+                    engine_view.store.update_geometry_for_stroke(stroke_key);
+                    engine_view.store.regenerate_rendering_for_stroke(
+                        stroke_key,
+                        engine_view.camera.viewport(),
+                        engine_view.camera.image_scale(),
+                    );
+                    widget_flags |= engine_view.store.record(Instant::now());
+                    widget_flags.store_modified = true;
+                }
+            }
+        }
         widget_flags.redraw = true;
 
         widget_flags
@@ -1298,6 +1275,7 @@ fn play_sound(
 mod tests {
     use super::*;
     use crate::engine::Engine;
+    use rnote_compose::penpath::Element;
     use std::collections::HashSet;
 
     /// A text box pasted with a display formula is split, its formula carrying the source.
@@ -1337,9 +1315,9 @@ mod tests {
         assert_eq!(formula_sources[0].latex, "x^2");
     }
 
-    /// Double-pressing a formula opens its source; `Escape` puts the object back.
+    /// Double-pressing a formula opens its source; `Escape` commits it and renders the new source.
     #[test]
-    fn editing_a_formula_and_cancelling_restores_the_object() {
+    fn editing_a_formula_and_escape_renders_the_edited_source() {
         let mut engine = Engine::default();
         let mut typewriter = Typewriter::default();
 
@@ -1369,19 +1347,22 @@ mod tests {
         let flags = engine.formula_edit_at(formula_pos);
         assert!(flags.redraw);
 
-        let edited_text = engine
-            .with_view_mut(|engine_view| {
-                engine_view
-                    .store
-                    .keys_unordered()
-                    .into_iter()
-                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
-                        Some(Stroke::TextStroke(textstroke)) => Some(textstroke.text.clone()),
-                        _ => None,
-                    })
-            })
-            .expect("the formula was replaced by its source");
-        assert_eq!(edited_text, "\\[x^2\\]");
+        engine.with_view_mut(|engine_view| {
+            let key = engine_view
+                .store
+                .keys_unordered()
+                .into_iter()
+                .find(|key| {
+                    matches!(
+                        engine_view.store.get_stroke_ref(*key),
+                        Some(Stroke::TextStroke(_))
+                    )
+                })
+                .expect("the formula was replaced by its source");
+            if let Some(Stroke::TextStroke(textstroke)) = engine_view.store.get_stroke_mut(key) {
+                textstroke.text = "\\[x^3\\]".to_string();
+            }
+        });
 
         let (_, flags) = engine.handle_pen_event(
             PenEvent::KeyPressed {
@@ -1393,19 +1374,108 @@ mod tests {
         );
         assert!(flags.redraw);
 
-        let restored = engine.with_view_mut(|engine_view| {
-            engine_view
+        let (image_count, text_count, latex) = engine.with_view_mut(|engine_view| {
+            let mut image_count = 0;
+            let mut text_count = 0;
+            let mut latex = None;
+            for key in engine_view.store.keys_unordered() {
+                match engine_view.store.get_stroke_ref(key) {
+                    Some(Stroke::VectorImage(vectorimage)) => {
+                        image_count += 1;
+                        latex = vectorimage
+                            .formula_src
+                            .as_ref()
+                            .map(|source| source.latex.clone());
+                    }
+                    Some(Stroke::TextStroke(_)) => text_count += 1,
+                    _ => {}
+                }
+            }
+            (image_count, text_count, latex)
+        });
+        assert_eq!(image_count, 1, "the edited source renders as a formula");
+        assert_eq!(text_count, 0, "the source text stroke is gone");
+        assert_eq!(latex.as_deref(), Some("x^3"));
+    }
+
+    /// Clicking outside the edited source commits it, the way `Escape` does.
+    #[test]
+    fn clicking_outside_an_edited_formula_renders_the_edited_source() {
+        let mut engine = Engine::default();
+        let mut typewriter = Typewriter::default();
+
+        let _ = engine.with_view_mut(|engine_view| {
+            typewriter.insert_text(
+                "\\[x^2\\]".to_string(),
+                Some(Vector2::new(10.0, 10.0)),
+                engine_view,
+            )
+        });
+
+        let formula_pos = engine
+            .with_view_mut(|engine_view| {
+                engine_view
+                    .store
+                    .keys_unordered()
+                    .into_iter()
+                    .find_map(|key| match engine_view.store.get_stroke_ref(key) {
+                        Some(Stroke::VectorImage(vectorimage)) => {
+                            Some(vectorimage.bounds().mins + vectorimage.bounds().extents() * 0.5)
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("the formula stroke exists");
+
+        let _ = engine.formula_edit_at(formula_pos);
+
+        engine.with_view_mut(|engine_view| {
+            let key = engine_view
                 .store
                 .keys_unordered()
                 .into_iter()
-                .filter(|key| {
+                .find(|key| {
                     matches!(
                         engine_view.store.get_stroke_ref(*key),
-                        Some(Stroke::VectorImage(_))
+                        Some(Stroke::TextStroke(_))
                     )
                 })
-                .count()
+                .expect("the formula was replaced by its source");
+            if let Some(Stroke::TextStroke(textstroke)) = engine_view.store.get_stroke_mut(key) {
+                textstroke.text = "\\[x^3\\]".to_string();
+            }
         });
-        assert_eq!(restored, 1, "the original formula object is back");
+
+        let _ = engine.handle_pen_event(
+            PenEvent::Down {
+                element: Element::new(Vector2::new(5000.0, 5000.0), Element::PRESSURE_DEFAULT),
+                modifier_keys: HashSet::new(),
+            },
+            None,
+            Instant::now(),
+        );
+
+        let (image_count, text_count, latex) = engine.with_view_mut(|engine_view| {
+            let mut image_count = 0;
+            let mut text_count = 0;
+            let mut latex = None;
+            for key in engine_view.store.keys_unordered() {
+                match engine_view.store.get_stroke_ref(key) {
+                    Some(Stroke::VectorImage(vectorimage)) => {
+                        image_count += 1;
+                        latex = vectorimage
+                            .formula_src
+                            .as_ref()
+                            .map(|source| source.latex.clone());
+                    }
+                    Some(Stroke::TextStroke(_)) => text_count += 1,
+                    _ => {}
+                }
+            }
+            (image_count, text_count, latex)
+        });
+        assert_eq!(image_count, 1, "the edited source renders as a formula");
+        assert_eq!(text_count, 0, "the source text stroke is gone");
+        assert_eq!(latex.as_deref(), Some("x^3"));
     }
 }
